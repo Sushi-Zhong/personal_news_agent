@@ -218,6 +218,22 @@ CREATE TABLE IF NOT EXISTS notifications (
   read_at TEXT,
   created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS pna_topics (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  topic_type TEXT NOT NULL DEFAULT 'user',
+  category_scope_json TEXT,
+  source_scope_json TEXT,
+  watch_keywords_json TEXT,
+  refresh_schedule TEXT NOT NULL DEFAULT '*/20 * * * *',
+  task_id TEXT,
+  status TEXT DEFAULT 'active',
+  last_refresh_at TEXT,
+  created_at TEXT,
+  updated_at TEXT,
+  UNIQUE(user_id, title, topic_type)
+);
 CREATE TABLE IF NOT EXISTS reports (
   id TEXT PRIMARY KEY,
   user_id TEXT,
@@ -1027,6 +1043,85 @@ class NewsStore:
             ).fetchone()
         return _notification_row(row) if row else None
 
+    def upsert_topic(self, topic: dict[str, Any]) -> dict[str, Any]:
+        now = _now()
+        topic_id = topic.get("id") or stable_id("topic", f"{topic.get('user_id')}:{topic.get('topic_type', 'user')}:{topic['title']}")
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO pna_topics(
+                  id, user_id, title, topic_type, category_scope_json, source_scope_json,
+                  watch_keywords_json, refresh_schedule, task_id, status, last_refresh_at,
+                  created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, title, topic_type) DO UPDATE SET
+                  category_scope_json=excluded.category_scope_json,
+                  source_scope_json=excluded.source_scope_json,
+                  watch_keywords_json=excluded.watch_keywords_json,
+                  refresh_schedule=excluded.refresh_schedule,
+                  task_id=COALESCE(excluded.task_id, pna_topics.task_id),
+                  status=excluded.status,
+                  last_refresh_at=COALESCE(excluded.last_refresh_at, pna_topics.last_refresh_at),
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    topic_id,
+                    topic.get("user_id", "default"),
+                    topic["title"],
+                    topic.get("topic_type", "user"),
+                    json.dumps(topic.get("category_scope", []), ensure_ascii=False),
+                    json.dumps(topic.get("source_scope", []), ensure_ascii=False),
+                    json.dumps(topic.get("watch_keywords", []), ensure_ascii=False),
+                    topic.get("refresh_schedule", "*/20 * * * *"),
+                    topic.get("task_id"),
+                    topic.get("status", "active"),
+                    topic.get("last_refresh_at"),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM pna_topics WHERE user_id = ? AND title = ? AND topic_type = ?",
+                (topic.get("user_id", "default"), topic["title"], topic.get("topic_type", "user")),
+            ).fetchone()
+        return _topic_row(row)
+
+    def update_topic_task(self, topic_id: str, task_id: str | None = None, last_refresh_at: str | None = None) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE pna_topics
+                SET task_id = COALESCE(?, task_id), last_refresh_at = COALESCE(?, last_refresh_at), updated_at = ?
+                WHERE id = ?
+                """,
+                (task_id, last_refresh_at, _now(), topic_id),
+            )
+            row = conn.execute("SELECT * FROM pna_topics WHERE id = ?", (topic_id,)).fetchone()
+        return _topic_row(row) if row else None
+
+    def list_topics(self, user_id: str | None = None, topic_type: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        clauses = ["status = 'active'"]
+        params: list[Any] = []
+        if user_id:
+            clauses.append("(user_id = ? OR topic_type = 'system')")
+            params.append(user_id)
+        if topic_type:
+            clauses.append("topic_type = ?")
+            params.append(topic_type)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM pna_topics
+                WHERE {' AND '.join(clauses)}
+                ORDER BY CASE topic_type WHEN 'user' THEN 0 ELSE 1 END, updated_at DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [_topic_row(row) for row in rows]
+
     def log(self, operation: str, status: str, target: str | None = None, detail: dict[str, Any] | None = None) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -1128,6 +1223,15 @@ def _task_row(row: sqlite3.Row) -> dict[str, Any]:
     data["category_scope"] = json.loads(data.pop("category_scope_json") or "[]")
     data["source_scope"] = json.loads(data.pop("source_scope_json") or "[]")
     data["enabled"] = bool(data["enabled"])
+    return data
+
+
+def _topic_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["category_scope"] = json.loads(data.pop("category_scope_json") or "[]")
+    data["source_scope"] = json.loads(data.pop("source_scope_json") or "[]")
+    data["watch_keywords"] = json.loads(data.pop("watch_keywords_json") or "[]")
+    data["enabled"] = data.get("status") == "active"
     return data
 
 

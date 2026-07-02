@@ -234,3 +234,49 @@ def test_api_chat_report_and_task_flow():
         due = client.post("/api/tasks/due/run", json={"user_id": due_user_id, "limit": 3})
         assert due.status_code == 200
         assert due.json()["ran_count"] == 1
+
+
+def test_topic_agent_creates_user_topic_and_chat_tracking():
+    with TestClient(app) as client:
+        user_id = f"topic_user_{uuid4().hex[:8]}"
+        listed = client.get(f"/api/topics?user_id={user_id}&limit=20")
+        assert listed.status_code == 200
+        assert any(item["topic_type"] == "system" and "世界杯" in item["title"] for item in listed.json()["items"])
+
+        created = client.post(
+            "/api/topics",
+            json={
+                "user_id": user_id,
+                "text": "我想做一个关于阿根廷队世界杯表现的主题，并帮我持续更新",
+                "refresh_now": False,
+            },
+        )
+        assert created.status_code == 200
+        body = created.json()
+        assert body["topic"]["title"] == "阿根廷队世界杯表现"
+        assert body["topic"]["topic_type"] == "user"
+        assert "sports" in body["topic"]["category_scope"]
+        assert body["task"]["task_type"] == "topic_tracking"
+
+        topics = client.get(f"/api/topics?user_id={user_id}&limit=20")
+        assert any(item["title"] == "阿根廷队世界杯表现" for item in topics.json()["items"])
+
+        topic_agent = client.app.state.services["topic_agent"]
+        original_ingestion = topic_agent.native_ingestion
+        topic_agent.native_ingestion = None
+        try:
+            chat = client.post(
+                "/api/chat",
+                json={
+                    "conversation_id": "topic_agent_conv",
+                    "user_id": user_id,
+                    "message": "我想做一个关于阿根廷队世界杯表现的主题，并帮我持续更新",
+                },
+            )
+        finally:
+            topic_agent.native_ingestion = original_ingestion
+        assert chat.status_code == 200
+        payload = chat.json()
+        assert payload["context_relation"] == "topic_agent_created"
+        assert "已创建主题「阿根廷队世界杯表现」" in payload["answer"]
+        assert payload["focus_object"]["text"] == "阿根廷队世界杯表现"

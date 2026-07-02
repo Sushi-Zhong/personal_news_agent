@@ -3,6 +3,12 @@ const mobileState = {
   topic: "张雪机车",
   categoryScope: [],
 };
+const mobileBootstrapTopics = [
+  { title: "张雪机车", category_scope: ["sports"], topic_type: "user" },
+  { title: "SpaceX IPO 传闻", category_scope: ["tech", "economy"], topic_type: "system" },
+  { title: "2026 世界杯开幕", category_scope: ["sports"], topic_type: "system" },
+  { title: "AI 终端设备", category_scope: ["tech"], topic_type: "user" },
+];
 syncMobileChatContext();
 syncMobileSessionState();
 
@@ -16,7 +22,8 @@ document.querySelectorAll("[data-auth-mode-target]").forEach((button) => {
 });
 
 async function refreshMobile() {
-  await Promise.all([loadFeed(mobileCategory, 8), loadEvents("#events", mobileCategory, 5), loadTaskNotifications()]);
+  await Promise.all([loadFeed(mobileCategory, 8), loadEvents("#events", mobileCategory, 5), loadTaskNotifications(), loadMobileTopics()]);
+  updateMobileBrief();
 }
 
 document.querySelectorAll("#mobileTabs button").forEach((button) => {
@@ -96,6 +103,7 @@ document.querySelector("#chatForm").addEventListener("submit", async (event) => 
   const message = input.value.trim();
   if (!message) return;
   await handleMobileAssistantInput(message);
+  await loadMobileTopics();
   input.value = "";
 });
 
@@ -108,6 +116,21 @@ document.querySelector("#editProfileMobile").addEventListener("click", async () 
 document.querySelector("#enableBrowserPushMobile")?.addEventListener("click", async () => {
   await enableBrowserNotifications();
   await loadTaskNotifications();
+  updateMobileBrief();
+});
+
+document.querySelectorAll("[data-mobile-action]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const action = button.dataset.mobileAction;
+    if (action === "brief") {
+      await sendChat("基于我的兴趣和当前推荐，给我一版今日简报。");
+    } else if (action === "deep") {
+      await sendChat(`围绕${mobileState.topic}做一次深度挖掘，按最新进展、关键主体和不确定性总结。`);
+    } else if (action === "track") {
+      await createMobileTrackingTask();
+    }
+    updateMobileBrief();
+  });
 });
 
 bindAskButtons();
@@ -144,19 +167,12 @@ async function handleMobileAssistantInput(message) {
     }
     if (["task", "track"].includes(command.name)) {
       applyMobileTopicCommand(command);
-      const result = await request("/api/tasks", {
-        method: "POST",
-        body: JSON.stringify({
-          user_id: activeUserId,
-          task_type: commandArg(command, "type") || "topic_tracking",
-          schedule: commandArg(command, "every", "schedule", "cron") || "*/20 * * * *",
-          category_scope: mobileState.categoryScope,
-          topics: [mobileState.topic],
-          output_style: "事件线+关系网",
-          delivery_channel: commandArg(command, "push", "channel", "delivery") || "in_app",
-        }),
+      const result = await createMobileTrackingTask({
+        taskType: commandArg(command, "type"),
+        schedule: commandArg(command, "every", "schedule", "cron"),
+        delivery: commandArg(command, "push", "channel", "delivery"),
+        silent: true,
       });
-      await loadTaskNotifications();
       setAssistantTurnText(assistantNode, `已保存跟踪：${mobileState.topic}`);
       return result;
     }
@@ -177,6 +193,55 @@ async function handleMobileAssistantInput(message) {
   }
 }
 
+async function loadMobileTopics() {
+  const target = document.querySelector("[data-mobile-topic-list]");
+  if (!target) return;
+  try {
+    const remote = activeUserId && activeUserId !== "default"
+      ? await request(`/api/topics?user_id=${encodeURIComponent(activeUserId)}&limit=10`)
+      : { items: [] };
+    const items = mergeMobileTopics([...(remote.items || []), ...mobileBootstrapTopics]).slice(0, 8);
+    target.innerHTML = items
+      .map((item) => `<button type="button" class="${item.topic_type === "system" ? "system-topic" : "user-topic"}" data-mobile-topic="${escapeHtml(item.title)}" data-category-scope="${escapeHtml((item.category_scope || []).join(","))}">${escapeHtml(shortMobileTopic(item.title))}</button>`)
+      .join("");
+    bindMobileTopicButtons();
+  } catch (error) {
+    target.innerHTML = mobileBootstrapTopics
+      .map((item) => `<button type="button" data-mobile-topic="${escapeHtml(item.title)}" data-category-scope="${escapeHtml((item.category_scope || []).join(","))}">${escapeHtml(shortMobileTopic(item.title))}</button>`)
+      .join("");
+    bindMobileTopicButtons();
+  }
+}
+
+function bindMobileTopicButtons() {
+  document.querySelectorAll("[data-mobile-topic]").forEach((button) => {
+    if (button.dataset.bound === "true") return;
+    button.dataset.bound = "true";
+    button.addEventListener("click", async () => {
+      document.querySelectorAll("[data-mobile-topic]").forEach((item) => item.classList.toggle("active", item === button));
+      mobileState.topic = button.dataset.mobileTopic || mobileState.topic;
+      mobileState.categoryScope = parseScope(button.dataset.categoryScope || "");
+      mobileCategory = mobileState.categoryScope[0] || mobileCategory;
+      syncMobileTabs();
+      syncMobileChatContext();
+      await sendChat(`${mobileState.topic} 最近有什么值得关注的变化？`);
+    });
+  });
+}
+
+function mergeMobileTopics(items) {
+  const seen = new Set();
+  return items.filter((item) => {
+    if (!item.title || seen.has(item.title)) return false;
+    seen.add(item.title);
+    return true;
+  });
+}
+
+function shortMobileTopic(title) {
+  return title.replace("传闻", "").replace("2026 ", "").replace("的影响", "").trim();
+}
+
 function applyMobileTopicCommand(command) {
   const topic = commandText(command) || commandArg(command, "topic", "q", "query");
   const scope = commandScope(command, mobileState.categoryScope);
@@ -193,6 +258,7 @@ function syncMobileChatContext() {
     category_scope: mobileState.categoryScope,
     use_llm: true,
   };
+  updateMobileBrief();
 }
 
 function syncMobileTabs() {
@@ -207,4 +273,36 @@ function syncMobileSessionState() {
   document.body.classList.toggle("mobile-logged-out", !loggedIn);
   const account = document.querySelector(".auth-card details");
   if (account) account.open = !loggedIn;
+}
+
+async function createMobileTrackingTask(options = {}) {
+  const result = await request("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify({
+      user_id: activeUserId,
+      task_type: options.taskType || "topic_tracking",
+      schedule: options.schedule || "*/20 * * * *",
+      category_scope: mobileState.categoryScope,
+      topics: [mobileState.topic],
+      output_style: "事件线+关系网",
+      delivery_channel: options.delivery || "in_app",
+    }),
+  });
+  await loadTaskNotifications();
+  updateMobileBrief();
+  if (!options.silent) {
+    appendLocalTurn("assistant", `已保存跟踪：${mobileState.topic}`);
+  }
+  return result;
+}
+
+function updateMobileBrief() {
+  const topic = document.querySelector("[data-mobile-brief-topic]");
+  const feedCount = document.querySelector("[data-mobile-feed-count]");
+  const eventCount = document.querySelector("[data-mobile-event-count]");
+  const trackCount = document.querySelector("[data-mobile-track-count]");
+  if (topic) topic.textContent = mobileState.topic || "今日资讯";
+  if (feedCount) feedCount.textContent = String(document.querySelectorAll("#feed .item").length);
+  if (eventCount) eventCount.textContent = String(document.querySelectorAll("#events .item").length);
+  if (trackCount) trackCount.textContent = String(document.querySelectorAll("[data-notifications] article").length);
 }

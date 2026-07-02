@@ -19,6 +19,12 @@ const consoleState = {
   view: "event-line",
   topicPayload: null,
 };
+const bootstrapTopics = [
+  { title: "张雪机车", category_scope: ["sports"], topic_type: "user" },
+  { title: "NBA 总决赛", category_scope: ["sports"], topic_type: "user" },
+  { title: "俄乌战争对农作物的影响", category_scope: ["politics", "economy"], topic_type: "user" },
+  { title: "AI 终端设备", category_scope: ["tech"], topic_type: "user" },
+];
 syncChatContext();
 syncContextDock();
 
@@ -92,20 +98,7 @@ document.querySelectorAll("[data-action]").forEach((button) => {
   });
 });
 
-document.querySelectorAll(".topic-card").forEach((button) => {
-  button.addEventListener("click", async () => {
-    document.querySelectorAll(".topic-card").forEach((item) => item.classList.toggle("active", item === button));
-    consoleState.topic = button.dataset.topicTitle || button.textContent.trim();
-    consoleState.categoryScope = parseScope(button.dataset.categoryScope || "");
-    syncChatContext();
-    syncContextDock();
-    document.querySelector("#topicInput").value = consoleState.topic;
-    document.querySelector("#categoryScope").value = button.dataset.categoryScope || "";
-    syncTaskTopic();
-    await loadTopicView();
-    await loadDueUrls();
-  });
-});
+bindTopicCards();
 
 document.querySelectorAll("[data-topic-view]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -122,6 +115,7 @@ document.querySelector("#chatForm")?.addEventListener("submit", async (event) =>
   const message = input.value.trim();
   if (!message) return;
   await handleAssistantInput(message);
+  await loadTopics();
   input.value = "";
 });
 
@@ -139,7 +133,7 @@ refreshWeb();
 
 async function refreshWeb() {
   setStatus("正在刷新数据。");
-  await Promise.all([loadSystemStatus(), loadSourceSummary(), loadFeedAndEvents(), loadDueUrls(), loadTasks(), loadTaskNotifications()]);
+  await Promise.all([loadSystemStatus(), loadSourceSummary(), loadFeedAndEvents(), loadDueUrls(), loadTasks(), loadTaskNotifications(), loadTopics()]);
   await loadTopicView();
   setStatus("已更新。");
 }
@@ -262,6 +256,7 @@ async function loadSourceSummary() {
 async function loadFeedAndEvents() {
   const category = document.querySelector("#feedCategory")?.value || "";
   await Promise.all([loadFeed(category, 8, "#feed"), loadEvents("#events", category, 6)]);
+  wireTitleEntryPrompts();
 }
 
 async function loadDueUrls() {
@@ -271,6 +266,23 @@ async function loadDueUrls() {
     renderDueUrls(data.items || []);
   } catch (error) {
     document.querySelector("[data-due-urls]").textContent = error.message;
+  }
+}
+
+async function loadTopics() {
+  const target = document.querySelector("[data-topic-list]");
+  if (!target || !activeUserId || activeUserId === "default") {
+    bindTopicCards();
+    return;
+  }
+  try {
+    const data = await request(`/api/topics?user_id=${encodeURIComponent(activeUserId)}&limit=16`);
+    const items = mergeTopics([...(data.items || []), ...bootstrapTopics]);
+    if (!items.length) return;
+    target.innerHTML = items.map((item) => topicButtonHtml(item)).join("");
+    bindTopicCards();
+  } catch (error) {
+    bindTopicCards();
   }
 }
 
@@ -400,6 +412,57 @@ function renderTasks(items) {
     .join("");
 }
 
+function bindTopicCards() {
+  document.querySelectorAll(".topic-card").forEach((button) => {
+    if (button.dataset.bound === "true") return;
+    button.dataset.bound = "true";
+    button.addEventListener("click", async () => {
+      document.querySelectorAll(".topic-card").forEach((item) => item.classList.toggle("active", item === button));
+      const previousTopic = consoleState.topic;
+      consoleState.topic = button.dataset.topicTitle || button.textContent.trim();
+      consoleState.categoryScope = parseScope(button.dataset.categoryScope || "");
+      syncChatContext();
+      syncContextDock();
+      document.querySelector("#topicInput").value = consoleState.topic;
+      document.querySelector("#categoryScope").value = button.dataset.categoryScope || "";
+      syncTaskTopic();
+      await loadTopicView();
+      await loadDueUrls();
+      if (previousTopic !== consoleState.topic) {
+        await sendChat(`${consoleState.topic} 最近有什么值得关注的变化？`);
+      }
+    });
+  });
+}
+
+function mergeTopics(items) {
+  const seen = new Set();
+  const merged = [];
+  items.forEach((item) => {
+    const title = item.title || "";
+    if (!title || seen.has(title)) return;
+    seen.add(title);
+    merged.push(item);
+  });
+  return merged;
+}
+
+function topicButtonHtml(item) {
+  const title = item.title || "";
+  const scope = (item.category_scope || []).join(",");
+  const active = title === consoleState.topic ? " active" : "";
+  const kind = item.topic_type === "system" ? " system-topic" : " user-topic";
+  return `<button class="topic-card${kind}${active}" data-topic-title="${escapeAttr(title)}" data-category-scope="${escapeAttr(scope)}">${escapeHtml(shortTopicTitle(title))}</button>`;
+}
+
+function shortTopicTitle(title) {
+  return title
+    .replace("传闻", "")
+    .replace("2026 ", "")
+    .replace("的影响", "")
+    .trim();
+}
+
 function taskTypeLabel(value) {
   const labels = {
     topic_tracking: "专题跟踪",
@@ -459,7 +522,7 @@ function renderTopicHeader(payload) {
   const nodes = payload.relation_graph?.nodes || [];
   const articles = payload.source_articles || [];
   const latest = events[events.length - 1];
-  document.querySelector("[data-topic-title]").textContent = payload.topic?.title || consoleState.topic;
+  document.querySelector("[data-topic-heading]").textContent = payload.topic?.title || consoleState.topic;
   document.querySelector("[data-dialog-context]").textContent = `${payload.topic?.title || consoleState.topic} · ${articles.length || payload.build?.article_count || 0} 条证据，${events.length} 个事件。`;
   document.querySelector("[data-topic-summary]").textContent = latest
     ? `${latest.date} · ${latest.title}`
@@ -468,6 +531,7 @@ function renderTopicHeader(payload) {
   document.querySelector("[data-topic-event-count]").textContent = events.length;
   document.querySelector("[data-topic-node-count]").textContent = nodes.length;
   syncContextDock();
+  updateAgentBrief(payload);
 }
 
 function renderTopicVisual(payload, viewType = "event-line") {
@@ -618,11 +682,48 @@ function syncContextDock() {
   if (topic) topic.textContent = consoleState.topic;
   if (category) category.textContent = consoleState.categoryScope.join(" / ") || "all";
   if (view) view.textContent = consoleState.view === "relation-graph" ? "关系网" : "事件线";
+  updateAgentBrief(consoleState.topicPayload);
+}
+
+function updateAgentBrief(payload) {
+  const topic = document.querySelector("[data-agent-topic]");
+  const category = document.querySelector("[data-agent-category]");
+  const evidence = document.querySelector("[data-agent-evidence]");
+  const next = document.querySelector("[data-agent-next]");
+  const articles = payload?.source_articles || [];
+  const events = payload?.event_line?.items || [];
+  if (topic) topic.textContent = consoleState.topic;
+  if (category) category.textContent = consoleState.categoryScope.join(" / ") || "all";
+  if (evidence) evidence.textContent = String(articles.length || payload?.build?.article_count || 0);
+  if (next) next.textContent = events.length >= 3 ? "报告" : "深挖";
 }
 
 function setStatus(message) {
   const target = document.querySelector("[data-command-status]");
   if (target) target.textContent = message;
+}
+
+function wireTitleEntryPrompts() {
+  document.querySelectorAll("#feed .item, #events .item").forEach((item) => {
+    if (item.dataset.wiredAsk === "1") return;
+    const title = item.querySelector(".title")?.textContent?.trim();
+    if (!title) return;
+    item.dataset.wiredAsk = "1";
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.setAttribute("aria-label", `在对话中查看：${title}`);
+    const ask = item.closest("#events")
+      ? `围绕热点事件“${title}”展开，告诉我发生了什么、为什么重要、后续看什么。`
+      : `基于资讯“${title}”继续深挖，给我结论、证据和后续观察点。`;
+    const run = () => sendChat(ask);
+    item.addEventListener("click", run);
+    item.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        run();
+      }
+    });
+  });
 }
 
 function shortLabel(value, maxLength) {

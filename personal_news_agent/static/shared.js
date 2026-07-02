@@ -291,6 +291,7 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   targetNode.classList.add("chat-stream");
   const payload = {
     conversation_id: conversationId,
+    user_id: activeUserId || "default",
     message,
     topic: chatContext.topic || null,
     category_scope: chatContext.category_scope || null,

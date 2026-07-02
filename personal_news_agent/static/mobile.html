@@ -15,16 +15,34 @@
       <a href="/web">Web</a>
     </header>
     <main class="mobile-layout">
+      <section class="mobile-card mobile-today-card">
+        <div class="mobile-brief-title">
+          <span>今日</span>
+          <strong data-mobile-brief-topic>张雪机车</strong>
+        </div>
+        <div class="mobile-brief-metrics" aria-label="今日简报指标">
+          <article><strong data-mobile-feed-count>--</strong><span>推荐</span></article>
+          <article><strong data-mobile-event-count>--</strong><span>热点</span></article>
+          <article><strong data-mobile-track-count>--</strong><span>跟踪</span></article>
+        </div>
+        <div class="mobile-topic-strip" data-mobile-topic-list></div>
+        <div class="mobile-brief-actions">
+          <button type="button" data-mobile-action="brief">简报</button>
+          <button type="button" class="secondary-button" data-mobile-action="deep">深挖</button>
+          <button type="button" class="secondary-button" data-mobile-action="track">跟踪</button>
+        </div>
+      </section>
+
       <section class="mobile-card mobile-agent-card">
         <div class="mobile-card-head">
-          <h2>对话</h2>
-          <button type="button" class="secondary-button" data-command="/search 张雪机车 --cat sports">源搜索</button>
+          <h2>Agent</h2>
+          <button type="button" class="secondary-button" data-command="/search 张雪机车 --cat sports">抓取</button>
         </div>
         <div id="messages" class="messages mobile-messages chat-stream">
-          <article class="chat-turn chat-assistant"><div class="chat-bubble">今天想看什么？</div></article>
+          <article class="chat-turn chat-assistant"><div class="chat-bubble">今日内容已准备，可以点一条资讯继续深挖，或把当前专题加入跟踪。</div></article>
         </div>
         <form id="chatForm" class="mobile-chat">
-          <input id="message" placeholder="问新闻、追专题，或输入 /search 张雪机车" />
+          <input id="message" placeholder="继续问：影响谁？后续看什么？" />
           <button>发</button>
         </form>
       </section>

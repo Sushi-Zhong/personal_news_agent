@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from personal_news_agent.core.models import NormalizedArticle
+from personal_news_agent.core.models import NormalizedArticle, SectionConfig, SourceConfig
 from personal_news_agent.services.search_index import ArticleSearchIndex
 from personal_news_agent.services.source_adapter import ListPageAdapter
 from personal_news_agent.services.source_registry import SourceRegistryService
@@ -24,29 +24,16 @@ class CrawlScheduler:
             for section in source.sections:
                 if section.category != category or not section.crawl_enabled:
                     continue
-                try:
-                    links = await adapter.crawl_section(section.key, per_section_limit)
-                    self.url_store.upsert_links(source, section.key, section.category, links)
-                    saved = 0
-                    for link in links:
-                        try:
-                            raw = await adapter.fetch_article(link.url)
-                            normalized = adapter.normalize_article(raw, section.key, section.category)
-                            await self._save_article(normalized, source.crawl_interval_minutes)
-                            saved += 1
-                            if saved >= fetch_articles:
-                                break
-                        except Exception as exc:
-                            self.url_store.mark_fetch_error(link.url, str(exc), source.crawl_interval_minutes)
-                            self.store.log("fetch_article", "error", link.url, {"error": str(exc)})
-                    self.store.mark_section_crawled(source.source_id, section.key)
-                    self.url_store.mark_fetch_ok(section.url, interval_minutes=source.crawl_interval_minutes)
-                    results.append({"source_id": source.source_id, "section_key": section.key, "links": len(links), "saved": saved, "tags": list(source.tags)})
-                    self.store.log("crawl_section", "ok", f"{source.source_id}:{section.key}", {"links": len(links), "saved": saved})
-                except Exception as exc:
-                    self.url_store.mark_fetch_error(section.url, str(exc), source.crawl_interval_minutes)
-                    results.append({"source_id": source.source_id, "section_key": section.key, "error": str(exc)})
-                    self.store.log("crawl_section", "error", f"{source.source_id}:{section.key}", {"error": str(exc)})
+                results.append(
+                    await self._crawl_section(
+                        adapter=adapter,
+                        source=source,
+                        section=section,
+                        operation="crawl_section",
+                        per_section_limit=per_section_limit,
+                        fetch_articles=fetch_articles,
+                    )
+                )
         return {"category": category, "results": results}
 
     def due_plan(self, category: str | None = None, limit: int = 50) -> dict:
@@ -69,31 +56,18 @@ class CrawlScheduler:
             if not section:
                 continue
             adapter = ListPageAdapter(source)
-            try:
-                links = await adapter.crawl_section(section.key, per_section_limit)
-                self.url_store.upsert_links(source, section.key, section.category, links)
-                saved = 0
-                for link in links:
-                    try:
-                        raw = await adapter.fetch_article(link.url)
-                        normalized = adapter.normalize_article(raw, section.key, section.category)
-                        await self._save_article(normalized, source.crawl_interval_minutes)
-                        saved += 1
-                        if saved >= fetch_articles:
-                            break
-                    except Exception as exc:
-                        self.url_store.mark_fetch_error(link.url, str(exc), source.crawl_interval_minutes)
-                        self.store.log("fetch_article", "error", link.url, {"error": str(exc)})
-                self.store.mark_section_crawled(source.source_id, section.key)
-                self.url_store.mark_fetch_ok(section.url, interval_minutes=source.crawl_interval_minutes)
-                result = {"source_id": source.source_id, "section_key": section.key, "category": section.category, "links": len(links), "saved": saved, "tags": list(source.tags)}
-                self.store.log("crawl_due_section", "ok", f"{source.source_id}:{section.key}", result)
-                results.append(result)
-            except Exception as exc:
-                self.url_store.mark_fetch_error(section.url, str(exc), source.crawl_interval_minutes)
-                result = {"source_id": source.source_id, "section_key": section.key, "category": section.category, "error": str(exc), "tags": list(source.tags)}
-                self.store.log("crawl_due_section", "error", f"{source.source_id}:{section.key}", result)
-                results.append(result)
+            results.append(
+                await self._crawl_section(
+                    adapter=adapter,
+                    source=source,
+                    section=section,
+                    operation="crawl_due_section",
+                    per_section_limit=per_section_limit,
+                    fetch_articles=fetch_articles,
+                    include_category=True,
+                    include_error_tags=True,
+                )
+            )
         return {
             "category": category,
             "planned_sections": len(due_sections),
@@ -116,6 +90,48 @@ class CrawlScheduler:
             await self.search_index.index_article(article.__dict__)
         except Exception as exc:
             self.store.log("index_article", "error", article.id, {"error": str(exc), "url": article.url})
+
+    async def _crawl_section(
+        self,
+        adapter: ListPageAdapter,
+        source: SourceConfig,
+        section: SectionConfig,
+        operation: str,
+        per_section_limit: int,
+        fetch_articles: int,
+        include_category: bool = False,
+        include_error_tags: bool = False,
+    ) -> dict:
+        base = {"source_id": source.source_id, "section_key": section.key}
+        if include_category:
+            base["category"] = section.category
+        try:
+            links = await adapter.crawl_section(section.key, per_section_limit)
+            self.url_store.upsert_links(source, section.key, section.category, links)
+            saved = 0
+            for link in links:
+                try:
+                    raw = await adapter.fetch_article(link.url)
+                    normalized = adapter.normalize_article(raw, section.key, section.category)
+                    await self._save_article(normalized, source.crawl_interval_minutes)
+                    saved += 1
+                    if saved >= fetch_articles:
+                        break
+                except Exception as exc:
+                    self.url_store.mark_fetch_error(link.url, str(exc), source.crawl_interval_minutes)
+                    self.store.log("fetch_article", "error", link.url, {"error": str(exc)})
+            self.store.mark_section_crawled(source.source_id, section.key)
+            self.url_store.mark_fetch_ok(section.url, interval_minutes=source.crawl_interval_minutes)
+            result = base | {"links": len(links), "saved": saved, "tags": list(source.tags)}
+            self.store.log(operation, "ok", f"{source.source_id}:{section.key}", result)
+            return result
+        except Exception as exc:
+            self.url_store.mark_fetch_error(section.url, str(exc), source.crawl_interval_minutes)
+            result = base | {"error": str(exc)}
+            if include_error_tags:
+                result["tags"] = list(source.tags)
+            self.store.log(operation, "error", f"{source.source_id}:{section.key}", {"error": str(exc)})
+            return result
 
 
 def _mysql_due_to_section(row: dict) -> dict:

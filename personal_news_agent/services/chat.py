@@ -1,30 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Awaitable, Callable
 from uuid import uuid4
 
-from personal_news_agent.core.categories import CATEGORIES
 from personal_news_agent.core.models import ChatResponse, FocusObject, SearchResult, TimeRange
+from personal_news_agent.services.chat_understanding import (
+    extract_ordinal,
+    infer_categories,
+    query_from_message,
+    time_range_from_message,
+)
 from personal_news_agent.services.llm import LLMClient
 from personal_news_agent.services.search import UnifiedSearchService
 from personal_news_agent.services.store import NewsStore
-
-
-ORDINALS = {
-    "第一": 1,
-    "第二": 2,
-    "第三": 3,
-    "第四": 4,
-    "第五": 5,
-    "第1": 1,
-    "第2": 2,
-    "第3": 3,
-    "第4": 4,
-    "第5": 5,
-}
 
 
 class NewsChatService:
@@ -36,6 +26,7 @@ class NewsChatService:
         native_ingestion: Any | None = None,
         deep_dive: Any | None = None,
         topic_views: Any | None = None,
+        topic_agent: Any | None = None,
     ):
         self.store = store
         self.search_service = search_service
@@ -43,6 +34,7 @@ class NewsChatService:
         self.native_ingestion = native_ingestion
         self.deep_dive = deep_dive
         self.topic_views = topic_views
+        self.topic_agent = topic_agent
 
     async def chat(
         self,
@@ -51,10 +43,14 @@ class NewsChatService:
         topic: str | None = None,
         category_scope: list[str] | None = None,
         use_llm: bool = False,
+        user_id: str = "default",
     ) -> ChatResponse:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
-        ordinal = _extract_ordinal(message)
-        if ordinal:
+        topic_response = await self._topic_agent_response(conv_id, user_id, message)
+        ordinal = extract_ordinal(message) if not topic_response else None
+        if topic_response:
+            response = topic_response
+        elif ordinal:
             response = await self._article_followup(conv_id, message, ordinal)
         elif use_llm:
             response = await self._research_chat(conv_id, message, topic, category_scope)
@@ -70,10 +66,18 @@ class NewsChatService:
         topic: str | None = None,
         category_scope: list[str] | None = None,
         use_llm: bool = False,
+        user_id: str = "default",
     ) -> AsyncIterator[dict[str, Any]]:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
         yield {"type": "start", "conversation_id": conv_id, "message": "开始处理问题。"}
-        ordinal = _extract_ordinal(message)
+        topic_response = await self._topic_agent_response(conv_id, user_id, message)
+        if topic_response:
+            for item in topic_response.research_trace:
+                yield {"type": "trace", "item": item}
+            self._save_response_turn(topic_response, message)
+            yield {"type": "final", "response": topic_response.model_dump(mode="json")}
+            return
+        ordinal = extract_ordinal(message)
         if ordinal or not use_llm:
             response = await (self._article_followup(conv_id, message, ordinal) if ordinal else self._news_search(conv_id, message, topic, category_scope, use_llm))
             self._save_response_turn(response, message)
@@ -104,6 +108,51 @@ class NewsChatService:
             if not task.done():
                 task.cancel()
 
+    async def _topic_agent_response(self, conversation_id: str, user_id: str, message: str) -> ChatResponse | None:
+        if not self.topic_agent:
+            return None
+        try:
+            result = await self.topic_agent.maybe_create_topic_from_chat(user_id=user_id, message=message)
+        except ValueError:
+            return None
+        if not result:
+            return None
+        topic = result["topic"]
+        task = result.get("task")
+        refresh = result.get("refresh") or {}
+        ingest = refresh.get("ingest") or {}
+        view = refresh.get("topic_view") or {}
+        article_count = (view.get("build") or {}).get("article_count") or len(view.get("articles") or [])
+        event_count = len(((view.get("event_line") or {}).get("items")) or [])
+        answer = (
+            f"已创建主题「{topic['title']}」，并保存为持续跟踪。\n\n"
+            f"- 更新节奏：{topic.get('refresh_schedule') or '*/20 * * * *'}\n"
+            f"- 抓取入库：发现 {ingest.get('discovered_count', 0)} 条，正文 {ingest.get('fetched_count', 0)} 条\n"
+            f"- 专题视图：{article_count} 条证据，{event_count} 个事件节点\n\n"
+            "后续可以直接问这个主题的最新变化、关键人物/球队/公司、影响链或让我生成报告。"
+        )
+        trace = [
+            {"stage": "主题识别", "status": "completed", "message": f"识别为长期主题：{topic['title']}"},
+            {"stage": "任务沉淀", "status": "completed", "message": f"已保存持续跟踪任务：{(task or {}).get('id') or '已存在'}"},
+            {
+                "stage": "抓取与视图",
+                "status": "completed" if refresh.get("refreshed") else "skipped",
+                "message": f"发现 {ingest.get('discovered_count', 0)} 条，专题证据 {article_count} 条。",
+            },
+        ]
+        if refresh.get("errors"):
+            trace.append({"stage": "刷新提示", "status": "warning", "message": "；".join(refresh["errors"][:2])})
+        return ChatResponse(
+            conversation_id=conversation_id,
+            answer=answer,
+            markdown=answer,
+            context_relation="topic_agent_created",
+            focus_object=FocusObject(type="topic", target_id=topic["id"], text=topic["title"]),
+            required_context_items=["topic_definition", "scheduled_task", "topic_refresh"],
+            research_trace=trace,
+            event_line=view.get("event_line"),
+        )
+
     def _save_response_turn(self, response: ChatResponse, message: str) -> str:
         return self.store.save_turn(
             response.conversation_id,
@@ -121,8 +170,8 @@ class NewsChatService:
         category_scope: list[str] | None = None,
         use_llm: bool = False,
     ) -> ChatResponse:
-        query = _query_from_message(message, topic)
-        categories = category_scope or _infer_categories(message)
+        query = query_from_message(message, topic)
+        categories = category_scope or infer_categories(message)
         results = await self.search_service.search(query=query, category_scope=categories, source_scope=None, time_range=None, max_results=20)
         results = _rank_for_chat(_enrich_from_store(self.store, results), message)[:8]
         if use_llm and self.llm_client.configured and results:
@@ -153,9 +202,9 @@ class NewsChatService:
         on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> ChatResponse:
         trace: list[dict[str, Any]] = []
-        query = _query_from_message(message, topic)
-        categories = category_scope or _infer_categories(message)
-        time_range = _time_range_from_message(message)
+        query = query_from_message(message, topic)
+        categories = category_scope or infer_categories(message)
+        time_range = time_range_from_message(message)
         await _add_trace(
             trace,
             {
@@ -344,115 +393,6 @@ async def _add_trace(
     trace.append(item)
     if on_trace:
         await on_trace(item)
-
-
-def _extract_ordinal(message: str) -> int | None:
-    for token, value in ORDINALS.items():
-        if token in message:
-            return value
-    match = re.search(r"第\s*(\d+)\s*条", message)
-    return int(match.group(1)) if match else None
-
-
-def _infer_categories(message: str) -> list[str] | None:
-    hints = {
-        "时政": "politics",
-        "政治": "politics",
-        "国际": "politics",
-        "乌克兰": "politics",
-        "俄罗斯": "politics",
-        "俄乌": "politics",
-        "战争": "politics",
-        "冲突": "politics",
-        "经济": "economy",
-        "财经": "economy",
-        "粮食": "economy",
-        "农作物": "economy",
-        "能源": "economy",
-        "制裁": "economy",
-        "科技": "tech",
-        "AI": "tech",
-        "汽车": "auto",
-        "车企": "auto",
-        "车型": "auto",
-        "新能源车": "auto",
-        "智能驾驶": "auto",
-        "游戏": "game",
-        "电竞": "game",
-        "动漫": "anime",
-        "番剧": "anime",
-        "娱乐": "entertainment",
-        "明星": "entertainment",
-        "体育": "sports",
-        "NBA": "sports",
-        "球队": "sports",
-        "WSBK": "sports",
-        "机车赛事": "sports",
-    }
-    categories = [category for word, category in hints.items() if word.lower() in message.lower()]
-    return sorted(set(categories)) or None
-
-
-def _query_from_message(message: str, topic: str | None = None) -> str:
-    original = message
-    for zh, key in CATEGORIES.items():
-        message = message.replace(zh, " ")
-        message = message.replace(key, " ")
-    cleanup = [
-        "帮我看看",
-        "帮我",
-        "看看",
-        "了解一下",
-        "请你",
-        "请",
-        "今天",
-        "近一个月",
-        "过去一个月",
-        "一个月",
-        "近30天",
-        "30天",
-        "有什么新闻",
-        "有什么新变化",
-        "有哪些值得关注的新变化",
-        "最新进展",
-        "新进展",
-        "最新",
-        "最近",
-        "说说",
-        "如何",
-        "一下",
-        "的",
-        "？",
-        "?",
-    ]
-    for token in cleanup:
-        message = message.replace(token, " ")
-    message = message.replace("圈", " ")
-    cleaned = " ".join(message.split())
-    if topic and topic.strip() and (_is_generic_chat_query(cleaned) or topic.strip() in original):
-        return topic.strip()
-    return cleaned if len(cleaned) > 1 else "热点 新闻"
-
-
-def _is_generic_chat_query(cleaned: str) -> bool:
-    compact = cleaned.replace(" ", "")
-    if not compact:
-        return True
-    return compact in {"热点新闻", "新闻", "变化", "进展", "更新", "继续", "展开", "深挖"}
-
-
-def _time_range_from_message(message: str) -> TimeRange | None:
-    if any(token in message for token in ("今天", "今日")):
-        return TimeRange(days=1)
-    if any(token in message for token in ("近一周", "一周", "7天", "七天")):
-        return TimeRange(days=7)
-    if any(token in message for token in ("近一个月", "过去一个月", "一个月", "30天", "三十天")):
-        return TimeRange(days=31)
-    if any(token in message for token in ("近半年", "半年", "6个月", "六个月")):
-        return TimeRange(days=180)
-    if any(token in message for token in ("最近", "最新", "新进展", "新变化")):
-        return TimeRange(days=14)
-    return None
 
 
 def _grounded_answer(query: str, message: str, results: list[SearchResult], prefix: str | None = None) -> str:
