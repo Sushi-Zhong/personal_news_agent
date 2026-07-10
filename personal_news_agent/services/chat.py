@@ -12,6 +12,7 @@ from personal_news_agent.services.chat_understanding import (
     query_from_message,
     time_range_from_message,
 )
+from personal_news_agent.services.content_moderation import ContentModerationError
 from personal_news_agent.services.llm import LLMClient
 from personal_news_agent.services.search import UnifiedSearchService
 from personal_news_agent.services.store import NewsStore
@@ -27,6 +28,7 @@ class NewsChatService:
         deep_dive: Any | None = None,
         topic_views: Any | None = None,
         topic_agent: Any | None = None,
+        content_moderation: Any | None = None,
     ):
         self.store = store
         self.search_service = search_service
@@ -35,6 +37,7 @@ class NewsChatService:
         self.deep_dive = deep_dive
         self.topic_views = topic_views
         self.topic_agent = topic_agent
+        self.content_moderation = content_moderation
 
     async def chat(
         self,
@@ -46,6 +49,10 @@ class NewsChatService:
         user_id: str = "default",
     ) -> ChatResponse:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
+        moderation_response = await self._moderate_query(conv_id, message)
+        if moderation_response:
+            self._save_response_turn(moderation_response, message)
+            return moderation_response
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         ordinal = extract_ordinal(message) if not topic_response else None
         if topic_response:
@@ -70,6 +77,11 @@ class NewsChatService:
     ) -> AsyncIterator[dict[str, Any]]:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
         yield {"type": "start", "conversation_id": conv_id, "message": "开始处理问题。"}
+        moderation_response = await self._moderate_query(conv_id, message)
+        if moderation_response:
+            self._save_response_turn(moderation_response, message)
+            yield {"type": "final", "response": moderation_response.model_dump(mode="json")}
+            return
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         if topic_response:
             for item in topic_response.research_trace:
@@ -152,6 +164,37 @@ class NewsChatService:
             research_trace=trace,
             event_line=view.get("event_line"),
         )
+
+    async def _moderate_query(self, conversation_id: str, message: str) -> ChatResponse | None:
+        if not self.content_moderation or not getattr(self.content_moderation, "configured", False):
+            return None
+        try:
+            result = await asyncio.to_thread(self.content_moderation.check_query_text, message)
+        except ContentModerationError:
+            return None
+        if result.allowed:
+            return None
+        answer = "这条问题没有通过内容安全检测，请换一种问法后再试。"
+        return ChatResponse(
+            conversation_id=conversation_id,
+            answer=answer,
+            markdown=answer,
+            context_relation="query_moderation_blocked",
+            focus_object=FocusObject(type="moderation", text=result.label or result.risk_level or "blocked"),
+            required_context_items=["llm_query_moderation"],
+            research_trace=[
+                {
+                    "stage": "输入安全检测",
+                    "status": "blocked",
+                    "message": result.description or result.message or "用户输入未通过内容安全检测。",
+                    "label": result.label,
+                    "risk_level": result.risk_level,
+                    "request_id": result.request_id,
+                }
+            ],
+        )
+
+
 
     def _save_response_turn(self, response: ChatResponse, message: str) -> str:
         return self.store.save_turn(

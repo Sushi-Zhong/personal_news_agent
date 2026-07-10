@@ -278,10 +278,11 @@ async function loadEvents(target = "#events", category = "", limit = 8) {
 async function sendChat(message, target = "#messages") {
   const targetNode = document.querySelector(target) || document.querySelector("#messages");
   targetNode.classList.add("chat-stream");
-  targetNode.appendChild(chatTurn("user", message));
+  const userNode = chatTurn("user", message);
+  targetNode.appendChild(userNode);
   const assistantNode = chatTurn("assistant", "", true);
   targetNode.appendChild(assistantNode);
-  targetNode.scrollTop = targetNode.scrollHeight;
+  scrollChatTurnToTop(targetNode, userNode);
   return sendChatIntoTurn(message, assistantNode, target);
 }
 
@@ -310,7 +311,6 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   conversationId = data.conversation_id;
   localStorage.setItem("pna_conversation_id", conversationId);
   assistantNode.innerHTML = chatResponseHtml(data);
-  targetNode.scrollTop = targetNode.scrollHeight;
   return data;
 }
 
@@ -319,7 +319,9 @@ function appendLocalTurn(role, text, target = "#messages", loading = false) {
   targetNode.classList.add("chat-stream");
   const node = loading ? chatTurn("assistant", "", true) : chatTurn(role, text);
   targetNode.appendChild(node);
-  targetNode.scrollTop = targetNode.scrollHeight;
+  if (role === "user") {
+    scrollChatTurnToTop(targetNode, node);
+  }
   return node;
 }
 
@@ -359,16 +361,23 @@ async function streamChat(payload, assistantNode, targetNode) {
         conversationId = event.response.conversation_id || conversationId;
         if (conversationId) localStorage.setItem("pna_conversation_id", conversationId);
         assistantNode.innerHTML = chatResponseHtml(event.response);
-        targetNode.scrollTop = targetNode.scrollHeight;
         return event.response;
       } else if (event.type === "error") {
         throw new Error(event.message || "流式请求失败");
       }
       assistantNode.innerHTML = chatStreamingHtml(state);
-      targetNode.scrollTop = targetNode.scrollHeight;
     }
   }
   return null;
+}
+
+function scrollChatTurnToTop(targetNode, turnNode) {
+  if (!targetNode || !turnNode) return;
+  requestAnimationFrame(() => {
+    const targetRect = targetNode.getBoundingClientRect();
+    const turnRect = turnNode.getBoundingClientRect();
+    targetNode.scrollTop += turnRect.top - targetRect.top;
+  });
 }
 
 function parseSseEvent(block) {

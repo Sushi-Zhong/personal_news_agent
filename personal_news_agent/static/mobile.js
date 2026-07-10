@@ -1,4 +1,7 @@
 let mobileCategory = "";
+let mobileViewMode = "chat";
+let mobileSnapTimer = null;
+let mobileTypingScrollY = 0;
 const mobileState = {
   topic: "张雪机车",
   categoryScope: [],
@@ -11,6 +14,8 @@ const mobileBootstrapTopics = [
 ];
 syncMobileChatContext();
 syncMobileSessionState();
+syncMobileBriefToggle();
+syncMobileViewModeFromScroll();
 
 document.querySelectorAll("[data-auth-mode-target]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -20,6 +25,17 @@ document.querySelectorAll("[data-auth-mode-target]").forEach((button) => {
     });
   });
 });
+
+document.querySelector("[data-mobile-brief-toggle]")?.addEventListener("click", () => {
+  const card = document.querySelector(".mobile-today-card");
+  setMobileBriefExpanded(card?.hidden);
+});
+
+window.addEventListener("scroll", handleMobilePageScroll, { passive: true });
+document.querySelector("#message")?.addEventListener("focus", handleMobileInputFocus);
+document.querySelector("#message")?.addEventListener("blur", handleMobileInputBlur);
+window.visualViewport?.addEventListener("resize", updateMobileKeyboardOffset);
+window.visualViewport?.addEventListener("scroll", updateMobileKeyboardOffset);
 
 async function refreshMobile() {
   await Promise.all([loadFeed(mobileCategory, 8), loadEvents("#events", mobileCategory, 5), loadTaskNotifications(), loadMobileTopics()]);
@@ -34,6 +50,7 @@ document.querySelectorAll("#mobileTabs button").forEach((button) => {
     mobileState.categoryScope = mobileCategory ? [mobileCategory] : [];
     syncMobileChatContext();
     await refreshMobile();
+    setMobileViewMode("content");
   });
 });
 
@@ -143,6 +160,108 @@ refreshMobile();
 function showOnboardingForm() {
   const form = document.querySelector("#onboardingForm");
   if (form) form.hidden = false;
+}
+
+function setMobileBriefExpanded(expanded) {
+  const card = document.querySelector(".mobile-today-card");
+  const toggle = document.querySelector("[data-mobile-brief-toggle]");
+  if (card) card.hidden = !expanded;
+  if (toggle) {
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.classList.toggle("active", expanded);
+    toggle.textContent = expanded ? "收起" : "今日";
+  }
+}
+
+function syncMobileBriefToggle() {
+  setMobileBriefExpanded(false);
+}
+
+function revealMobileFeed() {
+  const target = document.querySelector(".mobile-content-group");
+  if (!target) return;
+  alignMobileSnapTarget(target);
+}
+
+function setMobileViewMode(mode, options = {}) {
+  mobileViewMode = mode === "content" ? "content" : "chat";
+  const target = mobileViewMode === "content"
+    ? document.querySelector(".mobile-content-group")
+    : document.querySelector(".mobile-agent-card");
+  document.body.classList.toggle("mobile-chat-view", mobileViewMode === "chat");
+  if (!target) return;
+  alignMobileSnapTarget(target, options.instant ? "auto" : "smooth");
+}
+
+function syncMobileViewModeFromScroll() {
+  if (document.body.classList.contains("mobile-typing")) {
+    mobileViewMode = "chat";
+    document.body.classList.add("mobile-chat-view");
+    return;
+  }
+  const agent = document.querySelector(".mobile-agent-card");
+  if (!agent) return;
+  const rect = agent.getBoundingClientRect();
+  mobileViewMode = rect.bottom > window.innerHeight * 0.35 ? "chat" : "content";
+  document.body.classList.toggle("mobile-chat-view", mobileViewMode === "chat");
+}
+
+function handleMobilePageScroll() {
+  syncMobileViewModeFromScroll();
+  if (document.body.classList.contains("mobile-typing")) return;
+  window.clearTimeout(mobileSnapTimer);
+  mobileSnapTimer = window.setTimeout(snapMobileToNearestCard, 120);
+}
+
+function snapMobileToNearestCard() {
+  if (document.body.classList.contains("mobile-typing")) return;
+  const targets = [document.querySelector(".mobile-agent-card"), document.querySelector(".mobile-push-card")]
+    .filter((node) => shouldSnapMobileCardTop(node));
+  if (!targets.length) return;
+  const nearest = targets.reduce((best, node) => {
+    const distance = Math.abs(node.getBoundingClientRect().top - getMobileSnapTop());
+    return !best || distance < best.distance ? { node, distance } : best;
+  }, null);
+  if (nearest) alignMobileSnapTarget(nearest.node);
+}
+
+function shouldSnapMobileCardTop(node) {
+  if (!node) return false;
+  const topDistance = node.getBoundingClientRect().top - getMobileSnapTop();
+  if (node.classList.contains("mobile-agent-card")) {
+    return Math.abs(topDistance) <= 500;
+  }
+  return Math.abs(topDistance) <= 200;
+}
+
+function getMobileSnapTop() {
+  return parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--mobile-header-height")) || 0;
+}
+
+function alignMobileSnapTarget(target, behavior = "smooth") {
+  if (!target) return;
+  const targetTop = window.scrollY + target.getBoundingClientRect().top - getMobileSnapTop();
+  window.scrollTo({ top: Math.max(0, targetTop), behavior });
+}
+
+function handleMobileInputFocus() {
+  mobileTypingScrollY = window.scrollY;
+  mobileViewMode = "chat";
+  document.body.classList.add("mobile-typing");
+  document.body.classList.add("mobile-chat-view");
+  updateMobileKeyboardOffset();
+  window.setTimeout(() => window.scrollTo({ top: mobileTypingScrollY, behavior: "auto" }), 60);
+}
+
+function handleMobileInputBlur() {
+  document.body.classList.remove("mobile-typing");
+  document.documentElement.style.setProperty("--mobile-keyboard-offset", "0px");
+}
+
+function updateMobileKeyboardOffset() {
+  const viewport = window.visualViewport;
+  const keyboardOffset = viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0;
+  document.documentElement.style.setProperty("--mobile-keyboard-offset", `${Math.round(keyboardOffset)}px`);
 }
 
 async function handleMobileAssistantInput(message) {

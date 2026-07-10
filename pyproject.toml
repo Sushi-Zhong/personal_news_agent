@@ -13,6 +13,8 @@ dependencies = [
   "uvicorn>=0.30.0",
   "PyMySQL>=1.1.0",
   "alibabacloud_cloudauth20190307==3.13.1",
+  "alibabacloud_green20220302>=2.1.1",
+
 ]
 
 [project.optional-dependencies]

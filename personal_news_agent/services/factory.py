@@ -5,6 +5,7 @@ from typing import Any
 from personal_news_agent.config import Settings
 from personal_news_agent.services.auth import AuthService
 from personal_news_agent.services.chat import NewsChatService
+from personal_news_agent.services.content_moderation import TextModerationPlusService
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
@@ -36,6 +37,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
     reports = ReportGenerationService(store, search_service)
     tasks = ScheduledTaskService(store, reports)
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
+    content_moderation = TextModerationPlusService()
     chat = NewsChatService(
         store,
         search_service,
@@ -43,6 +45,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
         deep_dive=deep_dive,
         topic_views=topic_views,
         topic_agent=topic_agent,
+        content_moderation=content_moderation,
     )
 
     return {
@@ -62,6 +65,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
         "reports": reports,
         "tasks": tasks,
         "topic_agent": topic_agent,
+        "content_moderation": content_moderation,
         "chat": chat,
         "crawl": CrawlScheduler(registry, store, url_store, search_index),
     }
