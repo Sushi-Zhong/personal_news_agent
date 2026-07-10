@@ -12,10 +12,10 @@
         <h1>资讯助手</h1>
         <p><span data-user-name></span></p>
       </div>
-      <a href="/web">Web</a>
+      <button type="button" class="secondary-button mobile-brief-toggle" data-mobile-brief-toggle aria-expanded="false">今日</button>
     </header>
     <main class="mobile-layout">
-      <section class="mobile-card mobile-today-card">
+      <section class="mobile-card mobile-today-card" hidden>
         <div class="mobile-brief-title">
           <span>今日</span>
           <strong data-mobile-brief-topic>张雪机车</strong>
@@ -29,23 +29,9 @@
         <div class="mobile-brief-actions">
           <button type="button" data-mobile-action="brief">简报</button>
           <button type="button" class="secondary-button" data-mobile-action="deep">深挖</button>
-          <button type="button" class="secondary-button" data-mobile-action="track">跟踪</button>
-        </div>
-      </section>
-
-      <section class="mobile-card mobile-agent-card">
-        <div class="mobile-card-head">
-          <h2>Agent</h2>
-          <button type="button" class="secondary-button" data-command="/search 张雪机车 --cat sports">抓取</button>
-        </div>
-        <div id="messages" class="messages mobile-messages chat-stream">
-          <article class="chat-turn chat-assistant"><div class="chat-bubble">今日内容已准备，可以点一条资讯继续深挖，或把当前专题加入跟踪。</div></article>
-        </div>
-        <form id="chatForm" class="mobile-chat">
-          <input id="message" placeholder="继续问：影响谁？后续看什么？" />
-          <button>发</button>
-        </form>
-      </section>
+        <button type="button" class="secondary-button" data-mobile-action="track">跟踪</button>
+      </div>
+    </section>
 
       <nav class="category-tabs" id="mobileTabs">
         <button data-category="" class="active">全部</button>
@@ -55,6 +41,21 @@
         <button data-category="auto">汽车</button>
         <button data-category="sports">体育</button>
       </nav>
+
+      <section class="mobile-card mobile-agent-card">
+        <div class="mobile-card-head">
+          <h2>Agent</h2>
+          <button type="button" class="secondary-button" data-command="/search 张雪机车 --cat sports">抓取</button>
+        </div>
+        <div class="mobile-chat-label">Agent 对话组件</div>
+        <div id="messages" class="messages mobile-messages chat-stream">
+          <article class="chat-turn chat-assistant"><div class="chat-bubble">今日内容已准备，可以点一条资讯继续深挖，或把当前专题加入跟踪。</div></article>
+        </div>
+        <form id="chatForm" class="mobile-chat">
+          <input id="message" placeholder="继续问：影响谁？后续看什么？" />
+          <button>发</button>
+        </form>
+      </section>
 
       <section class="mobile-card mobile-push-card">
         <div class="mobile-card-head">

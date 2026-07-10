@@ -1,4 +1,7 @@
 :root {
+  --mobile-footer-reserve: calc(96px + env(safe-area-inset-bottom));
+  --mobile-header-height: 76px;
+  --mobile-keyboard-offset: 0px;
   color-scheme: light;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: #f6f7f9;
@@ -1517,102 +1520,95 @@ pre {
   align-items: center;
   background: #ffffff;
   border-bottom: 1px solid #dde1e7;
+  box-sizing: border-box;
   display: flex;
+  height: var(--mobile-header-height);
   justify-content: space-between;
   padding: 14px 16px;
-  position: sticky;
+  position: fixed;
+  left: 0;
+  right: 0;
   top: 0;
-  z-index: 2;
+  width: 100%;
+  z-index: 20;
 }
 
 .mobile-top h1 {
   font-size: 20px;
 }
 
+.mobile-brief-toggle {
+  min-height: 34px;
+}
+
 .mobile-layout {
   display: grid;
-  gap: 12px;
-  padding: 12px;
+  gap: 8px;
+  padding: calc(var(--mobile-header-height) + 8px) 12px var(--mobile-footer-reserve);
 }
 
 .mobile-card {
   background: #ffffff;
   border: 1px solid #dde1e7;
   border-radius: 8px;
-  padding: 14px;
+  padding: 12px;
 }
 
 .mobile-agent-card {
   display: grid;
-  gap: 12px;
-  order: 1;
+  gap: 6px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: calc(100svh - 176px);
+  order: 2;
+  padding-bottom: 6px;
 }
 
 .mobile-today-card {
   display: grid;
   gap: 12px;
-  order: 1;
+  left: 12px;
+  max-height: calc(100vh - var(--mobile-header-height) - 20px);
+  overflow: auto;
+  position: fixed;
+  right: 12px;
+  top: calc(var(--mobile-header-height) + 8px);
+  z-index: 8;
 }
 
-.category-tabs {
-  order: 3;
-}
-
-.mobile-feed-card {
-  order: 5;
-}
-
-.mobile-events-card {
-  order: 6;
+.mobile-today-card[hidden] {
+  display: none !important;
 }
 
 .mobile-account-card {
   display: grid;
   gap: 10px;
-  order: 7;
 }
 
 .mobile-push-card {
   order: 4;
 }
 
-.mobile-agent-card {
-  order: 2;
-}
-
-.mobile-logged-out .mobile-account-card {
-  order: 1;
-}
-
-.mobile-logged-out .mobile-today-card {
-  order: 2;
-}
-
-.mobile-logged-out .mobile-agent-card {
-  order: 3;
-}
-
-.mobile-logged-out .category-tabs {
-  order: 4;
+.mobile-content-group {
+  display: grid;
+  gap: 8px;
+  order: 5;
+  padding-bottom: 12px;
 }
 
 .mobile-logged-out .mobile-push-card {
   order: 5;
 }
 
-.mobile-logged-out .mobile-feed-card {
+.mobile-logged-out .mobile-content-group {
   order: 6;
-}
-
-.mobile-logged-out .mobile-events-card {
-  order: 7;
 }
 
 .mobile-card-head {
   align-items: center;
   display: flex;
-  gap: 10px;
+  gap: 8px;
   justify-content: space-between;
+  min-height: 36px;
 }
 
 .mobile-card-head button {
@@ -1733,10 +1729,22 @@ pre {
 }
 
 .category-tabs {
+  background: #eef2f6;
+  border-bottom: 1px solid #d9e1ea;
+  border-top: 1px solid #d9e1ea;
+  bottom: 0;
+  box-sizing: border-box;
   display: flex;
   gap: 8px;
+  left: 0;
+  margin: 0;
+  min-height: calc(64px + env(safe-area-inset-bottom));
   overflow-x: auto;
-  padding-bottom: 2px;
+  padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  position: fixed;
+  right: 0;
+  width: 100%;
+  z-index: 7;
 }
 
 .category-tabs button {
@@ -1752,15 +1760,48 @@ pre {
 }
 
 .mobile-messages {
-  height: min(58vh, 520px);
-  min-height: 320px;
+  flex: 1 0 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: auto;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mobile-chat-panel {
+  background: #fbfcff;
+  border: 1px solid #e7edf5;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
 }
 
 .mobile-chat {
   display: grid;
   gap: 8px;
   grid-template-columns: minmax(0, 1fr) 54px;
-  margin-top: 10px;
+  margin-top: 0;
+}
+
+.mobile-typing .mobile-chat {
+  background: #eef2f6;
+  border-top: 1px solid #d9e1ea;
+  bottom: max(calc(var(--mobile-keyboard-offset) + 8px), calc(72px + env(safe-area-inset-bottom)));
+  box-sizing: border-box;
+  left: 0;
+  margin: 0;
+  padding: 8px 12px;
+  position: fixed;
+  right: 0;
+  z-index: 12;
+}
+
+.mobile-typing .mobile-chat input {
+  background: #ffffff;
 }
 
 @media (max-width: 900px) {

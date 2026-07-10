@@ -42,11 +42,11 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
 
     @app.get("/")
     async def index() -> FileResponse:
-        return FileResponse(static_dir / "web.html")
+        return FileResponse(static_dir / "home.html")
 
     @app.get("/web")
     async def web_app() -> FileResponse:
-        return FileResponse(static_dir / "web.html")
+        return FileResponse(static_dir / "home.html")
 
     @app.get("/auth")
     async def auth_app() -> FileResponse:
@@ -54,7 +54,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
 
     @app.get("/mobile")
     async def mobile_app() -> FileResponse:
-        return FileResponse(static_dir / "mobile.html")
+        return FileResponse(static_dir / "home.html")
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
