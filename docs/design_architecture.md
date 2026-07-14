@@ -68,11 +68,16 @@ source 配置
 → search/feed/chat/report 使用
 ```
 
+持续抓取由独立的 `scripts/run_crawl_loop.py` worker 进程承载，不跟随每个 Web 进程创建子线程。生产环境通过 `personal-news.target` 同时启动 Web 和唯一 crawler 进程，两者可独立重启。worker 使用固定小并发处理到期 section，且同一进程内抓取轮次互斥。索引页只 follow 到文章详情页一层；URL 规范化和 URL/content hash 去重发生在入库前。
+
+文章入库后的主题抽取由 `topic_extraction.py` 完成。板块沿用 section 的固定 category；模型输入包含文章内容和最近几天同板块主题，结构化输出只能引用候选主题 ID。程序负责校验和幂等归并，业务提示词独立放在 `prompts/topic_extraction.md`。
+
 关键模块：
 
 - `source_registry.py`：读取和校验 source 配置。
 - `source_adapter.py`：把网页转成统一文章结构。
 - `crawl.py`：调度抓取流程。
+- `crawl_loop.py`：独立持续轮询和空闲等待。
 - `store.py`：本地数据存储。
 - `url_store.py`：URL 抓取状态管理。
 - `search.py`：统一搜索入口。

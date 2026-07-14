@@ -1,0 +1,7 @@
+[Unit]
+Description=Personal News Agent web and background services
+Wants=personal-news-web.service personal-news-crawler.service
+After=network-online.target
+
+[Install]
+WantedBy=multi-user.target

@@ -20,6 +20,16 @@ def test_registry_loads_focused_categories_and_sources():
     assert "tech" in ithome.tags
     assert ithome.crawl_interval_minutes > 0
     assert registry.get_source("people_politics").crawl_interval_minutes == 20
+    assert len(registry.get_sources_by_category("digital")) >= 2
+    assert len(registry.get_sources_by_category("military")) >= 3
+    assert len(registry.get_sources_by_category("sports")) >= 7
+    assert len(registry.get_sections_by_category("economy")) >= 12
+    assert len(registry.get_sections_by_category("sports")) >= 14
+    assert len(registry.get_sections_by_category("digital")) >= 8
+
+    sina_sports = registry.get_source("sina_sports")
+    assert {section.key for section in sina_sports.sections} >= {"sports", "nba", "global_football", "china_football"}
+    assert registry.get_source("sohu_military").sections[0].crawl_enabled
 
 
 def test_registry_rejects_invalid_category(tmp_path):

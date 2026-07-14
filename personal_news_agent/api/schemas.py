@@ -106,6 +106,7 @@ class DueCrawlRequest(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
     per_section_limit: int = Field(default=10, ge=1, le=50)
     fetch_articles: int = Field(default=1, ge=0, le=10)
+    workers: int = Field(default=2, ge=1, le=4)
 
 
 class RegisterRequest(BaseModel):

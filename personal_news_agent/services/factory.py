@@ -20,6 +20,7 @@ from personal_news_agent.services.source_registry import SourceRegistryService
 from personal_news_agent.services.store import NewsStore
 from personal_news_agent.services.tasks import ScheduledTaskService
 from personal_news_agent.services.topic_agent import TopicAgentService
+from personal_news_agent.services.topic_extraction import TopicExtractionService
 from personal_news_agent.services.topic_views import TopicViewService
 from personal_news_agent.services.url_store import CrawlUrlStore, MySQLCrawlUrlStore
 
@@ -38,6 +39,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
     tasks = ScheduledTaskService(store, reports)
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
     content_moderation = TextModerationPlusService()
+    topic_extraction = TopicExtractionService(store)
     chat = NewsChatService(
         store,
         search_service,
@@ -65,6 +67,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
         "reports": reports,
         "tasks": tasks,
         "topic_agent": topic_agent,
+        "topic_extraction": topic_extraction,
         "content_moderation": content_moderation,
         "chat": chat,
         "crawl": CrawlScheduler(registry, store, url_store, search_index),

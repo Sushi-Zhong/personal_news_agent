@@ -61,6 +61,29 @@ CREATE TABLE IF NOT EXISTS news_articles (
   content_hash TEXT,
   status TEXT DEFAULT 'active'
 );
+CREATE INDEX IF NOT EXISTS idx_news_articles_content_hash ON news_articles(content_hash);
+CREATE TABLE IF NOT EXISTS news_topics (
+  id TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  name TEXT NOT NULL,
+  summary TEXT,
+  keywords_json TEXT,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  article_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active'
+);
+CREATE INDEX IF NOT EXISTS idx_news_topics_recent ON news_topics(category, last_seen_at);
+CREATE TABLE IF NOT EXISTS news_topic_articles (
+  article_id TEXT PRIMARY KEY,
+  topic_id TEXT NOT NULL,
+  subject TEXT,
+  event_summary TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(topic_id) REFERENCES news_topics(id)
+);
+CREATE INDEX IF NOT EXISTS idx_news_topic_articles_topic ON news_topic_articles(topic_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS news_articles_fts USING fts5(
   article_id UNINDEXED,
   title,
@@ -283,6 +306,12 @@ class NewsStore:
             self._ensure_news_source_columns(conn)
             self._ensure_pna_user_columns(conn)
             self._ensure_pna_profile_columns(conn)
+            self._ensure_news_topic_article_columns(conn)
+
+    def _ensure_news_topic_article_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(news_topic_articles)").fetchall()}
+        if "subject" not in existing:
+            conn.execute("ALTER TABLE news_topic_articles ADD COLUMN subject TEXT")
 
     def _ensure_news_source_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(news_sources)").fetchall()}
@@ -452,8 +481,22 @@ class NewsStore:
                 (_now(), source_id, section_key),
             )
 
-    def save_article(self, article: NormalizedArticle) -> None:
+    def find_article_by_url(self, url: str) -> dict[str, Any] | None:
         with self.connect() as conn:
+            row = conn.execute("SELECT * FROM news_articles WHERE url = ? OR canonical_url = ? LIMIT 1", (url, url)).fetchone()
+        return _row(row) if row else None
+
+    def save_article(self, article: NormalizedArticle) -> dict[str, Any]:
+        with self.connect() as conn:
+            duplicate = None
+            if article.content_hash:
+                duplicate = conn.execute(
+                    "SELECT id, url FROM news_articles WHERE content_hash = ? AND status = 'active' LIMIT 1",
+                    (article.content_hash,),
+                ).fetchone()
+            if duplicate and duplicate["url"] != article.url:
+                return {"article_id": duplicate["id"], "created": False, "duplicate": True}
+            existed = conn.execute("SELECT id FROM news_articles WHERE url = ? LIMIT 1", (article.url,)).fetchone()
             conn.execute(
                 """
                 INSERT INTO news_articles(id, source_id, section_key, url, canonical_url, url_hash, title, summary, content, published_at, fetched_at, category, source_priority, content_hash)
@@ -497,6 +540,7 @@ class NewsStore:
                 """,
                 (article.id, article.title, article.summary, article.content, article.category, article.source_id),
             )
+        return {"article_id": article.id, "created": existed is None, "duplicate": False}
 
     def list_articles(self, category: str | None = None, limit: int = 50, days: int | None = None) -> list[dict[str, Any]]:
         clauses = ["status = 'active'"]
@@ -520,6 +564,69 @@ class NewsStore:
                 params,
             ).fetchall()
         return [_row(row) for row in rows]
+
+    def list_unprocessed_topic_articles(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.* FROM news_articles a
+                LEFT JOIN news_topic_articles ta ON ta.article_id = a.id
+                WHERE a.status = 'active' AND ta.article_id IS NULL AND length(COALESCE(a.content, '')) > 0
+                ORDER BY COALESCE(a.published_at, a.fetched_at) ASC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_row(row) for row in rows]
+
+    def list_recent_news_topics(self, category: str, days: int = 5, limit: int = 30) -> list[dict[str, Any]]:
+        cutoff = _dt(datetime.now(timezone.utc) - timedelta(days=days))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM news_topics
+                   WHERE category = ? AND status = 'active' AND last_seen_at >= ?
+                   ORDER BY last_seen_at DESC LIMIT ?""",
+                (category, cutoff, limit),
+            ).fetchall()
+        items = [_row(row) for row in rows]
+        for item in items:
+            item["keywords"] = json.loads(item.get("keywords_json") or "[]")
+        return items
+
+    def merge_article_into_news_topic(self, article_id: str, extraction: dict[str, Any], allowed_topic_ids: set[str]) -> dict[str, Any]:
+        now = _now()
+        category = str(extraction["category"])
+        name = " ".join(str(extraction["topic_name"]).split())[:120]
+        requested_id = extraction.get("existing_topic_id")
+        topic_id = requested_id if requested_id in allowed_topic_ids else None
+        with self.connect() as conn:
+            if conn.execute("SELECT 1 FROM news_topic_articles WHERE article_id = ?", (article_id,)).fetchone():
+                row = conn.execute("SELECT topic_id FROM news_topic_articles WHERE article_id = ?", (article_id,)).fetchone()
+                return {"topic_id": row["topic_id"], "merged": True, "already_processed": True}
+            if not topic_id:
+                match = conn.execute(
+                    "SELECT id FROM news_topics WHERE category = ? AND lower(name) = lower(?) AND status = 'active' LIMIT 1",
+                    (category, name),
+                ).fetchone()
+                topic_id = match["id"] if match else stable_id("ntp", f"{category}:{name.lower()}")
+            exists = conn.execute("SELECT 1 FROM news_topics WHERE id = ?", (topic_id,)).fetchone()
+            if exists:
+                conn.execute(
+                    """UPDATE news_topics SET summary = ?, keywords_json = ?, last_seen_at = ?, article_count = article_count + 1
+                       WHERE id = ?""",
+                    (extraction["event_summary"], json.dumps(extraction.get("keywords") or [], ensure_ascii=False), now, topic_id),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO news_topics(id, category, name, summary, keywords_json, first_seen_at, last_seen_at, article_count)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 1)""",
+                    (topic_id, category, name, extraction["event_summary"], json.dumps(extraction.get("keywords") or [], ensure_ascii=False), now, now),
+                )
+            conn.execute(
+                """INSERT INTO news_topic_articles(article_id, topic_id, subject, event_summary, confidence, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (article_id, topic_id, extraction["subject"], extraction["event_summary"], float(extraction.get("confidence") or 0), now),
+            )
+        return {"topic_id": topic_id, "merged": bool(exists), "already_processed": False}
 
     def search_articles(self, query: str, category_scope: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
         fts_rows = self._search_articles_fts(query, category_scope, limit)

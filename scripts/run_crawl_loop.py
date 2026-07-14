@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import signal
 import sys
 from pathlib import Path
 
@@ -12,21 +13,23 @@ if str(ROOT) not in sys.path:
 
 from personal_news_agent.config import settings
 from personal_news_agent.services.crawl import CrawlScheduler
+from personal_news_agent.services.crawl_loop import ContinuousCrawlService
 from personal_news_agent.services.search_index import ArticleSearchIndex, ElasticsearchArticleIndex
 from personal_news_agent.services.source_registry import SourceRegistryService
 from personal_news_agent.services.store import NewsStore
+from personal_news_agent.services.topic_extraction import TopicExtractionService
 from personal_news_agent.services.url_store import CrawlUrlStore, MySQLCrawlUrlStore
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Run due source sections according to crawl_interval_minutes.")
+    parser = argparse.ArgumentParser(description="Continuously refresh due portal index pages with a fixed low-concurrency worker pool.")
     parser.add_argument("--category", default=None)
-    parser.add_argument("--limit", type=int, default=10)
-    parser.add_argument("--per-section-limit", type=int, default=10)
-    parser.add_argument("--fetch-articles", type=int, default=1)
-    parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--plan-only", action="store_true")
-    parser.add_argument("--output", type=Path, default=Path("due_crawl_results.json"))
+    parser.add_argument("--workers", type=int, default=2, choices=range(1, 5))
+    parser.add_argument("--due-limit", type=int, default=20)
+    parser.add_argument("--per-section-limit", type=int, default=20)
+    parser.add_argument("--fetch-articles", type=int, default=5)
+    parser.add_argument("--idle-seconds", type=float, default=30.0)
+    parser.add_argument("--extraction-limit", type=int, default=20)
     args = parser.parse_args()
 
     registry = SourceRegistryService(settings.sources_path)
@@ -45,26 +48,25 @@ async def main() -> None:
         await search_index.ensure_index()
     except Exception as exc:
         store.log("search_index_init", "error", "elasticsearch", {"error": str(exc)})
-    scheduler = CrawlScheduler(registry, store, url_store, search_index)
 
-    payload = scheduler.due_plan(category=args.category, limit=args.limit) if args.plan_only else await scheduler.crawl_due(
-        category=args.category,
-        limit=args.limit,
+    service = ContinuousCrawlService(
+        CrawlScheduler(registry, store, url_store, search_index),
+        store,
+        workers=args.workers,
+        due_limit=args.due_limit,
         per_section_limit=args.per_section_limit,
         fetch_articles=args.fetch_articles,
-        workers=args.workers,
+        idle_seconds=args.idle_seconds,
+        topic_extractor=TopicExtractionService(store),
+        extraction_limit=args.extraction_limit,
     )
-    args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-    summary = {
-        "mode": "plan" if args.plan_only else "crawl",
-        "category": args.category,
-        "planned": payload.get("due_count", payload.get("planned_sections")),
-        "saved_articles": payload.get("saved_articles", 0),
-        "errors": payload.get("errors", 0),
-        "mysql_ready": url_store.ready,
-        "elasticsearch_configured": search_index.configured,
-    }
-    print(json.dumps(summary, ensure_ascii=False))
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signal_name in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signal_name, stop.set)
+    print(json.dumps({"status": "started", "workers": args.workers, "category": args.category}, ensure_ascii=False), flush=True)
+    await service.run_forever(stop, category=args.category)
+    print(json.dumps({"status": "stopped"}, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

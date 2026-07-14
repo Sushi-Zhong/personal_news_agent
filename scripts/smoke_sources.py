@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +19,7 @@ from personal_news_agent.services.source_registry import SourceRegistryService
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke test configured news sources.")
     parser.add_argument("--category", action="append", help="Limit to one or more categories.")
+    parser.add_argument("--source", action="append", help="Limit to one or more source IDs.")
     parser.add_argument("--limit-sources", type=int, default=0, help="Maximum sources to test. 0 means all.")
     parser.add_argument("--links", type=int, default=5, help="Minimum links expected per crawlable source.")
     parser.add_argument("--fetch", action="store_true", help="Fetch the first article for each source.")
@@ -30,6 +32,9 @@ async def main() -> None:
     if args.category:
         allowed = set(args.category)
         sources = [source for source in sources if set(source.categories) & allowed]
+    if args.source:
+        allowed_sources = set(args.source)
+        sources = [source for source in sources if source.source_id in allowed_sources]
     if args.limit_sources:
         sources = sources[: args.limit_sources]
 
@@ -54,6 +59,8 @@ async def main() -> None:
                             raw = await adapter.fetch_article(link.url)
                             section_result["fetch_ok"] = bool(raw.title and raw.content)
                             section_result["sample_title"] = raw.title[:120]
+                            section_result["sample_url"] = raw.url
+                            section_result["content_chars"] = len(raw.content)
                             if section_result["fetch_ok"]:
                                 break
                         except Exception as exc:
@@ -79,7 +86,12 @@ async def main() -> None:
         "error_sources": sum(1 for item in results if item["status"] == "error"),
         "skipped_sources": sum(1 for item in results if item["status"] == "skipped"),
     }
-    payload = {"summary": summary, "results": results}
+    payload = {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "criteria": {"minimum_links": args.links, "article_fetch_required": args.fetch},
+        "summary": summary,
+        "results": results,
+    }
     args.output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
 
