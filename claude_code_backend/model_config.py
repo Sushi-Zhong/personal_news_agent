@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from personal_news_agent.config import Settings
+from claude_code_backend.config import LocalAgentSettings
 
 
 YUANRONG_SYSTEM_PROMPT = "你是元融个人助理大模型，回答要简洁、可信、贴合用户长期兴趣。"
@@ -47,8 +47,8 @@ def model_options() -> list[ModelOption]:
     ]
 
 
-def get_model_option(key: str | None, settings: Settings) -> ModelOption:
-    selected = key or settings.llm_default_model
+def get_model_option(key: str | None, settings: LocalAgentSettings) -> ModelOption:
+    selected = key or settings.default_model_key
     options = {option.key: option for option in model_options()}
     if selected in options:
         return options[selected]

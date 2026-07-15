@@ -524,6 +524,115 @@ function bindAskButtons() {
   });
 }
 
+const assistantSlashCommands = [
+  {
+    name: "factcheck",
+    label: "事实核查",
+    description: "核查关键说法，并区分事实、争议与未知",
+    icon: "✓",
+  },
+  {
+    name: "report",
+    label: "生成专题报告",
+    description: "汇总当前主题的进展、证据与关键结论",
+    icon: "▤",
+  },
+  {
+    name: "brief",
+    label: "生成新闻简报",
+    description: "把当前关注内容整理成一份快速简报",
+    icon: "☀",
+  },
+  {
+    name: "related",
+    label: "查找相关新闻",
+    description: "补充相关报道、历史背景与延伸线索",
+    icon: "⌁",
+  },
+];
+
+function bindSlashCommandMenu(inputSelector = "#message") {
+  const input = document.querySelector(inputSelector);
+  const form = input?.closest("form");
+  if (!input || !form || form.querySelector(".slash-command-menu")) return;
+
+  const menu = document.createElement("div");
+  menu.className = "slash-command-menu";
+  menu.hidden = true;
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-label", "新闻技能");
+  form.appendChild(menu);
+
+  let visibleCommands = [];
+  let activeIndex = 0;
+
+  const closeMenu = () => {
+    menu.hidden = true;
+    input.removeAttribute("aria-activedescendant");
+  };
+
+  const selectCommand = (command) => {
+    input.value = `/${command.name} `;
+    closeMenu();
+    input.focus();
+  };
+
+  const renderMenu = () => {
+    const value = input.value;
+    if (!value.startsWith("/") || value.slice(1).includes(" ")) {
+      closeMenu();
+      return;
+    }
+    const query = value.slice(1).toLowerCase();
+    visibleCommands = assistantSlashCommands.filter((command) =>
+      `${command.name} ${command.label} ${command.description}`.toLowerCase().includes(query),
+    );
+    if (!visibleCommands.length) {
+      closeMenu();
+      return;
+    }
+    activeIndex = Math.min(activeIndex, visibleCommands.length - 1);
+    menu.innerHTML = `
+      <div class="slash-command-heading">技能</div>
+      ${visibleCommands.map((command, index) => `
+        <button type="button" id="slash-command-${command.name}" class="slash-command-item${index === activeIndex ? " active" : ""}" role="option" aria-selected="${index === activeIndex}" data-slash-command="${command.name}">
+          <span class="slash-command-icon" aria-hidden="true">${command.icon}</span>
+          <span class="slash-command-copy"><strong>/${command.name}</strong><span>${command.label}</span><small>${command.description}</small></span>
+        </button>
+      `).join("")}
+    `;
+    menu.hidden = false;
+    input.setAttribute("aria-activedescendant", `slash-command-${visibleCommands[activeIndex].name}`);
+  };
+
+  input.addEventListener("input", () => {
+    activeIndex = 0;
+    renderMenu();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (menu.hidden) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      activeIndex = (activeIndex + direction + visibleCommands.length) % visibleCommands.length;
+      renderMenu();
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      selectCommand(visibleCommands[activeIndex]);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu();
+    }
+  });
+  menu.addEventListener("mousedown", (event) => event.preventDefault());
+  menu.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-slash-command]");
+    const command = assistantSlashCommands.find((item) => item.name === button?.dataset.slashCommand);
+    if (command) selectCommand(command);
+  });
+  input.addEventListener("blur", () => window.setTimeout(closeMenu, 120));
+}
+
 function parseAssistantCommand(message) {
   const value = String(message || "").trim();
   if (!value.startsWith("/")) return null;

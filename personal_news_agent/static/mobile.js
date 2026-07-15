@@ -16,6 +16,7 @@ syncMobileChatContext();
 syncMobileSessionState();
 syncMobileBriefToggle();
 syncMobileViewModeFromScroll();
+bindSlashCommandMenu();
 
 document.querySelectorAll("[data-auth-mode-target]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -295,6 +296,22 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已保存跟踪：${mobileState.topic}`);
       return result;
     }
+    if (["report", "r"].includes(command.name)) {
+      applyMobileTopicCommand(command);
+      return sendChatIntoTurn(`围绕${mobileState.topic}生成一份专题报告，汇总最新进展、关键证据、主要参与方、影响与不确定性。`, assistantNode);
+    }
+    if (["brief"].includes(command.name)) {
+      applyMobileTopicCommand(command);
+      return sendChatIntoTurn(`基于我的兴趣和当前关注的${mobileState.topic}，生成一份简洁的新闻简报，包含重点、影响和接下来值得关注的事项。`, assistantNode);
+    }
+    if (["related"].includes(command.name)) {
+      applyMobileTopicCommand(command);
+      return sendChatIntoTurn(`查找与${mobileState.topic}相关的新闻，补充近期报道、历史背景、关键主体和可继续追踪的线索，并说明它们为什么相关。`, assistantNode);
+    }
+    if (["factcheck", "verify"].includes(command.name)) {
+      applyMobileTopicCommand(command);
+      return sendChatIntoTurn(`对“${mobileState.topic}”进行事实核查。先明确待核查的核心说法，再按已证实、存在争议、缺乏证据分类，列出可引用来源、证据时间和局限；没有可靠证据时明确说明，不要推测。`, assistantNode);
+    }
     if (["feed"].includes(command.name)) {
       mobileCategory = commandArg(command, "cat", "category") || commandText(command) || "";
       mobileState.categoryScope = mobileCategory ? [mobileCategory] : [];
@@ -304,7 +321,7 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/search、/topic、/task、/deep、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/feed。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);

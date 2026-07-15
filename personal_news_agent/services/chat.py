@@ -345,7 +345,7 @@ class NewsChatService:
         if event_line and event_line.get("items"):
             await _add_trace(trace, {"stage": "事件线", "status": "completed", "message": f"生成 {len(event_line.get('items') or [])} 个时间节点。", "count": len(event_line.get("items") or [])}, on_trace)
 
-        if self.llm_client.configured and evidence:
+        if self.llm_client.configured :#and evidence:
             try:
                 await _add_trace(trace, {"stage": "生成回答", "status": "running", "message": "正在组织 markdown 回答。"}, on_trace)
                 answer = await self.llm_client.chat(_research_messages(message, query, categories, time_range, evidence, expanded_queries, event_line, trace))
