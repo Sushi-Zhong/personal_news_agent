@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 from claude_code_backend.config import LocalAgentSettings, settings
-from claude_code_backend.models import ChatMessage, ChatRequest, ChatResponse, SessionCreateRequest, SessionState, utc_now
+from claude_code_backend.models import (
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
+    ContextEvent,
+    ContextResponse,
+    ContextUpdateRequest,
+    SessionCreateRequest,
+    SessionState,
+    utc_now,
+)
 from claude_code_backend.provider import LocalModelClient, LocalModelError, build_default_client
-from claude_code_backend.session_store import InMemorySessionStore, SessionStore
+from claude_code_backend.session_store import JsonFileSessionStore, SessionStore
 
 
 class LocalAgentService:
@@ -14,7 +24,7 @@ class LocalAgentService:
         config: LocalAgentSettings = settings,
     ) -> None:
         self.config = config
-        self.store = store or InMemorySessionStore()
+        self.store = store or JsonFileSessionStore(config.session_store_path)
         self.client = client or build_default_client(config)
 
     def create_session(self, payload: SessionCreateRequest) -> SessionState:
@@ -24,11 +34,49 @@ class LocalAgentService:
             project_context=payload.project_context,
             metadata=payload.metadata,
         )
+        if payload.project_context:
+            session.context_events.append(
+                ContextEvent(source="session_create", values=payload.project_context, summary="initial context")
+            )
         self.store.save(session)
         return session
 
     def get_session(self, session_id: str) -> SessionState | None:
         return self.store.get(session_id)
+
+    def get_context(self, session_id: str) -> ContextResponse | None:
+        session = self.store.get(session_id)
+        if session is None:
+            return None
+        return ContextResponse(
+            session_id=session.session_id,
+            project_context=session.project_context,
+            context_events=session.context_events,
+        )
+
+    def update_context(self, session_id: str, payload: ContextUpdateRequest) -> ContextResponse | None:
+        session = self.store.get(session_id)
+        if session is None:
+            return None
+        if payload.replace:
+            session.project_context = dict(payload.values)
+        else:
+            session.project_context.update(payload.values)
+        session.context_events.append(
+            ContextEvent(
+                source=payload.source,
+                summary=payload.summary,
+                values=payload.values,
+                metadata=payload.metadata,
+            )
+        )
+        session.updated_at = utc_now()
+        self.store.save(session)
+        return ContextResponse(
+            session_id=session.session_id,
+            project_context=session.project_context,
+            context_events=session.context_events,
+        )
 
     async def chat(self, payload: ChatRequest) -> ChatResponse:
         session = self._resolve_session(payload)
@@ -41,12 +89,22 @@ class LocalAgentService:
             },
         )
         session.messages.append(user_message)
-        session.project_context.update(payload.project_context)
+        if payload.project_context:
+            session.project_context.update(payload.project_context)
+            session.context_events.append(
+                ContextEvent(
+                    source="chat_request",
+                    summary="context supplied with chat request",
+                    values=payload.project_context,
+                    metadata={"model_key": payload.model_key, "user_id": payload.user_id},
+                )
+            )
         session.updated_at = utc_now()
 
         history = session.messages[-self.config.max_history_messages :]
+        provider_request = payload.model_copy(update={"session_id": session.session_id})
         try:
-            text, provider_metadata = await self.client.complete(payload, history)
+            text, provider_metadata = await self.client.complete(provider_request, history)
             status = "ok"
         except LocalModelError as exc:
             text = str(exc)

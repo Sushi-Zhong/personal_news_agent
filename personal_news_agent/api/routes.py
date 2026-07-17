@@ -18,6 +18,7 @@ from personal_news_agent.api.schemas import (
     NotificationReadRequest,
     OnboardingRequest,
     ProfileRequest,
+    RelatedSearchRequest,
     RegisterRequest,
     ReportRequest,
     SearchRequest,
@@ -204,7 +205,14 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     @app.post("/api/news/search")
     async def search(payload: SearchRequest) -> dict[str, Any]:
         time_range = parse_range(payload.time_range)
-        results = await search_service.search(payload.query, payload.category_scope, payload.source_scope, time_range, payload.max_results)
+        results = await search_service.search(
+            payload.query,
+            payload.category_scope,
+            payload.source_scope,
+            time_range,
+            payload.max_results,
+            include_remote=payload.allow_web_search,
+        )
         return {"items": results}
 
     @app.post("/api/news/deep-dive")
@@ -215,6 +223,19 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             source_scope=payload.source_scope,
             rounds=payload.rounds,
             breadth=payload.breadth,
+            include_remote=payload.allow_web_search,
+        )
+
+    @app.post("/api/news/related")
+    async def related_search(payload: RelatedSearchRequest) -> Any:
+        return await services["chat"].related_search(
+            payload.conversation_id,
+            payload.query,
+            topic=payload.topic,
+            category_scope=payload.category_scope,
+            user_id=payload.user_id,
+            max_queries=payload.max_queries,
+            allow_web_search=payload.allow_web_search,
         )
 
     @app.post("/api/news/search/ingest")
@@ -239,8 +260,20 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
         )
 
     @app.get("/api/topics")
-    async def list_topics(user_id: str = "default", topic_type: str | None = None, limit: int = Query(default=50, ge=1, le=100)) -> dict[str, Any]:
-        return {"items": services["topic_agent"].list_topics(user_id=user_id, topic_type=topic_type, limit=limit)}
+    async def list_topics(
+        user_id: str = "default",
+        topic_type: str | None = None,
+        conversation_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return {
+            "items": services["topic_agent"].list_topics(
+                user_id=user_id,
+                topic_type=topic_type,
+                limit=limit,
+                conversation_id=conversation_id,
+            )
+        }
 
     @app.post("/api/topics")
     async def create_topic(payload: TopicCreateRequest) -> dict[str, Any]:
@@ -252,6 +285,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
                     category_scope=payload.category_scope,
                     schedule=payload.schedule,
                     refresh_now=payload.refresh_now,
+                    conversation_id=payload.conversation_id,
                 )
             return await services["topic_agent"].create_topic(
                 user_id=payload.user_id,
@@ -260,6 +294,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
                 schedule=payload.schedule,
                 topic_type=payload.topic_type,
                 refresh_now=payload.refresh_now,
+                conversation_id=payload.conversation_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -271,7 +306,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             "local_backend": "sqlite_fts",
             "primary_recall_backend": "elasticsearch" if search_index.configured else "sqlite_fts",
             "external_provider": settings.external_search_provider,
-            "external_configured": bool(settings.bing_search_key) if settings.external_search_provider == "bing" else False,
+            "external_configured": search_service.external_configured,
             "elasticsearch": await search_index.health(),
             "crawl_url_store": {
                 "backend": settings.crawl_url_backend,
@@ -287,12 +322,53 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
 
     @app.post("/api/chat")
     async def chat(payload: ChatRequest) -> Any:
-        return await services["chat"].chat(payload.conversation_id, payload.message, payload.topic, payload.category_scope, payload.use_llm, user_id=payload.user_id)
+        return await services["chat"].chat(
+            payload.conversation_id,
+            payload.message,
+            payload.topic,
+            payload.category_scope,
+            payload.use_llm,
+            user_id=payload.user_id,
+            allow_web_search=payload.allow_web_search,
+        )
+
+    @app.get("/api/chat/conversations")
+    async def chat_conversations(
+        user_id: str = "default",
+        limit: int = Query(default=30, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return {"items": store.list_conversations(user_id=user_id, limit=limit)}
+
+    @app.get("/api/chat/conversations/{conversation_id}")
+    async def chat_history(
+        conversation_id: str,
+        user_id: str = "default",
+        limit: int = Query(default=40, ge=1, le=100),
+    ) -> dict[str, Any]:
+        turns = store.list_turns(conversation_id, user_id=user_id, limit=limit)
+        last = turns[-1] if turns else None
+        return {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "turns": turns,
+            "context": {
+                "topic": (last or {}).get("topic"),
+                "category_scope": (last or {}).get("category_scope") or [],
+            },
+        }
 
     @app.post("/api/chat/stream")
     async def chat_stream(payload: ChatRequest) -> StreamingResponse:
         async def event_stream():
-            async for event in services["chat"].chat_events(payload.conversation_id, payload.message, payload.topic, payload.category_scope, payload.use_llm, user_id=payload.user_id):
+            async for event in services["chat"].chat_events(
+                payload.conversation_id,
+                payload.message,
+                payload.topic,
+                payload.category_scope,
+                payload.use_llm,
+                user_id=payload.user_id,
+                allow_web_search=payload.allow_web_search,
+            ):
                 event_type = event.get("type", "message")
                 data = json.dumps(event, ensure_ascii=False, default=str)
                 yield f"event: {event_type}\ndata: {data}\n\n"

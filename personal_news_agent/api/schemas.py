@@ -11,6 +11,7 @@ class SearchRequest(BaseModel):
     source_scope: list[str] | None = None
     time_range: str | None = "7d"
     max_results: int = Field(default=20, ge=1, le=100)
+    allow_web_search: bool = False
 
 
 class DeepDiveRequest(BaseModel):
@@ -19,6 +20,17 @@ class DeepDiveRequest(BaseModel):
     source_scope: list[str] | None = None
     rounds: int = Field(default=2, ge=1, le=4)
     breadth: int = Field(default=4, ge=1, le=8)
+    allow_web_search: bool = False
+
+
+class RelatedSearchRequest(BaseModel):
+    conversation_id: str | None = None
+    user_id: str = "default"
+    query: str
+    topic: str | None = None
+    category_scope: list[str] | None = None
+    max_queries: int = Field(default=5, ge=2, le=8)
+    allow_web_search: bool = False
 
 
 class NativeSearchIngestRequest(BaseModel):
@@ -40,6 +52,7 @@ class TopicViewRequest(BaseModel):
 
 class TopicCreateRequest(BaseModel):
     user_id: str = "default"
+    conversation_id: str | None = None
     text: str | None = None
     title: str | None = None
     topic_type: str = "user"
@@ -55,6 +68,7 @@ class ChatRequest(BaseModel):
     topic: str | None = None
     category_scope: list[str] | None = None
     use_llm: bool = False
+    allow_web_search: bool = False
 
 
 class ReportRequest(BaseModel):

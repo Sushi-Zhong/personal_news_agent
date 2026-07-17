@@ -128,13 +128,13 @@ Implemented:
 - API: `POST /api/news/search/ingest`
 - audit CLI: `scripts/audit_source_search.py`
 
-Verified with `张雪机车`:
+Verified with a sports-domain query:
 
 - native source audit: CCTV Sports and Hupu are `native_html_ready`
 - native ingest discovered 10 URLs across CCTV Sports and Hupu
 - fetched 8 articles
 - indexed 8 articles into ES
-- ES now recalls the fetched CCTV/Hupu articles for `张雪机车`
+- ES now recalls the fetched CCTV/Hupu articles for the same query
 
 Held:
 

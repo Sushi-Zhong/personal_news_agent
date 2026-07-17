@@ -156,6 +156,8 @@ class ChatResponse(BaseModel):
     conversation_id: str
     answer: str
     context_relation: str
+    topic: str | None = None
+    category_scope: list[str] = []
     focus_object: FocusObject | None = None
     required_context_items: list[str] = []
     recommendations: list[SearchResult] = []
@@ -164,6 +166,7 @@ class ChatResponse(BaseModel):
     evidence: list[dict[str, Any]] = []
     expanded_queries: list[dict[str, Any]] = []
     event_line: dict[str, Any] | None = None
+    mind_map: dict[str, Any] | None = None
 
 
 class ReportResponse(BaseModel):

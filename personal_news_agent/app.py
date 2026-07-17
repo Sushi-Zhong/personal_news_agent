@@ -9,12 +9,13 @@ from personal_news_agent.api.routes import register_routes
 from personal_news_agent.config import settings
 from personal_news_agent.services.factory import build_services
 from personal_news_agent.services.source_registry import SourceRegistryError
-
+from claude_code_backend import create_local_agent_router
 
 def create_app() -> FastAPI:
     services = build_services(settings)
     app = FastAPI(title=settings.app_name)
     app.state.services = services
+    app.include_router(create_local_agent_router())
 
     static_dir = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")

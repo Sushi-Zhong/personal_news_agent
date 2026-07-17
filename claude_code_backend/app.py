@@ -6,7 +6,7 @@ from claude_code_backend.routes import create_local_agent_router
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Local Agent SDK Backend")
+    app = FastAPI(title="Claude Code / Local Agent Backend")
     app.include_router(create_local_agent_router())
     return app
 

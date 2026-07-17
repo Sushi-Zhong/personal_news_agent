@@ -21,7 +21,7 @@ Request:
 
 ```json
 {
-  "topic": "张雪机车",
+  "topic": "机车赛事",
   "category_scope": ["sports"],
   "source_scope": null,
   "max_articles": 16
@@ -34,7 +34,7 @@ Response shape:
 {
   "topic": {
     "id": "topic_xxx",
-    "title": "张雪机车",
+    "title": "机车赛事",
     "status": "active",
     "updated_at": "..."
   },
@@ -59,7 +59,7 @@ Response shape:
     "view_type": "relation_graph",
     "layout": "radial_seed",
     "nodes": [
-      {"id": "topic", "label": "张雪机车", "type": "topic", "weight": 8, "source_article_ids": []}
+      {"id": "topic", "label": "机车赛事", "type": "topic", "weight": 8, "source_article_ids": []}
     ],
     "edges": [
       {"id": "edge_xxx", "source": "topic", "target": "node_xxx", "label": "相关", "weight": 3, "source_article_ids": []}

@@ -44,7 +44,7 @@ HOLD_HTML_CANDIDATES = {
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Audit native search paths/APIs for configured news sources.")
-    parser.add_argument("--query", default="张雪机车")
+    parser.add_argument("--query", default="机车赛事")
     parser.add_argument("--category", default=None)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--output", type=Path, default=Path("source_search_audit_results.json"))

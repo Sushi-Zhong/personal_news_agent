@@ -1,20 +1,22 @@
-# Local Agent SDK Backend
+# Claude Code / Local Agent Backend
 
-This directory is an isolated backend scaffold for a Claude Agent SDK-style
-coding agent that runs against a local model service.
+This directory is an isolated backend scaffold that can run either Claude Code
+CLI or an OpenAI-compatible local model service.
 
-It does not include a Claude-specific model entry and does not call Anthropic by
-default. The model backend is expected to be a local OpenAI-compatible server,
-such as Ollama, LM Studio, vLLM, llama.cpp server, or another local gateway.
+It is not wired into the main application. The default remains a local
+OpenAI-compatible server, so adding this folder does not call Claude or change
+the existing news backend.
 
 ## What is included
 
 - `models.py`: request and response schemas for sessions, messages, attachments,
   and chat responses.
-- `session_store.py`: in-memory session storage that can later be replaced by
-  SQLite, MySQL, Redis, or the project's existing storage layer.
+- `session_store.py`: JSON-backed session storage for messages, project context,
+  and context event history.
 - `service.py`: local-agent orchestration for session history and provider calls.
 - `provider.py`: OpenAI-compatible local model client.
+- `provider.py`: also contains an opt-in Claude Code CLI provider using print
+  mode, JSON output, and resumable sessions.
 - `model_config.py`: NPA-style model options and `model_key` to `provider_model`
   mapping.
 - `routes.py`: FastAPI router under `/api/local-agent`.
@@ -76,7 +78,64 @@ PNA_LOCAL_AGENT_API_KEY=
 PNA_LOCAL_AGENT_TIMEOUT_SECONDS=120
 PNA_LOCAL_AGENT_MAX_HISTORY=30
 PNA_LOCAL_AGENT_TEMPERATURE=0.2
+PNA_LOCAL_AGENT_SESSION_STORE=.local_agent_sessions.json
 ```
+
+## Claude Code CLI mode
+
+Install and authenticate Claude Code separately, then select the CLI provider:
+
+```bash
+PNA_LOCAL_AGENT_PROVIDER=claude-code-cli
+PNA_LOCAL_AGENT_WORKSPACE=/absolute/path/to/personal_news_agent
+PNA_CLAUDE_CODE_BINARY=claude
+PNA_CLAUDE_CODE_MODEL=sonnet
+PNA_CLAUDE_CODE_PERMISSION_MODE=plan
+PNA_CLAUDE_CODE_MAX_TURNS=6
+PNA_CLAUDE_CODE_MAX_BUDGET_USD=1.00
+```
+
+The safe default permission mode is `plan`. Change permissions only when the
+future integration explicitly needs file edits or command execution. The
+backend passes arguments directly to the executable without invoking a shell.
+
+Each backend session maps to a Claude Code session ID. The first request uses
+`--session-id`; later requests use `--resume`, allowing Claude Code to preserve
+its own conversation context while this scaffold keeps an application-readable
+JSON session record.
+
+## Context recording
+
+The backend records context in two places:
+
+- `project_context`: the latest merged context dictionary used for model calls.
+- `context_events`: an append-only history of where each context update came
+  from.
+
+Create a session with initial context:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/local-agent/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"default","title":"demo","project_context":{"topic":"AI news"}}'
+```
+
+Append or merge context:
+
+```bash
+curl -X PUT http://127.0.0.1:8000/api/local-agent/sessions/{session_id}/context \
+  -H "Content-Type: application/json" \
+  -d '{"source":"frontend","summary":"user selected topic","values":{"topic":"sports AI","language":"zh"}}'
+```
+
+Read current context plus history:
+
+```bash
+curl http://127.0.0.1:8000/api/local-agent/sessions/{session_id}/context
+```
+
+Passing `project_context` in `/chat` also records a `chat_request` context event
+and merges those values into the session before calling the local model.
 
 ## Optional integration later
 

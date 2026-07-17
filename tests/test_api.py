@@ -42,7 +42,8 @@ def test_api_health_and_main_routes():
 
         mobile = client.get("/mobile")
         assert mobile.status_code == 200
-        assert "移动端" in mobile.text
+        assert 'id="mobileTemplate"' in mobile.text
+        assert "联网回答" in mobile.text
 
 
 def test_auth_register_login_and_realname_status():
@@ -172,6 +173,33 @@ def test_api_chat_report_and_task_flow():
         assert turn2.status_code == 200
         assert turn2.json()["focus_object"]["ordinal"] == 2
 
+        history = client.get("/api/chat/conversations/api_conv?user_id=default")
+        assert history.status_code == 200
+        assert len(history.json()["turns"]) >= 2
+        assert history.json()["turns"][-1]["response"]["conversation_id"] == "api_conv"
+
+        conversations = client.get("/api/chat/conversations?user_id=default")
+        assert conversations.status_code == 200
+        api_conversation = next(item for item in conversations.json()["items"] if item["conversation_id"] == "api_conv")
+        assert api_conversation["first_message"] == "今天汽车圈有什么新闻？"
+        assert api_conversation["turn_count"] >= 2
+
+        auto_topic_user = f"auto_topic_{uuid4().hex[:8]}"
+        new_topic = client.post(
+            "/api/chat",
+            json={
+                "conversation_id": f"auto_topic_conv_{uuid4().hex[:8]}",
+                "user_id": auto_topic_user,
+                "message": "量子计算产业最近消息",
+            },
+        )
+        assert new_topic.status_code == 200
+        detected_title = new_topic.json()["topic"]
+        detected_topics = client.get(f"/api/topics?user_id={auto_topic_user}")
+        detected = next(item for item in detected_topics.json()["items"] if item["title"] == detected_title)
+        assert detected["topic_type"] == "user"
+        assert detected["task_id"] is None
+
         report = client.post(
             "/api/reports",
             json={"topic": "新能源汽车价格战", "category_scope": ["auto", "economy"], "time_range": "30d"},
@@ -224,7 +252,7 @@ def test_api_chat_report_and_task_flow():
                 "task_type": "topic_tracking",
                 "schedule": "*/20 * * * *",
                 "category_scope": ["sports"],
-                "topics": ["张雪机车"],
+                "topics": ["机车赛事"],
             },
         )
         assert due_task.status_code == 200
@@ -241,7 +269,7 @@ def test_topic_agent_creates_user_topic_and_chat_tracking():
         user_id = f"topic_user_{uuid4().hex[:8]}"
         listed = client.get(f"/api/topics?user_id={user_id}&limit=20")
         assert listed.status_code == 200
-        assert any(item["topic_type"] == "system" and "世界杯" in item["title"] for item in listed.json()["items"])
+        assert any(item["topic_type"] == "system" and "大型体育赛事" in item["title"] for item in listed.json()["items"])
 
         created = client.post(
             "/api/topics",
@@ -265,12 +293,22 @@ def test_topic_agent_creates_user_topic_and_chat_tracking():
         original_ingestion = topic_agent.native_ingestion
         topic_agent.native_ingestion = None
         try:
+            pending = client.post(
+                "/api/chat",
+                json={
+                    "conversation_id": "topic_agent_conv",
+                    "user_id": user_id,
+                    "message": "创建一个新的长期专题任务",
+                },
+            )
+            assert pending.status_code == 200
+            assert pending.json()["context_relation"] == "topic_create_pending"
             chat = client.post(
                 "/api/chat",
                 json={
                     "conversation_id": "topic_agent_conv",
                     "user_id": user_id,
-                    "message": "我想做一个关于阿根廷队世界杯表现的主题，并帮我持续更新",
+                    "message": "阿根廷队世界杯表现",
                 },
             )
         finally:

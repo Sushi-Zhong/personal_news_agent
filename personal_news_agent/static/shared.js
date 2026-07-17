@@ -1,5 +1,32 @@
 let activeUserId = localStorage.getItem("pna_user_id") || "default";
 let conversationId = localStorage.getItem("pna_conversation_id") || null;
+let webSearchEnabled = localStorage.getItem(webSearchPreferenceKey()) === "1";
+
+function webSearchPreferenceKey() {
+  return `pna_web_search_enabled:${activeUserId || "default"}`;
+}
+
+function isWebSearchEnabled() {
+  return webSearchEnabled;
+}
+
+function setWebSearchEnabled(enabled) {
+  webSearchEnabled = Boolean(enabled);
+  localStorage.setItem(webSearchPreferenceKey(), webSearchEnabled ? "1" : "0");
+  document.querySelectorAll("[data-web-search-toggle]").forEach((input) => {
+    input.checked = webSearchEnabled;
+  });
+  if (window.currentChatContext) window.currentChatContext.allow_web_search = webSearchEnabled;
+}
+
+function bindWebSearchToggles() {
+  document.querySelectorAll("[data-web-search-toggle]").forEach((input) => {
+    input.checked = webSearchEnabled;
+    input.addEventListener("change", () => setWebSearchEnabled(input.checked));
+  });
+}
+
+bindWebSearchToggles();
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -297,6 +324,7 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
     topic: chatContext.topic || null,
     category_scope: chatContext.category_scope || null,
     use_llm: Boolean(chatContext.use_llm),
+    allow_web_search: Boolean(chatContext.allow_web_search),
   };
   try {
     const streamed = await streamChat(payload, assistantNode, targetNode);
@@ -310,8 +338,70 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   });
   conversationId = data.conversation_id;
   localStorage.setItem("pna_conversation_id", conversationId);
-  assistantNode.innerHTML = chatResponseHtml(data);
+  setAssistantResponseHtml(assistantNode, chatResponseHtml(data));
+  syncChatResponseContext(data);
+  await notifyConversationHistoryChanged();
   return data;
+}
+
+async function notifyConversationHistoryChanged() {
+  const refreshers = [window.refreshTopics].filter(
+    (refresh) => typeof refresh === "function",
+  );
+  for (const refresh of refreshers) {
+    try {
+      await refresh();
+    } catch (error) {
+      // 回答已经保存，侧栏刷新失败不应影响本轮回答。
+    }
+  }
+}
+
+function chatMemoryKey() {
+  const page = window.location.pathname || "/";
+  return `pna_chat_memory:${activeUserId || "default"}:${page}`;
+}
+
+async function restoreChatMemory(target = "#messages") {
+  if (!conversationId) return false;
+  const targetNode = document.querySelector(target) || document.querySelector("#messages");
+  if (!targetNode) return false;
+  try {
+    const data = await request(
+      `/api/chat/conversations/${encodeURIComponent(conversationId)}?user_id=${encodeURIComponent(activeUserId || "default")}&limit=40`,
+    );
+    if (!data.turns?.length) return false;
+    targetNode.innerHTML = "";
+    targetNode.classList.add("chat-stream");
+    data.turns.forEach((turn) => {
+      targetNode.appendChild(chatTurn("user", turn.user_message || ""));
+      const node = chatTurn("assistant", "");
+      setAssistantResponseHtml(node, chatResponseHtml(turn.response || {
+        conversation_id: conversationId,
+        answer: turn.assistant_answer || "",
+        context_relation: "restored_history",
+      }));
+      targetNode.appendChild(node);
+    });
+    localStorage.removeItem(chatMemoryKey());
+    if (typeof window.applyChatConversationContext === "function") {
+      window.applyChatConversationContext(data.context || {});
+    }
+    targetNode.scrollTop = targetNode.scrollHeight;
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function syncChatResponseContext(response) {
+  localStorage.removeItem(chatMemoryKey());
+  if (typeof window.applyChatConversationContext === "function") {
+    window.applyChatConversationContext({
+      topic: response?.topic || response?.focus_object?.text || null,
+      category_scope: response?.category_scope || [],
+    });
+  }
 }
 
 function appendLocalTurn(role, text, target = "#messages", loading = false) {
@@ -327,7 +417,13 @@ function appendLocalTurn(role, text, target = "#messages", loading = false) {
 
 function setAssistantTurnText(node, text) {
   if (!node) return;
-  node.innerHTML = `<div class="assistant-markdown"><p>${escapeHtml(text)}</p></div>`;
+  setAssistantResponseHtml(node, `<div class="assistant-markdown"><p>${escapeHtml(text)}</p></div>`);
+}
+
+function setAssistantResponseHtml(node, html) {
+  if (!node) return;
+  node.innerHTML = `${html}${turnActionsHtml("assistant")}`;
+  mountRelatedMindMaps(node);
 }
 
 async function streamChat(payload, assistantNode, targetNode) {
@@ -360,7 +456,9 @@ async function streamChat(payload, assistantNode, targetNode) {
       } else if (event.type === "final" && event.response) {
         conversationId = event.response.conversation_id || conversationId;
         if (conversationId) localStorage.setItem("pna_conversation_id", conversationId);
-        assistantNode.innerHTML = chatResponseHtml(event.response);
+        setAssistantResponseHtml(assistantNode, chatResponseHtml(event.response));
+        syncChatResponseContext(event.response);
+        await notifyConversationHistoryChanged();
         return event.response;
       } else if (event.type === "error") {
         throw new Error(event.message || "流式请求失败");
@@ -403,17 +501,86 @@ function chatTurn(role, text, loading = false) {
   if (loading) {
     wrapper.innerHTML = `<div class="trace-loading">搜集线索中...</div>`;
   } else {
-    wrapper.innerHTML = `<div class="chat-bubble">${escapeHtml(text)}</div>`;
+    wrapper.innerHTML = `<div class="chat-bubble">${escapeHtml(text)}</div>${turnActionsHtml(role)}`;
   }
   return wrapper;
 }
 
+function turnActionsHtml(role) {
+  const edit = role === "user"
+    ? '<button type="button" data-turn-action="edit" title="编辑并重新发送" aria-label="编辑并重新发送">✎</button>'
+    : "";
+  return `<div class="turn-actions" aria-label="消息操作">${edit}<button type="button" data-turn-action="copy" title="复制" aria-label="复制">⧉</button></div>`;
+}
+
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-turn-action]");
+  if (!button) return;
+  const turn = button.closest(".chat-turn");
+  if (!turn) return;
+  const action = button.dataset.turnAction;
+  if (action === "edit") {
+    const input = document.querySelector("#message");
+    const text = turn.querySelector(".chat-bubble")?.textContent?.trim() || "";
+    if (!input || !text) return;
+    input.value = text;
+    input.focus();
+    input.select?.();
+    return;
+  }
+  if (action === "copy") {
+    const text = turnCopyText(turn);
+    if (!text) return;
+    await copyTurnText(text);
+    const original = button.textContent;
+    button.textContent = "✓";
+    button.setAttribute("aria-label", "已复制");
+    window.setTimeout(() => {
+      button.textContent = original;
+      button.setAttribute("aria-label", "复制");
+    }, 1200);
+  }
+});
+
+function turnCopyText(turn) {
+  if (turn.classList.contains("chat-user")) {
+    return turn.querySelector(".chat-bubble")?.textContent?.trim() || "";
+  }
+  return (
+    turn.querySelector(".assistant-markdown")?.textContent?.trim()
+    || turn.querySelector(".chat-bubble")?.textContent?.trim()
+    || ""
+  );
+}
+
+async function copyTurnText(text) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (error) {
+      // 非安全上下文中继续使用本地复制回退。
+    }
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
 function chatResponseHtml(data) {
   const trace = renderResearchTrace(data.research_trace || []);
-  const answer = renderMarkdown(data.markdown || data.answer || "");
+  const mindMap = renderChatMindMapPlaceholder(data.mind_map);
+  const answerText = data.mind_map ? stripRelatedMindMapMarkdown(data.markdown || data.answer || "") : data.markdown || data.answer || "";
+  const answer = renderMarkdown(answerText);
   const timeline = renderChatEventLine(data.event_line);
   const sources = renderChatSources(data.evidence || []);
-  return `${trace}<div class="assistant-markdown">${answer}</div>${timeline}${sources}`;
+  return `${trace}${mindMap}<div class="assistant-markdown">${answer}</div>${timeline}${sources}`;
 }
 
 function chatStreamingHtml(state) {
@@ -452,6 +619,292 @@ function renderChatSources(items) {
         `<a href="${escapeAttr(item.url || "#")}" target="_blank" rel="noreferrer"><span>[${escapeHtml(item.index || "")}]</span>${escapeHtml(item.title || "")}<small>${escapeHtml(item.source_id || "")} ${escapeHtml(item.published_at || "")}</small></a>`
     )
     .join("")}</details>`;
+}
+
+function renderChatMindMapPlaceholder(map) {
+  const branches = (map && map.branches) || [];
+  if (!branches.length) return "";
+  const id = `mind_map_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+  window.__pnaMindMapPayloads = window.__pnaMindMapPayloads || {};
+  window.__pnaMindMapPayloads[id] = map;
+  return `<div class="related-mind-map-host" data-related-map-id="${escapeAttr(id)}">${renderMindMapFallback(map)}</div>`;
+}
+
+function mountRelatedMindMaps(scope = document) {
+  if (!window.React || !window.ReactDOM) return;
+  const hosts = scope.querySelectorAll("[data-related-map-id]:not([data-react-mounted='true'])");
+  hosts.forEach((host) => {
+    const map = (window.__pnaMindMapPayloads || {})[host.dataset.relatedMapId];
+    if (!map) return;
+    host.dataset.reactMounted = "true";
+    try {
+      const root = ReactDOM.createRoot(host);
+      root.render(React.createElement(RelatedMindMapExplorer, { map }));
+    } catch (error) {
+      host.innerHTML = renderMindMapFallback(map);
+    }
+  });
+}
+
+function RelatedMindMapExplorer({ map }) {
+  const branches = React.useMemo(() => normalizeMindMapBranches(map), [map]);
+  const [activeIndex, setActiveIndex] = React.useState(0);
+  const activeBranch = branches[activeIndex] || branches[0];
+  const layout = React.useMemo(() => buildExplorerLayout(branches), [branches]);
+  const activePoints = (activeBranch?.points || []).slice(0, 5);
+
+  return React.createElement(
+    "section",
+    { className: "related-explorer", "aria-label": "相关联想探索图" },
+    React.createElement(
+      "header",
+      { className: "related-explorer-head" },
+      React.createElement(
+        "div",
+        null,
+        React.createElement("span", null, "Related Map"),
+        React.createElement("strong", null, map.topic || "当前主题"),
+        React.createElement("p", null, "先看从哪些关系出发，再看每条关系召回了哪些证据。")
+      ),
+      React.createElement(
+        "div",
+        { className: "related-explorer-stats" },
+        React.createElement("span", null, `${branches.length} 个方向`),
+        React.createElement("span", null, `${map.evidence_count || 0} 条证据`)
+      )
+    ),
+    React.createElement(
+      "div",
+      { className: "related-explorer-body" },
+      React.createElement(
+        "div",
+        { className: "related-explorer-map", style: { height: layout.height } },
+        React.createElement(ExplorerLinks, { branches, layout, activeIndex }),
+        React.createElement("div", { className: "explorer-stage-size", style: { width: layout.width, height: layout.height } }),
+        React.createElement(ExplorerNode, {
+          kind: "center",
+          x: layout.center.x,
+          y: layout.center.y,
+          width: layout.center.width,
+          height: layout.center.height,
+          eyebrow: "中心主题",
+          title: map.topic || "当前主题",
+          detail: "联想搜索起点",
+        }),
+        branches.map((branch, index) =>
+          React.createElement(ExplorerNode, {
+            key: `branch_${index}`,
+            kind: "branch",
+            relationType: branch.relationType,
+            active: index === activeIndex,
+            x: layout.branches[index].x,
+            y: layout.branches[index].y,
+            width: layout.branches[index].width,
+            height: layout.branches[index].height,
+            eyebrow: "联想依据",
+            title: branch.relationLabel,
+            detail: branch.edgeReason,
+            onClick: () => setActiveIndex(index),
+          })
+        )
+      ),
+      React.createElement(
+        "aside",
+        { className: "related-explorer-detail", style: { "--relation-color": relationColor(activeBranch?.relationType) } },
+        React.createElement("span", null, activeBranch?.relationLabel || "相关方向"),
+        React.createElement("strong", null, activeBranch?.title || "相关方向"),
+        React.createElement("p", null, activeBranch?.edgeReason || "从这个方向补充关联信息。"),
+        React.createElement(
+          "div",
+          { className: "detail-evidence-list" },
+          activePoints.length
+            ? activePoints.map((point, index) =>
+                React.createElement(
+                  "a",
+                  { key: `${point.title}_${index}`, href: point.url || "#", target: "_blank", rel: "noreferrer" },
+                  React.createElement("span", null, point.evidence_index ? `#${point.evidence_index}` : `0${index + 1}`),
+                  React.createElement("strong", null, point.title || "相关证据"),
+                  React.createElement("small", null, evidenceSnippet(point.summary || point.connection_reason || "暂无摘要"))
+                )
+              )
+            : React.createElement("p", { className: "detail-empty" }, "这个方向暂时没有召回证据。")
+        )
+      )
+    )
+  );
+}
+
+function ExplorerLinks({ branches, layout, activeIndex }) {
+  return React.createElement(
+    "svg",
+    { className: "explorer-link-layer", viewBox: `0 0 ${layout.width} ${layout.height}`, "aria-hidden": "true" },
+    React.createElement(
+      "defs",
+      null,
+      React.createElement(
+        "filter",
+        { id: "explorerGlow", x: "-20%", y: "-20%", width: "140%", height: "140%" },
+        React.createElement("feGaussianBlur", { stdDeviation: "3", result: "blur" }),
+        React.createElement("feMerge", null, React.createElement("feMergeNode", { in: "blur" }), React.createElement("feMergeNode", { in: "SourceGraphic" }))
+      )
+    ),
+    branches.map((branch, index) => {
+      const branchPosition = layout.branches[index];
+      const active = index === activeIndex;
+      const color = relationColor(branch.relationType);
+      const startX = layout.center.x + layout.center.width;
+      const startY = layout.center.y + layout.center.height / 2;
+      const endX = branchPosition.x;
+      const endY = branchPosition.y + branchPosition.height / 2;
+      return React.createElement(
+        React.Fragment,
+        { key: `links_${index}` },
+        React.createElement("path", {
+          className: `explorer-link ${active ? "active" : ""}`,
+          d: curvePath(startX, startY, endX, endY),
+          style: { "--relation-color": color },
+          filter: active ? "url(#explorerGlow)" : "",
+        }),
+        React.createElement(
+          "foreignObject",
+          { x: (startX + endX) / 2 - 52, y: (startY + endY) / 2 - 15, width: 104, height: 30 },
+          React.createElement("div", { xmlns: "http://www.w3.org/1999/xhtml", className: `explorer-edge-label ${active ? "active" : ""}`, style: { "--relation-color": color } }, branch.relationLabel)
+        )
+      );
+    })
+  );
+}
+
+function ExplorerNode({ kind, relationType = "other", active = false, muted = false, x, y, width, height, eyebrow, title, detail, href, onClick }) {
+  const props = {
+    role: onClick ? "button" : undefined,
+    tabIndex: onClick ? 0 : undefined,
+    className: `explorer-node ${kind} ${active ? "active" : ""} ${muted ? "muted" : ""}`,
+    style: { left: x, top: y, width, minHeight: height, "--relation-color": relationColor(relationType) },
+    onClick,
+    onKeyDown: onClick
+      ? (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onClick();
+          }
+        }
+      : undefined,
+  };
+  const content = [
+    React.createElement("span", { key: "eyebrow" }, eyebrow),
+    React.createElement("strong", { key: "title" }, truncateText(title, kind === "point" ? 54 : 38)),
+    React.createElement("small", { key: "detail" }, truncateText(detail, kind === "point" ? 64 : 56)),
+  ];
+  if (href) {
+    return React.createElement("a", { ...props, href, target: "_blank", rel: "noreferrer" }, content);
+  }
+  return React.createElement("div", props, content);
+}
+
+function normalizeMindMapBranches(map) {
+  return ((map && map.branches) || []).map((branch) => ({
+    ...branch,
+    relationType: flowRelationType(branch.relation_type),
+    relationLabel: branch.relation_label || "语义相关",
+    edgeReason: branch.edge_reason || branch.reason || "从这个方向补充关联信息。",
+    points: branch.points || [],
+  }));
+}
+
+function buildExplorerLayout(branches) {
+  const width = 720;
+  const height = Math.max(360, branches.length * 88 + 52);
+  const center = { x: 36, y: 0, width: 220, height: 130 };
+  const branchWidth = 210;
+  const branchHeight = 86;
+  const branchX = 402;
+  const branchYs = branchYPositions(branches.length, height, branchHeight);
+  center.y = height / 2 - center.height / 2;
+  const branchesLayout = [];
+  branches.forEach((branch, branchIndex) => {
+    const xOffset = branchIndex % 2 === 0 ? 18 : 78;
+    branchesLayout.push({ x: branchX + xOffset, y: branchYs[branchIndex], width: branchWidth, height: branchHeight });
+  });
+  return { width, height, center, branches: branchesLayout };
+}
+
+function branchYPositions(count, height, branchHeight) {
+  if (count <= 1) return [height / 2 - branchHeight / 2];
+  const top = 26;
+  const bottom = height - branchHeight - 26;
+  return Array.from({ length: count }, (_, index) => top + ((bottom - top) * index) / Math.max(1, count - 1));
+}
+
+function curvePath(startX, startY, endX, endY) {
+  const distance = Math.max(80, Math.abs(endX - startX) * 0.48);
+  return `M ${startX} ${startY} C ${startX + distance} ${startY}, ${endX - distance} ${endY}, ${endX} ${endY}`;
+}
+
+function relationColor(type) {
+  const colors = {
+    latest: "#2563eb",
+    background: "#7c3aed",
+    actor: "#0891b2",
+    impact: "#c2410c",
+    follow_up: "#15803d",
+    center: "#111827",
+    other: "#475467",
+  };
+  return colors[type] || colors.other;
+}
+
+function flowRelationType(value) {
+  const type = String(value || "other").replace(/[^a-z_]/gi, "").toLowerCase();
+  return ["latest", "background", "actor", "impact", "follow_up", "other"].includes(type) ? type : "other";
+}
+
+function renderMindMapFallback(map) {
+  const branches = (map && map.branches) || [];
+  return `<section class="related-explorer-fallback">
+    <strong>${escapeHtml(map.topic || "相关联想图")}</strong>
+    <p>${escapeHtml(branches.length)} 个方向 · ${escapeHtml(map.evidence_count || 0)} 条证据</p>
+    <div>${branches
+      .slice(0, 6)
+      .map((branch) => `<span>${escapeHtml(branch.relation_label || "相关")}：${escapeHtml(truncateText(branch.title || "", 24))}</span>`)
+      .join("")}</div>
+  </section>`;
+}
+
+function evidenceSnippet(value) {
+  return truncateText(
+    String(value || "")
+      .replace(/!\[[^\]]*]\([^)]+\)/g, "")
+      .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
+      .replace(/https?:\/\/\S+/g, "")
+      .replace(/#+\s*/g, "")
+      .replace(/\s+/g, " ")
+      .trim(),
+    96
+  );
+}
+
+function stripRelatedMindMapMarkdown(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const output = [];
+  let skippingMindMap = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "## 相关思维导图") {
+      skippingMindMap = true;
+      continue;
+    }
+    if (skippingMindMap && trimmed.startsWith("## ")) {
+      skippingMindMap = false;
+    }
+    if (!skippingMindMap) output.push(line);
+  }
+  return output.join("\n").trim();
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
 function renderMarkdown(markdown) {

@@ -10,6 +10,8 @@ from claude_code_backend.model_config import public_model_options
 from claude_code_backend.models import (
     ChatRequest,
     ChatResponse,
+    ContextResponse,
+    ContextUpdateRequest,
     HealthResponse,
     SessionCreateRequest,
     SessionState,
@@ -28,13 +30,15 @@ def create_local_agent_router(service: LocalAgentService | None = None) -> APIRo
             enabled=settings.enabled,
             provider=settings.provider_name,
             default_model=settings.default_model_key,
-            base_url=settings.base_url,
+            base_url=("claude-code-cli" if settings.provider_name == "claude-code-cli" else settings.base_url),
             model_options=public_model_options(),
             routes=[
                 "GET /api/local-agent/health",
                 "GET /api/local-agent/models",
                 "POST /api/local-agent/sessions",
                 "GET /api/local-agent/sessions/{session_id}",
+                "GET /api/local-agent/sessions/{session_id}/context",
+                "PUT /api/local-agent/sessions/{session_id}/context",
                 "POST /api/local-agent/chat",
                 "POST /api/local-agent/chat/stream",
             ],
@@ -46,7 +50,7 @@ def create_local_agent_router(service: LocalAgentService | None = None) -> APIRo
             "items": public_model_options(),
             "default_model": settings.default_model_key,
             "endpoint_configured": bool(settings.base_url),
-            "local_only": True,
+            "local_only": settings.provider_name != "claude-code-cli",
         }
 
     @router.post("/sessions", response_model=SessionState)
@@ -59,6 +63,20 @@ def create_local_agent_router(service: LocalAgentService | None = None) -> APIRo
         if session is None:
             raise HTTPException(status_code=404, detail="session not found")
         return session
+
+    @router.get("/sessions/{session_id}/context", response_model=ContextResponse)
+    async def get_context(session_id: str) -> ContextResponse:
+        context = service.get_context(session_id)
+        if context is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return context
+
+    @router.put("/sessions/{session_id}/context", response_model=ContextResponse)
+    async def update_context(session_id: str, payload: ContextUpdateRequest) -> ContextResponse:
+        context = service.update_context(session_id, payload)
+        if context is None:
+            raise HTTPException(status_code=404, detail="session not found")
+        return context
 
     @router.post("/chat", response_model=ChatResponse)
     async def chat(payload: ChatRequest) -> ChatResponse:

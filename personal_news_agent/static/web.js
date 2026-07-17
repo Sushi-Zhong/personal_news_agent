@@ -14,16 +14,15 @@ if (activeUserId === "default") {
 }
 
 const consoleState = {
-  topic: "张雪机车",
-  categoryScope: ["sports"],
+  topic: "新能源汽车产业链",
+  categoryScope: ["auto"],
   view: "event-line",
   topicPayload: null,
 };
+let pendingTopicFromNextMessage = false;
 const bootstrapTopics = [
-  { title: "张雪机车", category_scope: ["sports"], topic_type: "user" },
-  { title: "NBA 总决赛", category_scope: ["sports"], topic_type: "user" },
-  { title: "俄乌战争对农作物的影响", category_scope: ["politics", "economy"], topic_type: "user" },
-  { title: "AI 终端设备", category_scope: ["tech"], topic_type: "user" },
+  { title: "科技公司上市观察", category_scope: ["tech", "economy"], topic_type: "system" },
+  { title: "大型体育赛事运营", category_scope: ["sports"], topic_type: "system" },
 ];
 syncChatContext();
 syncContextDock();
@@ -31,6 +30,7 @@ bindSlashCommandMenu();
 
 document.querySelector("#refresh")?.addEventListener("click", () => refreshWeb());
 document.querySelector("#feedCategory")?.addEventListener("change", () => loadFeedAndEvents());
+document.querySelector("#newTopicConversation")?.addEventListener("click", startNewTopicConversation);
 
 document.querySelector("#openConfig")?.addEventListener("click", async () => {
   document.querySelector("#configDialog").showModal();
@@ -84,17 +84,28 @@ document.querySelector("#enableBrowserPush")?.addEventListener("click", async ()
 document.querySelectorAll("[data-action]").forEach((button) => {
   button.addEventListener("click", async () => {
     const action = button.dataset.action;
-    if (action === "deep-dive-chat") {
-      await runDeepDive();
-      await sendChat(`围绕${consoleState.topic}做一次深度挖掘，按最新进展、关键主体和不确定性总结。`);
-    } else if (action === "make-topic") {
-      await loadTopicView();
-      await sendChat(`把${consoleState.topic}整理成专题，给我事件线和关系网观察重点。`);
-    } else if (action === "make-task") {
-      await createTrackingTask(document.querySelector("#taskForm"));
-      await sendChat(`已把${consoleState.topic}设为跟踪主题，告诉我后续应该重点盯哪些变化。`);
-    } else if (action === "make-report") {
-      await generateTopicReport();
+    button.disabled = true;
+    setStatus(`正在执行：${button.textContent.trim()}。`);
+    try {
+      if (action === "changes") {
+        await sendChat(`${consoleState.topic}今天有哪些值得关注的新变化？`);
+      } else if (action === "deep-dive-chat") {
+        await runDeepDive();
+        await sendChat(`围绕${consoleState.topic}做一次深度挖掘，按最新进展、关键主体和不确定性总结。`);
+      } else if (action === "make-topic") {
+        await loadTopicView();
+        await sendChat(`把${consoleState.topic}整理成专题，给我事件线和关系网观察重点。`);
+      } else if (action === "make-task") {
+        await createTrackingTask(document.querySelector("#taskForm"));
+        await sendChat(`已把${consoleState.topic}设为跟踪主题，告诉我后续应该重点盯哪些变化。`);
+      } else if (action === "make-report") {
+        await generateTopicReport();
+      }
+      setStatus(`已执行：${button.textContent.trim()}。`);
+    } catch (error) {
+      setStatus(error.message);
+    } finally {
+      button.disabled = false;
     }
   });
 });
@@ -127,21 +138,39 @@ document.querySelector("#taskForm")?.addEventListener("submit", async (event) =>
 
 bindAskButtons();
 bindNotificationReads();
+bindRailTooltips();
 window.handleAssistantInput = handleAssistantInput;
+window.applyChatConversationContext = applyChatConversationContext;
+window.refreshTopics = loadTopics;
+restoreChatMemory("#messages");
 loadOnboardingOptions("#onboardingForm").then(() => loadProfileIntoForm("#onboardingForm"));
 startTaskPushPolling();
 refreshWeb();
 
 async function refreshWeb() {
   setStatus("正在刷新数据。");
-  await Promise.all([loadSystemStatus(), loadSourceSummary(), loadFeedAndEvents(), loadDueUrls(), loadTasks(), loadTaskNotifications(), loadTopics()]);
+  await Promise.all([
+    loadSystemStatus(),
+    loadSourceSummary(),
+    loadFeedAndEvents(),
+    loadDueUrls(),
+    loadTasks(),
+    loadTaskNotifications(),
+    loadTopics(),
+  ]);
   await loadTopicView();
   setStatus("已更新。");
 }
 
 async function handleAssistantInput(message) {
   const command = parseAssistantCommand(message);
-  if (!command) return sendChat(message);
+  if (!command) {
+    const response = await sendChat(message);
+    if (pendingTopicFromNextMessage) {
+      await createTopicFromFirstMessage(message, response);
+    }
+    return response;
+  }
 
   appendLocalTurn("user", message);
   const assistantNode = appendLocalTurn("assistant", "", "#messages", true);
@@ -179,7 +208,7 @@ async function handleAssistantInput(message) {
     }
     if (["related"].includes(command.name)) {
       await applyTopicCommand(command, { reload: false });
-      return sendChatIntoTurn(`查找与${consoleState.topic}相关的新闻，补充近期报道、历史背景、关键主体和可继续追踪的线索，并说明它们为什么相关。`, assistantNode);
+      return runRelatedSearchIntoTurn(assistantNode);
     }
     if (["factcheck", "verify"].includes(command.name)) {
       await applyTopicCommand(command, { reload: false });
@@ -202,6 +231,64 @@ async function handleAssistantInput(message) {
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);
+    return null;
+  }
+}
+
+async function runRelatedSearchIntoTurn(assistantNode) {
+  const topic = consoleState.topic || document.querySelector("#topicInput")?.value?.trim() || "";
+  const data = await request("/api/news/related", {
+    method: "POST",
+    body: JSON.stringify({
+      conversation_id: conversationId,
+      user_id: activeUserId || "default",
+      query: topic || "当前关注",
+      topic,
+      category_scope: consoleState.categoryScope,
+      max_queries: 5,
+      allow_web_search: isWebSearchEnabled(),
+    }),
+  });
+  conversationId = data.conversation_id;
+  localStorage.setItem("pna_conversation_id", conversationId);
+  setAssistantResponseHtml(assistantNode, chatResponseHtml(data));
+  syncChatResponseContext(data);
+  await notifyConversationHistoryChanged();
+  return data;
+}
+
+async function createTopicFromFirstMessage(message, response) {
+  const createdConversationId = response?.conversation_id || conversationId;
+  if (!createdConversationId) return null;
+  const title = canonicalTopicTitle(response?.topic || response?.focus_object?.text || message) || message;
+  const categoryScope = response?.category_scope || consoleState.categoryScope || [];
+  try {
+    const result = await request("/api/topics", {
+      method: "POST",
+      body: JSON.stringify({
+        user_id: activeUserId || "default",
+        conversation_id: createdConversationId,
+        title,
+        category_scope: categoryScope,
+        refresh_now: true,
+      }),
+    });
+    const topic = result.topic || {};
+    pendingTopicFromNextMessage = false;
+    conversationId = createdConversationId;
+    localStorage.setItem("pna_conversation_id", conversationId);
+    consoleState.topic = topic.title || title;
+    consoleState.categoryScope = topic.category_scope || categoryScope;
+    syncChatContext();
+    syncContextDock();
+    syncTaskTopic();
+    await loadTopics();
+    await loadTopicView();
+    await loadDueUrls();
+    setStatus(`已新建关注：${consoleState.topic}`);
+    return result;
+  } catch (error) {
+    setStatus(error.message);
     return null;
   }
 }
@@ -284,19 +371,102 @@ async function loadDueUrls() {
 
 async function loadTopics() {
   const target = document.querySelector("[data-topic-list]");
-  if (!target || !activeUserId || activeUserId === "default") {
+  if (!target) {
     bindTopicCards();
     return;
   }
+  const userId = activeUserId || "default";
   try {
-    const data = await request(`/api/topics?user_id=${encodeURIComponent(activeUserId)}&limit=16`);
+    const data = await request(`/api/topics?user_id=${encodeURIComponent(userId)}&limit=50`);
     const items = mergeTopics([...(data.items || []), ...bootstrapTopics]);
-    if (!items.length) return;
+    if (!items.length) {
+      target.innerHTML = '<p class="rail-empty">暂无关注</p>';
+      return;
+    }
     target.innerHTML = items.map((item) => topicButtonHtml(item)).join("");
     bindTopicCards();
   } catch (error) {
     bindTopicCards();
   }
+}
+
+function bindRailTooltips() {
+  let tooltip = null;
+  const ensureTooltip = () => {
+    if (tooltip) return tooltip;
+    tooltip = document.createElement("div");
+    tooltip.className = "rail-tooltip";
+    document.body.appendChild(tooltip);
+    return tooltip;
+  };
+
+  const tooltipText = (node) => (
+    node?.dataset.tooltip
+    || node?.dataset.topicTitle
+    || node?.querySelector("span")?.textContent
+    || ""
+  ).trim();
+
+  const shouldShowTooltip = (node) => {
+    const label = node?.querySelector("span");
+    return Boolean(label && (label.scrollWidth > label.clientWidth || tooltipText(node) !== label.textContent.trim()));
+  };
+
+  const positionTooltip = (node) => {
+    const tip = ensureTooltip();
+    const rect = node.getBoundingClientRect();
+    const margin = 10;
+    const width = tip.offsetWidth || 240;
+    const left = Math.min(rect.right + margin, window.innerWidth - width - margin);
+    const top = Math.min(Math.max(rect.top, margin), window.innerHeight - tip.offsetHeight - margin);
+    tip.style.transform = `translate(${Math.max(margin, left)}px, ${Math.max(margin, top)}px)`;
+  };
+
+  document.addEventListener("pointerover", (event) => {
+    const node = event.target.closest?.(".topic-card");
+    if (!node || !shouldShowTooltip(node)) return;
+    const tip = ensureTooltip();
+    tip.textContent = tooltipText(node);
+    positionTooltip(node);
+    tip.classList.add("visible");
+  });
+
+  document.addEventListener("pointermove", (event) => {
+    const node = event.target.closest?.(".topic-card");
+    if (!node || !tooltip?.classList.contains("visible")) return;
+    positionTooltip(node);
+  });
+
+  document.addEventListener("pointerout", (event) => {
+    const node = event.target.closest?.(".topic-card");
+    if (!node || node.contains(event.relatedTarget)) return;
+    tooltip?.classList.remove("visible");
+  });
+}
+
+function startNewTopicConversation() {
+  pendingTopicFromNextMessage = true;
+  conversationId = null;
+  localStorage.removeItem("pna_conversation_id");
+  consoleState.topic = "";
+  consoleState.categoryScope = [];
+  consoleState.topicPayload = null;
+  document.querySelectorAll(".topic-card").forEach((item) => item.classList.remove("active"));
+  const messages = document.querySelector("#messages");
+  if (messages) {
+    messages.innerHTML = "";
+    messages.appendChild(chatTurn("assistant", "请输入要关注的主题。你发出的第一句话会成为这组关注对话的主题。"));
+  }
+  const topicInput = document.querySelector("#topicInput");
+  const categorySelect = document.querySelector("#categoryScope");
+  const dialogContext = document.querySelector("[data-dialog-context]");
+  if (topicInput) topicInput.value = "";
+  if (categorySelect) categorySelect.value = "";
+  if (dialogContext) dialogContext.textContent = "从一个新问题开始。";
+  syncChatContext();
+  syncContextDock();
+  syncTaskTopic();
+  document.querySelector("#message")?.focus();
 }
 
 async function loadTasks() {
@@ -369,6 +539,7 @@ async function runDeepDive() {
         category_scope: consoleState.categoryScope,
         rounds: 2,
         breadth: 4,
+        allow_web_search: isWebSearchEnabled(),
       }),
     });
     renderDeepDive(data);
@@ -431,19 +602,45 @@ function bindTopicCards() {
     button.dataset.bound = "true";
     button.addEventListener("click", async () => {
       document.querySelectorAll(".topic-card").forEach((item) => item.classList.toggle("active", item === button));
-      const previousTopic = consoleState.topic;
-      consoleState.topic = button.dataset.topicTitle || button.textContent.trim();
-      consoleState.categoryScope = parseScope(button.dataset.categoryScope || "");
+      pendingTopicFromNextMessage = false;
+      const selectedConversationId = button.dataset.conversationId || "";
+      const selectedTopic = button.dataset.topicTitle || button.textContent.trim();
+      const selectedScope = parseScope(button.dataset.categoryScope || "");
+      if (selectedConversationId) {
+        conversationId = selectedConversationId;
+        localStorage.setItem("pna_conversation_id", conversationId);
+      } else {
+        conversationId = null;
+        localStorage.removeItem("pna_conversation_id");
+      }
+      consoleState.topic = selectedTopic;
+      consoleState.categoryScope = selectedScope;
       syncChatContext();
       syncContextDock();
       document.querySelector("#topicInput").value = consoleState.topic;
       document.querySelector("#categoryScope").value = button.dataset.categoryScope || "";
       syncTaskTopic();
+      const messages = document.querySelector("#messages");
+      if (messages) {
+        messages.innerHTML = "";
+        messages.appendChild(chatTurn("assistant", `已切换到：${selectedTopic}`));
+      }
+      if (selectedConversationId) {
+        const restored = await restoreChatMemory("#messages");
+        if (!restored && messages) {
+          messages.innerHTML = "";
+          messages.appendChild(chatTurn("assistant", `已切换到：${selectedTopic}`));
+        }
+        consoleState.topic = selectedTopic;
+        consoleState.categoryScope = selectedScope;
+        syncChatContext();
+        syncContextDock();
+        document.querySelector("#topicInput").value = consoleState.topic;
+        document.querySelector("#categoryScope").value = button.dataset.categoryScope || "";
+        syncTaskTopic();
+      }
       await loadTopicView();
       await loadDueUrls();
-      if (previousTopic !== consoleState.topic) {
-        await sendChat(`${consoleState.topic} 最近有什么值得关注的变化？`);
-      }
     });
   });
 }
@@ -453,19 +650,48 @@ function mergeTopics(items) {
   const merged = [];
   items.forEach((item) => {
     const title = item.title || "";
-    if (!title || seen.has(title)) return;
-    seen.add(title);
+    if (!title) return;
+    const identity = item.id || item.topic_id || item.conversation_id;
+    const scope = (item.category_scope || []).join(",");
+    const systemKey = item.topic_type === "system"
+      ? `system:${canonicalTopicTitle(title)}:${scope}`
+      : "";
+    if (systemKey && seen.has(systemKey)) return;
+    const key = identity
+      ? `topic:${identity}`
+      : `seed:${item.topic_type || "topic"}:${canonicalTopicTitle(title)}:${scope}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (systemKey) seen.add(systemKey);
     merged.push(item);
   });
   return merged;
 }
 
+function canonicalTopicTitle(title) {
+  let cleaned = String(title || "").replace(/\s+/g, " ").trim();
+  cleaned = cleaned
+    .replace(/\s*有什么.*$/, "")
+    .replace(/\s*有哪些.*$/, "")
+    .replace(/\s*最近.*$/, "")
+    .replace(/\s*值得关注.*$/, "")
+    .replace(/\s*新变化.*$/, "")
+    .replace(/\s*变化.*$/, "")
+    .replace(/\s*消息.*$/, "")
+    .replace(/^和其他(.+?)做对比呢?$/, "$1")
+    .replace(/^其他(.+?)做对比呢?$/, "$1")
+    .trim();
+  return cleaned || String(title || "").trim();
+}
+
 function topicButtonHtml(item) {
   const title = item.title || "";
   const scope = (item.category_scope || []).join(",");
-  const active = title === consoleState.topic ? " active" : "";
+  const itemConversationId = item.conversation_id || "";
+  const active = (itemConversationId && itemConversationId === conversationId) || title === consoleState.topic ? " active" : "";
   const kind = item.topic_type === "system" ? " system-topic" : " user-topic";
-  return `<button class="topic-card${kind}${active}" data-topic-title="${escapeAttr(title)}" data-category-scope="${escapeAttr(scope)}">${escapeHtml(shortTopicTitle(title))}</button>`;
+  const meta = scope ? scope.split(",").join(" / ") : (item.topic_type === "system" ? "system" : "all");
+  return `<button class="topic-card${kind}${active}" type="button" data-topic-title="${escapeAttr(title)}" data-conversation-id="${escapeAttr(itemConversationId)}" data-category-scope="${escapeAttr(scope)}" data-tooltip="${escapeAttr(title)}"><span>${escapeHtml(shortTopicTitle(title))}</span><small>${escapeHtml(meta)}</small></button>`;
 }
 
 function shortTopicTitle(title) {
@@ -536,7 +762,12 @@ function renderTopicHeader(payload) {
   const articles = payload.source_articles || [];
   const latest = events[events.length - 1];
   document.querySelector("[data-topic-heading]").textContent = payload.topic?.title || consoleState.topic;
-  document.querySelector("[data-dialog-context]").textContent = `${payload.topic?.title || consoleState.topic} · ${articles.length || payload.build?.article_count || 0} 条证据，${events.length} 个事件。`;
+  const dialogContext = document.querySelector("[data-dialog-context]");
+  const dialogText = `${payload.topic?.title || consoleState.topic} · ${articles.length || payload.build?.article_count || 0} 条证据，${events.length} 个事件。`;
+  if (dialogContext) {
+    dialogContext.textContent = dialogText;
+    dialogContext.title = dialogText;
+  }
   document.querySelector("[data-topic-summary]").textContent = latest
     ? `${latest.date} · ${latest.title}`
     : `${payload.build?.article_count || 0} 条资料用于构建专题。`;
@@ -685,15 +916,34 @@ function syncChatContext() {
     topic: consoleState.topic,
     category_scope: consoleState.categoryScope,
     use_llm: true,
+    allow_web_search: isWebSearchEnabled(),
   };
+}
+
+function applyChatConversationContext(context = {}) {
+  if (Object.prototype.hasOwnProperty.call(context, "topic")) consoleState.topic = context.topic || "";
+  if (Array.isArray(context.category_scope)) consoleState.categoryScope = context.category_scope;
+  const topicInput = document.querySelector("#topicInput");
+  const categorySelect = document.querySelector("#categoryScope");
+  if (topicInput) topicInput.value = consoleState.topic;
+  if (categorySelect) categorySelect.value = consoleState.categoryScope.join(",");
+  syncChatContext();
+  syncContextDock();
+  syncTaskTopic();
 }
 
 function syncContextDock() {
   const topic = document.querySelector("[data-current-topic-chip]");
   const category = document.querySelector("[data-current-category-chip]");
   const view = document.querySelector("[data-current-view-chip]");
-  if (topic) topic.textContent = consoleState.topic;
-  if (category) category.textContent = consoleState.categoryScope.join(" / ") || "all";
+  if (topic) {
+    topic.textContent = consoleState.topic || "未设置主题";
+    topic.title = topic.textContent;
+  }
+  if (category) {
+    category.textContent = consoleState.categoryScope.join(" / ") || "all";
+    category.title = category.textContent;
+  }
   if (view) view.textContent = consoleState.view === "relation-graph" ? "关系网" : "事件线";
   updateAgentBrief(consoleState.topicPayload);
 }
@@ -705,8 +955,14 @@ function updateAgentBrief(payload) {
   const next = document.querySelector("[data-agent-next]");
   const articles = payload?.source_articles || [];
   const events = payload?.event_line?.items || [];
-  if (topic) topic.textContent = consoleState.topic;
-  if (category) category.textContent = consoleState.categoryScope.join(" / ") || "all";
+  if (topic) {
+    topic.textContent = consoleState.topic || "新对话";
+    topic.title = topic.textContent;
+  }
+  if (category) {
+    category.textContent = consoleState.categoryScope.join(" / ") || "all";
+    category.title = category.textContent;
+  }
   if (evidence) evidence.textContent = String(articles.length || payload?.build?.article_count || 0);
   if (next) next.textContent = events.length >= 3 ? "报告" : "深挖";
 }

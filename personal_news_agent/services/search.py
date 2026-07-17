@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 from urllib.parse import urlparse
 
 import httpx
@@ -15,11 +16,15 @@ from personal_news_agent.services.store import NewsStore
 
 
 class ExternalSearchProvider:
+    configured = False
+
     async def search(self, query: str, domains: list[str], limit: int) -> list[RawSearchResult]:
         return []
 
 
 class BingSearchProvider(ExternalSearchProvider):
+    configured = True
+
     def __init__(self, api_key: str, endpoint: str):
         self.api_key = api_key
         self.endpoint = endpoint
@@ -48,9 +53,79 @@ class BingSearchProvider(ExternalSearchProvider):
         return results[:limit]
 
 
+class TavilySearchProvider(ExternalSearchProvider):
+    configured = True
+
+    def __init__(
+        self,
+        api_key: str,
+        endpoint: str = "https://api.tavily.com/search",
+        search_depth: str = "basic",
+        verify_ssl: bool = True,
+        trust_env: bool = False,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.search_depth = search_depth if search_depth in {"basic", "advanced"} else "basic"
+        self.verify_ssl = verify_ssl
+        self.trust_env = trust_env
+        self.transport = transport
+
+    async def search(self, query: str, domains: list[str], limit: int) -> list[RawSearchResult]:
+        payload: dict[str, object] = {
+            "query": query,
+            "search_depth": self.search_depth,
+            "max_results": min(max(1, limit), 20),
+            "include_answer": False,
+            "include_raw_content": False,
+        }
+        if domains:
+            payload["include_domains"] = domains[:20]
+        async with httpx.AsyncClient(
+            timeout=12.0,
+            verify=self.verify_ssl,
+            trust_env=self.trust_env,
+            transport=self.transport,
+        ) as client:
+            response = await client.post(
+                self.endpoint,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        results: list[RawSearchResult] = []
+        for item in data.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                continue
+            title = str(item.get("title") or url).strip()
+            snippet = str(item.get("content") or "").strip()
+            results.append(
+                RawSearchResult(
+                    source_id=_source_from_domain(url),
+                    title=title,
+                    url=url,
+                    snippet=snippet,
+                )
+            )
+        return results[:limit]
+
+
 def external_provider_from_settings(settings: Settings) -> ExternalSearchProvider:
     if settings.external_search_provider == "bing" and settings.bing_search_key:
         return BingSearchProvider(settings.bing_search_key, settings.bing_search_endpoint)
+    if settings.external_search_provider == "tavily" and settings.tavily_api_key:
+        return TavilySearchProvider(
+            settings.tavily_api_key,
+            settings.tavily_search_endpoint,
+            settings.tavily_search_depth,
+            settings.http_verify_ssl,
+            settings.tavily_trust_env,
+        )
     return ExternalSearchProvider()
 
 
@@ -68,6 +143,45 @@ class UnifiedSearchService:
         self.search_index = search_index or ArticleSearchIndex()
         self._index_disabled_until: datetime | None = None
 
+    @property
+    def external_configured(self) -> bool:
+        return bool(getattr(self.external_provider, "configured", False))
+
+    async def search_external(
+        self,
+        query: str,
+        category_scope: list[str] | None = None,
+        source_scope: list[str] | None = None,
+        max_results: int = 8,
+    ) -> list[SearchResult]:
+        if not self.external_configured:
+            return []
+        domains = self.registry.get_domain_filters(None, source_scope) if source_scope else []
+        raw_results = await self.external_provider.search(query, domains, max_results)
+        results: list[SearchResult] = []
+        seen_urls: set[str] = set()
+        for item in raw_results:
+            if item.url in seen_urls:
+                continue
+            if domains and not self._domain_allowed(item.url, domains):
+                continue
+            results.append(
+                SearchResult(
+                    source_id=item.source_id,
+                    title=item.title,
+                    url=item.url,
+                    summary=item.snippet,
+                    category=category_scope[0] if category_scope else "tech",
+                    published_at=item.published_at,
+                    score=0.6,
+                    origin="external",
+                )
+            )
+            seen_urls.add(item.url)
+            if len(results) >= max_results:
+                break
+        return results
+
     async def search(
         self,
         query: str,
@@ -75,7 +189,7 @@ class UnifiedSearchService:
         source_scope: list[str] | None,
         time_range: TimeRange | None,
         max_results: int = 20,
-        include_remote: bool = True,
+        include_remote: bool = False,
     ) -> list[SearchResult]:
         candidate_limit = max(max_results * 4, 30)
         indexed_rows = []
@@ -170,29 +284,21 @@ class UnifiedSearchService:
                     break
 
         if include_remote and len(results) < candidate_limit:
-            domains = self.registry.get_domain_filters(category_scope, source_scope)
             try:
-                external = await self.external_provider.search(query, domains, candidate_limit - len(results))
-            except Exception as exc:
-                self.store.log("news_search", "error", query, {"error": str(exc), "domains": domains})
-                external = []
-            seen_urls = {item.url for item in results}
-            for item in external:
-                if item.url in seen_urls or not self._domain_allowed(item.url, domains) or not _raw_result_relevant(query, item):
-                    continue
-                category = category_scope[0] if category_scope else "tech"
-                results.append(
-                    SearchResult(
-                        source_id=item.source_id,
-                        title=item.title,
-                        url=item.url,
-                        summary=item.snippet,
-                        category=category,
-                        published_at=item.published_at,
-                        score=0.6,
-                        origin="external",
-                    )
+                external_results = await self.search_external(
+                    query,
+                    category_scope,
+                    source_scope,
+                    min(20, candidate_limit - len(results)),
                 )
+            except Exception as exc:
+                self.store.log("news_search", "error", query, {"error": str(exc), "provider": "external"})
+                external_results = []
+            seen_urls = {item.url for item in results}
+            for item in external_results:
+                if item.url in seen_urls:
+                    continue
+                results.append(item)
                 seen_urls.add(item.url)
                 if len(results) >= candidate_limit:
                     break
@@ -270,7 +376,7 @@ def _row_relevant(query: str, row: dict) -> bool:
     if not terms:
         return True
     text = _compact_text(" ".join(str(row.get(key) or "") for key in ("title", "summary", "content", "keywords")))
-    return any(term in text for term in terms)
+    return terms[0] in text
 
 
 def _raw_result_relevant(query: str, item: RawSearchResult) -> bool:
@@ -333,15 +439,82 @@ def _as_aware_datetime(value: datetime | None) -> datetime | None:
 
 
 def _query_terms(query: str) -> list[str]:
-    normalized = _compact_text(query)
     terms: list[str] = []
-    if len(normalized) >= 2:
-        terms.append(normalized)
-    for part in query.replace("，", " ").replace(",", " ").split():
+    for part in _query_segments(query):
         compact = _compact_text(part)
-        if len(compact) >= 2 and compact not in terms:
-            terms.append(compact)
+        if len(compact) < 2:
+            continue
+        candidates = [compact]
+        if _is_cjk(compact) and len(compact) > 4:
+            candidates = [compact, compact[:4], compact[:2]]
+        for candidate in candidates:
+            if len(candidate) >= 2 and candidate not in terms:
+                terms.append(candidate)
+    normalized = _compact_text(query)
+    if len(normalized) >= 2 and normalized not in terms:
+        terms.append(normalized)
     return terms
+
+
+def _query_segments(query: str) -> list[str]:
+    normalized = re.sub(r"[，。！？?！、,;；:：/|（）()\[\]{}]+", " ", query or "")
+    segments = re.findall(r"[A-Za-z0-9_+.#\-]{2,}|[\u4e00-\u9fff]{2,}", normalized)
+    prefixes = (
+        "我想知道",
+        "想知道",
+        "请告诉我",
+        "告诉我",
+        "请问",
+        "帮我看看",
+        "帮我",
+        "提供一些",
+        "提供",
+        "介绍一下",
+        "介绍",
+        "了解一下",
+        "了解",
+        "别的",
+        "其他",
+    )
+    suffix_pattern = re.compile(r"(?:相关)?(?:一些)?(?:信息|消息|新闻|资讯|情况|资料)$")
+    cleaned: list[str] = []
+    for segment in segments:
+        value = segment
+        for prefix in prefixes:
+            if value.startswith(prefix):
+                value = value[len(prefix) :]
+                break
+        value = suffix_pattern.sub("", value).strip()
+        if len(value) >= 2:
+            cleaned.append(value)
+    return cleaned
+
+
+def _is_cjk(value: str) -> bool:
+    return bool(value) and all("\u4e00" <= char <= "\u9fff" for char in value)
+
+
+def search_result_matches_subject(query: str, item: SearchResult) -> bool:
+    terms = _relevance_terms(query)
+    if not terms:
+        return True
+    text = _compact_text(f"{item.title or ''} {item.summary or ''}")
+    return terms[0] in text
+
+
+def search_result_matches_terms(terms: list[str], item: SearchResult) -> bool:
+    """Match evidence against planner-provided subject terms.
+
+    The caller owns term selection. This keeps the relevance layer independent
+    from any particular news domain while still allowing a search plan to reject
+    results that mention only broad background context.
+    """
+    normalized_terms = [_compact_text(term) for term in terms]
+    normalized_terms = [term for term in normalized_terms if len(term) >= 2]
+    if not normalized_terms:
+        return True
+    text = _compact_text(f"{item.title or ''} {item.summary or ''}")
+    return any(term in text for term in normalized_terms)
 
 
 def _relevance_terms(query: str) -> list[str]:

@@ -9,7 +9,7 @@ class ReportSkill:
         name="专题报告",
         description="围绕指定主题生成带时间线和来源的专题报告。",
         usage="/report <主题> [--category tech,economy] [--time-range 30d]",
-        examples=("/report SpaceX IPO", "/report 俄乌粮食 --category politics,economy"),
+        examples=("/report 科技公司上市观察", "/report 国际局势与大宗商品 --category politics,economy"),
     )
 
     async def run(self, args: list[str], context: SkillContext) -> SkillResult:

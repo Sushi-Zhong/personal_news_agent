@@ -49,6 +49,10 @@ class Settings:
     external_search_provider: str = os.getenv("EXTERNAL_SEARCH_PROVIDER", "none")
     bing_search_key: str | None = os.getenv("BING_SEARCH_KEY")
     bing_search_endpoint: str = os.getenv("BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")
+    tavily_api_key: str | None = os.getenv("TAVILY_API_KEY")
+    tavily_search_endpoint: str = os.getenv("TAVILY_SEARCH_ENDPOINT", "https://api.tavily.com/search")
+    tavily_search_depth: str = os.getenv("TAVILY_SEARCH_DEPTH", "basic")
+    tavily_trust_env: bool = os.getenv("TAVILY_TRUST_ENV", "0") == "1"
     http_verify_ssl: bool = os.getenv("PNA_HTTP_VERIFY_SSL", "0") == "1"
     llm_endpoint: str | None = os.getenv("PNA_LLM_ENDPOINT") or os.getenv("LLM_ENDPOINT")
     llm_key: str | None = os.getenv("PNA_LLM_KEY") or os.getenv("LLM_KEY")

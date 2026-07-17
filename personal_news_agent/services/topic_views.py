@@ -240,7 +240,7 @@ def _node_type(term: str) -> str:
         return "organization"
     if any(token in term for token in ["中国", "美国", "台湾", "重庆", "西班牙", "捷克", "匈牙利"]):
         return "place"
-    if any(token in term for token in ["张雪", "德比斯", "车手", "馆长"]):
+    if any(token in term for token in ["车手", "运动员", "记者", "作者", "创始人", "负责人", "主播"]):
         return "person"
     return "concept"
 

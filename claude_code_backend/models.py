@@ -29,6 +29,15 @@ class ChatMessage(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ContextEvent(BaseModel):
+    event_id: str = Field(default_factory=lambda: uuid4().hex)
+    source: str = "manual"
+    summary: str | None = None
+    values: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class SessionCreateRequest(BaseModel):
     user_id: str = "default"
     title: str | None = None
@@ -41,6 +50,7 @@ class SessionState(BaseModel):
     user_id: str = "default"
     title: str | None = None
     project_context: dict[str, Any] = Field(default_factory=dict)
+    context_events: list[ContextEvent] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     messages: list[ChatMessage] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
@@ -56,6 +66,21 @@ class ChatRequest(BaseModel):
     attachments: list[Attachment] = Field(default_factory=list)
     stream: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextUpdateRequest(BaseModel):
+    user_id: str = "default"
+    source: str = "manual"
+    summary: str | None = None
+    values: dict[str, Any] = Field(default_factory=dict)
+    replace: bool = False
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ContextResponse(BaseModel):
+    session_id: str
+    project_context: dict[str, Any]
+    context_events: list[ContextEvent]
 
 
 class ChatResponse(BaseModel):

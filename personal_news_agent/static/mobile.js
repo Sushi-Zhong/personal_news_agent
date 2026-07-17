@@ -3,13 +3,13 @@ let mobileViewMode = "chat";
 let mobileSnapTimer = null;
 let mobileTypingScrollY = 0;
 const mobileState = {
-  topic: "张雪机车",
+  topic: "新能源汽车产业链",
   categoryScope: [],
 };
 const mobileBootstrapTopics = [
-  { title: "张雪机车", category_scope: ["sports"], topic_type: "user" },
-  { title: "SpaceX IPO 传闻", category_scope: ["tech", "economy"], topic_type: "system" },
-  { title: "2026 世界杯开幕", category_scope: ["sports"], topic_type: "system" },
+  { title: "新能源汽车产业链", category_scope: ["auto"], topic_type: "user" },
+  { title: "科技公司上市观察", category_scope: ["tech", "economy"], topic_type: "system" },
+  { title: "大型体育赛事运营", category_scope: ["sports"], topic_type: "system" },
   { title: "AI 终端设备", category_scope: ["tech"], topic_type: "user" },
 ];
 syncMobileChatContext();
@@ -17,6 +17,9 @@ syncMobileSessionState();
 syncMobileBriefToggle();
 syncMobileViewModeFromScroll();
 bindSlashCommandMenu();
+window.applyChatConversationContext = applyMobileChatConversationContext;
+window.refreshTopics = loadMobileTopics;
+restoreChatMemory("#messages");
 
 document.querySelectorAll("[data-auth-mode-target]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -306,7 +309,7 @@ async function handleMobileAssistantInput(message) {
     }
     if (["related"].includes(command.name)) {
       applyMobileTopicCommand(command);
-      return sendChatIntoTurn(`查找与${mobileState.topic}相关的新闻，补充近期报道、历史背景、关键主体和可继续追踪的线索，并说明它们为什么相关。`, assistantNode);
+      return runMobileRelatedSearchIntoTurn(assistantNode);
     }
     if (["factcheck", "verify"].includes(command.name)) {
       applyMobileTopicCommand(command);
@@ -329,13 +332,36 @@ async function handleMobileAssistantInput(message) {
   }
 }
 
+async function runMobileRelatedSearchIntoTurn(assistantNode) {
+  const data = await request("/api/news/related", {
+    method: "POST",
+    body: JSON.stringify({
+      conversation_id: conversationId,
+      user_id: activeUserId || "default",
+      query: mobileState.topic || "当前关注",
+      topic: mobileState.topic,
+      category_scope: mobileState.categoryScope,
+      max_queries: 5,
+      allow_web_search: isWebSearchEnabled(),
+    }),
+  });
+  conversationId = data.conversation_id;
+  localStorage.setItem("pna_conversation_id", conversationId);
+  setAssistantResponseHtml(assistantNode, chatResponseHtml(data));
+  syncChatResponseContext(data);
+  await notifyConversationHistoryChanged();
+  return data;
+}
+
 async function loadMobileTopics() {
   const target = document.querySelector("[data-mobile-topic-list]");
   if (!target) return;
   try {
-    const remote = activeUserId && activeUserId !== "default"
-      ? await request(`/api/topics?user_id=${encodeURIComponent(activeUserId)}&limit=10`)
-      : { items: [] };
+    const userId = activeUserId || "default";
+    const topicConversationId = conversationId || "__new__";
+    const remote = await request(
+      `/api/topics?user_id=${encodeURIComponent(userId)}&conversation_id=${encodeURIComponent(topicConversationId)}&limit=10`,
+    );
     const items = mergeMobileTopics([...(remote.items || []), ...mobileBootstrapTopics]).slice(0, 8);
     target.innerHTML = items
       .map((item) => `<button type="button" class="${item.topic_type === "system" ? "system-topic" : "user-topic"}" data-mobile-topic="${escapeHtml(item.title)}" data-category-scope="${escapeHtml((item.category_scope || []).join(","))}">${escapeHtml(shortMobileTopic(item.title))}</button>`)
@@ -393,8 +419,17 @@ function syncMobileChatContext() {
     topic: mobileState.topic,
     category_scope: mobileState.categoryScope,
     use_llm: true,
+    allow_web_search: isWebSearchEnabled(),
   };
   updateMobileBrief();
+}
+
+function applyMobileChatConversationContext(context = {}) {
+  if (context.topic) mobileState.topic = context.topic;
+  if (Array.isArray(context.category_scope)) mobileState.categoryScope = context.category_scope;
+  mobileCategory = mobileState.categoryScope[0] || "";
+  syncMobileTabs();
+  syncMobileChatContext();
 }
 
 function syncMobileTabs() {

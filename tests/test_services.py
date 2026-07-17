@@ -1,23 +1,40 @@
 from pathlib import Path
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 
-from personal_news_agent.core.models import RawArticle, RawArticleLink
-from personal_news_agent.services.chat import NewsChatService
+from personal_news_agent.config import Settings
+from personal_news_agent.core.models import RawArticle, RawArticleLink, RawSearchResult, SearchResult, TimeRange
+from personal_news_agent.services.chat import NewsChatService, _filter_by_time, _rank_for_chat
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
 from personal_news_agent.services.article_fetch import _parse_published_datetime, _unwrap_search_link
+from personal_news_agent.services.chat_understanding import (
+    categories_for_message,
+    is_contextual_followup,
+    query_from_message,
+)
 from personal_news_agent.services.native_ingestion import NativeSearchIngestionService
 from personal_news_agent.services.personalization import PersonalizationService
 from personal_news_agent.services.reports import ReportGenerationService
-from personal_news_agent.services.search import UnifiedSearchService
+from personal_news_agent.services.search import (
+    ExternalSearchProvider,
+    TavilySearchProvider,
+    UnifiedSearchService,
+    _relevance_terms,
+    external_provider_from_settings,
+    search_result_matches_subject,
+    search_result_matches_terms,
+)
 from personal_news_agent.services.source_adapter import ListPageAdapter
 from personal_news_agent.services.source_registry import SourceRegistryService
 from personal_news_agent.services.store import NewsStore
 from personal_news_agent.services.tasks import ScheduledTaskService
+from personal_news_agent.services.topic_agent import TopicAgentService
 from personal_news_agent.services.topic_views import TopicViewService
 
 
@@ -40,10 +57,434 @@ def test_search_works_without_external_provider(services):
     assert all(item.category == "tech" for item in results)
 
 
+def test_tavily_provider_maps_search_results():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == "Bearer tvly-test"
+        payload = json.loads(request.content)
+        assert payload["query"] == "上海今天重要新闻"
+        assert payload["search_depth"] == "basic"
+        assert payload["max_results"] == 3
+        assert payload["include_domains"] == ["shio.gov.cn"]
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "url": "https://www.shio.gov.cn/news/1",
+                        "title": "上海今日新闻",
+                        "content": "上海发布最新消息。",
+                        "score": 0.91,
+                    }
+                ]
+            },
+        )
+
+    provider = TavilySearchProvider("tvly-test", transport=httpx.MockTransport(handler))
+    results = asyncio.run(provider.search("上海今天重要新闻", ["shio.gov.cn"], 3))
+    assert len(results) == 1
+    assert results[0].source_id == "shio.gov.cn"
+    assert results[0].title == "上海今日新闻"
+    assert results[0].snippet == "上海发布最新消息。"
+
+
+def test_external_provider_factory_selects_tavily():
+    configured = Settings(external_search_provider="tavily", tavily_api_key="tvly-test")
+    missing_key = Settings(external_search_provider="tavily", tavily_api_key=None)
+    assert isinstance(external_provider_from_settings(configured), TavilySearchProvider)
+    assert not external_provider_from_settings(missing_key).configured
+
+
+def test_external_search_requires_explicit_permission(services):
+    registry, store, _ = services
+    provider = FakeExternalProvider()
+    search = UnifiedSearchService(store, registry, external_provider=provider)
+    asyncio.run(search.search("上海实时天气", ["tech"], None, None, 5))
+    assert provider.calls == 0
+    results = asyncio.run(search.search("上海实时天气", ["tech"], None, None, 5, include_remote=True))
+    assert provider.calls == 1
+    assert any(item.origin == "external" for item in results)
+
+
+def test_external_semantic_results_are_not_dropped_by_exact_sentence_filter(services):
+    registry, store, _ = services
+    search = UnifiedSearchService(store, registry, external_provider=SemanticExternalProvider())
+    query = "机车相关一些信息。提供一些开发商"
+    assert _relevance_terms(query)[:2] == ["机车", "开发商"]
+    results = asyncio.run(search.search_external(query, None, None, 5))
+    assert [item.title for item in results] == ["全球主要摩托车制造商与品牌"]
+
+
+def test_expansion_evidence_must_match_original_subject():
+    query = "机车相关一些信息。提供一些开发商"
+    unrelated = SearchResult(
+        source_id="old-news",
+        title="社会新闻汇总",
+        url="https://example.com/old",
+        summary="内容提到了房地产开发商和政策调整。",
+        category="politics",
+        origin="local",
+    )
+    related = SearchResult(
+        source_id="motorcycle-news",
+        title="当前机车品牌及主要制造商介绍",
+        url="https://example.com/motorcycle",
+        summary="介绍机车品牌、车型和制造企业。",
+        category="auto",
+        origin="external",
+    )
+    assert not search_result_matches_subject(query, unrelated)
+    assert search_result_matches_subject(query, related)
+
+
+def test_long_chinese_query_keeps_full_subject_ahead_of_short_prefixes():
+    query = "背景事件对目标对象的影响 近期变化"
+    terms = _relevance_terms(query)
+    assert terms[0] == "背景事件对目标对象的影响"
+    assert terms.index("背景") > terms.index("背景事件对目标对象的影响")
+
+
+def test_planner_terms_filter_broad_background_results():
+    unrelated = SearchResult(
+        source_id="background",
+        title="背景事件最新进展",
+        url="https://example.com/background",
+        summary="介绍背景事件本身的动态。",
+        category="politics",
+        origin="external",
+    )
+    related = SearchResult(
+        source_id="subject",
+        title="目标对象出现新的变化",
+        url="https://example.com/subject",
+        summary="分析目标对象受到的影响。",
+        category="economy",
+        origin="external",
+    )
+    required_terms = ["目标对象", "对象变化"]
+    assert not search_result_matches_terms(required_terms, unrelated)
+    assert search_result_matches_terms(required_terms, related)
+
+
+def test_search_query_plan_is_generated_from_user_input(services):
+    _, store, search = services
+    llm = FakeSearchPlannerLLM()
+    chat = NewsChatService(store, search, llm_client=llm)
+    plan = asyncio.run(
+        chat._plan_search_query(
+            "背景事件对目标对象有什么影响？",
+            None,
+            "背景事件对目标对象 影响",
+            TimeRange(days=14),
+            True,
+        )
+    )
+    assert plan.source == "llm"
+    assert plan.query == "目标对象 影响 背景事件 近期变化"
+    assert plan.primary_subject == "目标对象受到的影响"
+    assert plan.required_terms == ["目标对象", "对象变化"]
+    assert llm.calls == 1
+
+
+def test_search_query_plan_falls_back_without_web_permission(services):
+    _, store, search = services
+    llm = FakeSearchPlannerLLM()
+    chat = NewsChatService(store, search, llm_client=llm)
+    plan = asyncio.run(chat._plan_search_query("原始问题", None, "完整原始查询", None, False))
+    assert plan.query == "完整原始查询"
+    assert plan.source == "fallback"
+    assert llm.calls == 0
+
+
+def test_related_search_uses_local_agent_queries_and_saves_turn(services):
+    _, store, _ = services
+    search = FakeRelatedSearchService()
+    local_agent = FakeRelatedLocalAgent()
+    chat = NewsChatService(store, search, local_agent=local_agent)
+    response = asyncio.run(
+        chat.related_search(
+            "related_conv",
+            "AI Agent",
+            category_scope=["tech"],
+            user_id="default",
+            max_queries=2,
+        )
+    )
+    assert response.context_relation == "related_search"
+    assert [item["query"] for item in response.expanded_queries] == ["AI Agent 最新进展", "AI Agent 产业影响"]
+    assert response.mind_map
+    assert response.mind_map["topic"] == "AI Agent"
+    assert [branch["title"] for branch in response.mind_map["branches"]] == ["AI Agent 最新进展", "AI Agent 产业影响"]
+    assert response.mind_map["branches"][0]["relation_label"] == "最新进展"
+    assert response.mind_map["branches"][0]["edge_reason"] == "查看近期变化"
+    assert response.mind_map["branches"][0]["points"][0]["title"] == "AI Agent 最新进展 报道"
+    assert response.mind_map["branches"][0]["points"][0]["connection_reason"] == "检索命中「最新进展」方向"
+    assert "相关思维导图" in response.answer
+    assert search.queries == ["AI Agent 最新进展", "AI Agent 产业影响"]
+    assert response.recommendations
+    turns = store.list_turns("related_conv", "default")
+    assert turns[-1]["response"]["context_relation"] == "related_search"
+
+
+def test_chat_source_ingestion_requires_explicit_permission(services):
+    _, store, search = services
+    ingestion = FakeNativeIngestion()
+    chat = NewsChatService(store, search, llm_client=FakeDisabledLLM(), native_ingestion=ingestion)
+    disabled = asyncio.run(chat._research_chat("offline", "上海天气", allow_web_search=False))
+    assert ingestion.calls == 0
+    assert any(item["stage"] == "源搜索入库" and item["status"] == "skipped" for item in disabled.research_trace)
+
+    asyncio.run(chat._research_chat("online", "上海天气", allow_web_search=True))
+    assert ingestion.calls == 1
+
+
+def test_time_filter_keeps_current_external_results_without_published_date():
+    old_local = SearchResult(
+        source_id="local",
+        title="上海旧闻",
+        url="https://example.com/old",
+        summary="上海天气",
+        category="tech",
+        published_at=datetime.now(timezone.utc) - timedelta(days=10),
+        origin="local",
+    )
+    live_external = SearchResult(
+        source_id="shio.gov.cn",
+        title="上海实时消息",
+        url="https://www.shio.gov.cn/live",
+        summary="上海今天的重要消息",
+        category="tech",
+        origin="external",
+    )
+    filtered = _filter_by_time([old_local, live_external], TimeRange(days=1))
+    ranked = _rank_for_chat(filtered, "上海今天有什么重要新闻")
+    assert [item.url for item in ranked] == [live_external.url]
+
+
+def test_chat_understanding_overrides_stale_sports_scope_for_game_topic():
+    assert categories_for_message("我想知道游戏资讯的最近消息", "当前机车品牌", ["sports"]) == ["game"]
+    assert query_from_message("我想知道游戏资讯的最近消息", "当前机车品牌") == "资讯 消息"
+
+
+def test_chat_understanding_keeps_topic_for_contextual_followup():
+    query = query_from_message("还有别的什么机车比赛？我也想知道他们这方面的消息", "当前机车品牌")
+    assert query.startswith("当前机车品牌")
+    assert categories_for_message("还有别的什么机车比赛？", "当前机车品牌", ["sports"]) == ["sports"]
+
+
+def test_chat_understanding_preserves_comparison_intent_with_current_topic():
+    message = "给我一些别的机车公司的信息，这些公司要和当前机车品牌很像"
+    query = query_from_message(message, "当前机车品牌")
+    assert query != "当前机车品牌"
+    assert "机车公司" in query
+    assert "当前机车品牌" in query
+    assert "很像" in query
+    assert categories_for_message(message, "当前机车品牌", ["sports"]) == ["auto"]
+
+
+def test_conversation_context_uses_last_saved_topic(services):
+    _, store, search = services
+    store.save_turn("context_memory", "介绍主题甲", "主题甲回答", [], None, user_id="user_context", topic="主题甲")
+    chat = NewsChatService(store, search)
+    topic, categories = chat._resolve_conversation_context(
+        "context_memory",
+        "继续比较刚刚问的内容",
+        "默认主题",
+        None,
+        "user_context",
+    )
+    assert topic == "主题甲"
+    assert categories is None
+
+
+def test_conversation_context_uses_recent_topic_across_conversations(services):
+    _, store, search = services
+    store.save_turn(
+        "previous_context_memory",
+        "介绍主题甲",
+        "主题甲回答",
+        [],
+        None,
+        user_id="cross_context_user",
+        topic="主题甲",
+        category_scope=["auto"],
+    )
+    chat = NewsChatService(store, search)
+
+    topic, categories = chat._resolve_conversation_context(
+        "new_context_memory",
+        "继续说说刚才那个",
+        None,
+        None,
+        "cross_context_user",
+    )
+
+    assert topic == "主题甲"
+    assert categories == ["auto"]
+    memory = chat._conversation_memory("new_context_memory", "cross_context_user")
+    assert any(item["conversation_id"] == "previous_context_memory" for item in memory)
+
+
+def test_chat_does_not_auto_create_attention_topic_for_normal_question(services):
+    _, store, search = services
+    reports = ReportGenerationService(store, search)
+    tasks = ScheduledTaskService(store, reports)
+    topic_agent = TopicAgentService(store, tasks)
+    chat = NewsChatService(store, search, topic_agent=topic_agent)
+
+    response = asyncio.run(
+        chat.chat(
+            "normal_question_topic",
+            "张雪机车有什么值得关注的新变化？",
+            topic="张雪机车",
+            category_scope=["sports"],
+            user_id="topic_guard_user",
+        )
+    )
+
+    assert response.context_relation != "topic_agent_created"
+    topics = [item for item in store.list_topics("topic_guard_user") if item["topic_type"] == "user"]
+    assert topics == []
+
+
+def test_topic_agent_creates_from_next_message_after_create_command(services):
+    _, store, search = services
+    reports = ReportGenerationService(store, search)
+    tasks = ScheduledTaskService(store, reports)
+    topic_agent = TopicAgentService(store, tasks)
+    chat = NewsChatService(store, search, topic_agent=topic_agent)
+
+    skipped = asyncio.run(
+        topic_agent.maybe_create_topic_from_chat(
+            "explicit_topic_user",
+            "帮我关注张雪机车有什么值得关注的新变化",
+        )
+    )
+    assert skipped is None
+
+    pending = asyncio.run(
+        chat.chat(
+            "explicit_topic_conv",
+            "创建一个新的长期专题任务",
+            user_id="explicit_topic_user",
+        )
+    )
+    assert pending.context_relation == "topic_create_pending"
+
+    created = asyncio.run(
+        chat.chat(
+            "explicit_topic_conv",
+            "张雪机车有什么值得关注的新变化",
+            user_id="explicit_topic_user",
+        )
+    )
+    assert created.context_relation == "topic_agent_created"
+    assert created.focus_object.text == "张雪机车"
+
+
+def test_topic_agent_creates_from_inline_create_command(services):
+    _, store, search = services
+    reports = ReportGenerationService(store, search)
+    tasks = ScheduledTaskService(store, reports)
+    topic_agent = TopicAgentService(store, tasks)
+    chat = NewsChatService(store, search, topic_agent=topic_agent)
+
+    created = asyncio.run(
+        chat.chat(
+            "inline_topic_conv",
+            "创建一个新的长期专题任务 无锡水蜜桃",
+            user_id="inline_topic_user",
+        )
+    )
+
+    assert created.context_relation == "topic_agent_created"
+    assert created.focus_object.text == "无锡水蜜桃"
+    topics = [item for item in store.list_topics("inline_topic_user") if item["topic_type"] == "user"]
+    assert any(item["title"] == "无锡水蜜桃" for item in topics)
+
+
+def test_topics_are_scoped_by_conversation(services):
+    _, store, search = services
+    reports = ReportGenerationService(store, search)
+    tasks = ScheduledTaskService(store, reports)
+    topic_agent = TopicAgentService(store, tasks)
+
+    asyncio.run(
+        topic_agent.create_topic(
+            user_id="scoped_topic_user",
+            title="无锡水蜜桃",
+            conversation_id="topic_conv_a",
+            refresh_now=False,
+        )
+    )
+    asyncio.run(
+        topic_agent.create_topic(
+            user_id="scoped_topic_user",
+            title="贵州茅台",
+            conversation_id="topic_conv_b",
+            refresh_now=False,
+        )
+    )
+
+    conv_a = [
+        item["title"]
+        for item in topic_agent.list_topics(
+            user_id="scoped_topic_user",
+            conversation_id="topic_conv_a",
+        )
+        if item["topic_type"] == "user"
+    ]
+    conv_b = [
+        item["title"]
+        for item in topic_agent.list_topics(
+            user_id="scoped_topic_user",
+            conversation_id="topic_conv_b",
+        )
+        if item["topic_type"] == "user"
+    ]
+
+    assert conv_a == ["无锡水蜜桃"]
+    assert conv_b == ["贵州茅台"]
+
+
+def test_conversation_turns_round_trip_full_response(services):
+    _, store, _ = services
+    store.save_turn(
+        "conv_history",
+        "游戏资讯最近有什么消息？",
+        "这里是回答",
+        [],
+        {"type": "topic", "text": "游戏资讯 消息"},
+        user_id="user_history",
+        response={"conversation_id": "conv_history", "answer": "这里是回答", "context_relation": "test"},
+        topic="游戏资讯 消息",
+        category_scope=["game"],
+    )
+    turns = store.list_turns("conv_history", "user_history")
+    assert turns[0]["response"]["answer"] == "这里是回答"
+    assert turns[0]["topic"] == "游戏资讯 消息"
+    assert turns[0]["category_scope"] == ["game"]
+
+
+def test_conversation_history_is_grouped_by_user(services):
+    _, store, _ = services
+    store.save_turn("conv_one", "第一段对话", "回答一", [], None, user_id="history_user", topic="主题一")
+    store.save_turn("conv_one", "继续追问", "回答二", [], None, user_id="history_user", topic="主题一")
+    store.save_turn("conv_two", "第二段对话", "回答三", [], None, user_id="history_user", topic="主题二")
+    store.save_turn("other_conv", "其他用户", "其他回答", [], None, user_id="other_user")
+
+    items = store.list_conversations("history_user")
+    by_id = {item["conversation_id"]: item for item in items}
+    assert set(by_id) == {"conv_one", "conv_two"}
+    assert by_id["conv_one"]["first_message"] == "第一段对话"
+    assert by_id["conv_one"]["last_message"] == "继续追问"
+    assert by_id["conv_one"]["turn_count"] == 2
+    assert by_id["conv_one"]["topic"] == "主题一"
+
+
 def test_search_prefers_elasticsearch_index(services):
     registry, store, _ = services
     search = UnifiedSearchService(store, registry, search_index=FakeArticleIndex())
-    results = asyncio.run(search.search("俄乌 农作物", ["politics"], None, None, 10))
+    results = asyncio.run(search.search("国际局势 农作物", ["politics"], None, None, 10))
     assert results
     assert results[0].origin == "elasticsearch"
     assert results[0].source_id == "people_politics"
@@ -53,9 +494,9 @@ def test_native_source_search_encodes_query(services):
     registry, _, _ = services
     source = registry.get_source("hupu")
     fetcher = FakeLinkFetcher()
-    results = asyncio.run(ListPageAdapter(source, fetcher=fetcher).search("张雪机车", limit=2))
+    results = asyncio.run(ListPageAdapter(source, fetcher=fetcher).search("机车赛事", limit=2))
     assert results
-    assert "%E5%BC%A0%E9%9B%AA%E6%9C%BA%E8%BD%A6" in fetcher.urls[0]
+    assert "%E6%9C%BA%E8%BD%A6%E8%B5%9B%E4%BA%8B" in fetcher.urls[0]
     assert "{query" not in fetcher.urls[0]
 
 
@@ -82,7 +523,7 @@ def test_native_search_ingestion_fetches_and_indexes_articles(services):
 
     payload = asyncio.run(
         service.ingest(
-            query="张雪机车",
+            query="机车赛事",
             category_scope=["sports"],
             source_scope=["hupu"],
             max_results=2,
@@ -93,15 +534,15 @@ def test_native_search_ingestion_fetches_and_indexes_articles(services):
     assert payload["discovered_count"] == 1
     assert payload["fetched_count"] == 1
     assert payload["indexed_count"] == 1
-    assert fake_index.indexed[0]["title"] == "张雪机车 赛事更新"
-    saved = store.search_articles("张雪机车", ["sports"], limit=5)
+    assert fake_index.indexed[0]["title"] == "机车赛事更新"
+    saved = store.search_articles("机车赛事", ["sports"], limit=5)
     assert saved and saved[0]["source_id"] == "hupu"
 
 
 def test_deep_dive_generates_expansion_queries_and_evidence(services):
     registry, store, _ = services
     search = UnifiedSearchService(store, registry)
-    payload = asyncio.run(DeepDiveService(search).run("俄乌战争 农作物", ["politics"], None, rounds=1, breadth=2))
+    payload = asyncio.run(DeepDiveService(search).run("国际局势 农作物", ["politics"], None, rounds=1, breadth=2))
     assert payload["expanded_queries"]
     assert payload["evidence"]
     assert payload["strategy"]["llm_planner"].startswith("预留")
@@ -251,7 +692,7 @@ def test_due_tasks_create_notifications(services):
             "task_type": "topic_tracking",
             "schedule": "*/20 * * * *",
             "category_scope": ["sports"],
-            "topics": ["张雪机车"],
+            "topics": ["机车赛事"],
             "delivery_channel": "browser",
         }
     )
@@ -273,13 +714,120 @@ class FakeArticleIndex:
             {
                 "id": "art_es_seed",
                 "source_id": "people_politics",
-                "title": "俄乌战争影响农作物出口",
+                "title": "国际局势影响农作物出口",
                 "url": "https://example.local/es",
                 "summary": "粮食安全和农作物价格受到关注。",
                 "category": "politics",
                 "published_at": None,
             }
         ][:limit]
+
+
+class FakeExternalProvider(ExternalSearchProvider):
+    configured = True
+
+    def __init__(self):
+        self.calls = 0
+
+    async def search(self, query, domains, limit):
+        self.calls += 1
+        return [
+            RawSearchResult(
+                source_id="weather.example",
+                title="上海实时天气",
+                url="https://weather.example/shanghai",
+                snippet="上海实时天气更新。",
+            )
+        ][:limit]
+
+
+class SemanticExternalProvider(ExternalSearchProvider):
+    configured = True
+
+    async def search(self, query, domains, limit):
+        return [
+            RawSearchResult(
+                source_id="motorcycle.example",
+                title="全球主要摩托车制造商与品牌",
+                url="https://motorcycle.example/manufacturers",
+                snippet="介绍本田、雅马哈、川崎、宝马等摩托车制造商。",
+            )
+        ][:limit]
+
+
+class FakeNativeIngestion:
+    def __init__(self):
+        self.calls = 0
+
+    async def ingest(self, **kwargs):
+        self.calls += 1
+        return {
+            "discovered_count": 0,
+            "fetched_count": 0,
+            "indexed_count": 0,
+            "mysql_ready": False,
+            "elasticsearch_configured": False,
+        }
+
+
+class FakeDisabledLLM:
+    configured = False
+
+
+class FakeSearchPlannerLLM:
+    configured = True
+
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, messages, model_key=None):
+        self.calls += 1
+        return (
+            "```json\n"
+            '{"query":"目标对象 影响 背景事件 近期变化",'
+            '"primary_subject":"目标对象受到的影响",'
+            '"required_terms":["目标对象","对象变化"],'
+            '"keywords":["目标对象","影响","变化"]}'
+            "\n```"
+        )
+
+
+class FakeRelatedMessage:
+    content = (
+        '{"queries":['
+        '{"query":"AI Agent 最新进展","relation_type":"latest","reason":"查看近期变化"},'
+        '{"query":"AI Agent 产业影响","relation_type":"impact","reason":"查看影响面"}'
+        "]}"
+    )
+
+
+class FakeRelatedLocalAgent:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, payload):
+        self.calls += 1
+        return type("FakeRelatedResponse", (), {"status": "ok", "message": FakeRelatedMessage()})()
+
+
+class FakeRelatedSearchService:
+    def __init__(self):
+        self.queries = []
+
+    async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
+        self.queries.append(query)
+        return [
+            SearchResult(
+                source_id="test",
+                title=f"{query} 报道",
+                url=f"https://example.com/{len(self.queries)}",
+                summary=f"{query} 的摘要",
+                category=(category_scope or ["tech"])[0],
+                published_at=datetime.now(timezone.utc),
+                score=1.0,
+                origin="local",
+            )
+        ]
 
 
 class FakeLinkFetcher:
@@ -292,7 +840,7 @@ class FakeLinkFetcher:
             RawArticleLink(
                 source_id=source_id,
                 section_key=section_key,
-                title="张雪机车 赛事更新",
+                title="机车赛事更新",
                 url="https://bbs.hupu.com/639652293.html",
             )
         ][:limit]
@@ -301,9 +849,9 @@ class FakeLinkFetcher:
         return RawArticle(
             source_id=source_id,
             url=url,
-            title="张雪机车 赛事更新",
-            summary="张雪机车在 WSBK 赛事中继续受到关注。",
-            content="张雪机车在 WSBK 赛事中继续受到关注，车队成绩、商业合作和舆论讨论同步升温。",
+            title="机车赛事更新",
+            summary="机车赛事继续受到关注。",
+            content="机车赛事继续受到关注，车队成绩、商业合作和舆论讨论同步升温。",
         )
 
 
