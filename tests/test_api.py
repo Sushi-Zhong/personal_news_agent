@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from uuid import uuid4
+import zipfile
 
 from personal_news_agent.app import app
 from personal_news_agent.config import settings
@@ -196,7 +198,8 @@ def test_api_chat_report_and_task_flow():
         assert normal_topic.status_code == 200
         detected_topics = client.get(f"/api/topics?user_id={normal_topic_user}")
         assert detected_topics.status_code == 200
-        assert [item for item in detected_topics.json()["items"] if item["topic_type"] == "user"] == []
+        user_topics = [item for item in detected_topics.json()["items"] if item["topic_type"] == "user"]
+        assert user_topics == []
 
         report = client.post(
             "/api/reports",
@@ -204,6 +207,26 @@ def test_api_chat_report_and_task_flow():
         )
         assert report.status_code == 200
         assert report.json()["timeline"]
+        report_id = report.json()["report_id"]
+        pdf = client.get(f"/api/reports/{report_id}/download?format=pdf")
+        assert pdf.status_code == 200
+        assert pdf.headers["content-type"] == "application/pdf"
+        assert pdf.content.startswith(b"%PDF-")
+        assert len(pdf.content) > 20_000
+        assert b"STSong-Light" not in pdf.content
+        pdf_wrong_user = client.get(f"/api/reports/{report_id}/download?format=pdf&user_id=someone_else")
+        assert pdf_wrong_user.status_code == 200
+        assert pdf_wrong_user.headers["content-type"] == "application/pdf"
+        assert pdf_wrong_user.content.startswith(b"%PDF-")
+        docx = client.get(f"/api/reports/{report_id}/download?format=docx")
+        assert docx.status_code == 200
+        assert docx.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument")
+        with zipfile.ZipFile(BytesIO(docx.content)) as archive:
+            document_xml = archive.read("word/document.xml").decode("utf-8")
+        assert "专题报告：新能源汽车价格战" in document_xml
+        assert "一句话结论" in document_xml
+        assert "证据来源列表" in document_xml
+        assert "已截断" not in document_xml
 
         topic_view = client.post(
             "/api/topics/view",

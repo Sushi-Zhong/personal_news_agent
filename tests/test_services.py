@@ -1,14 +1,17 @@
 from pathlib import Path
 import asyncio
 import json
+import zipfile
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 
 import httpx
 import pytest
 
 from personal_news_agent.config import Settings
 from personal_news_agent.core.models import RawArticle, RawArticleLink, RawSearchResult, SearchResult, TimeRange
-from personal_news_agent.services.chat import NewsChatService, _filter_by_time, _rank_for_chat, _related_base_query, _related_search_answer
+from personal_news_agent.core.text import stable_id
+from personal_news_agent.services.chat import NewsChatService, _filter_by_time, _rank_for_chat, _related_base_query, _related_search_answer, _report_skill_answer
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
@@ -21,7 +24,8 @@ from personal_news_agent.services.chat_understanding import (
 )
 from personal_news_agent.services.native_ingestion import NativeSearchIngestionService
 from personal_news_agent.services.personalization import PersonalizationService
-from personal_news_agent.services.reports import ReportGenerationService
+from personal_news_agent.services.report_export import export_report
+from personal_news_agent.services.reports import ReportGenerationService, _filter_conversation_evidence_by_topic
 from personal_news_agent.services.search import (
     ExternalSearchProvider,
     TavilySearchProvider,
@@ -344,6 +348,29 @@ def test_chat_source_ingestion_requires_explicit_permission(services):
     assert ingestion.calls == 1
 
 
+def test_research_empty_evidence_does_not_ask_llm_to_invent_answer(services):
+    _, store, _ = services
+    search = EmptySearchService()
+    llm = FakeAnswerLLM()
+    chat = NewsChatService(store, search, llm_client=llm)
+
+    response = asyncio.run(chat._research_chat("empty_research_conv", "网上购物的发生过的事故都有哪些", allow_web_search=False))
+
+    assert llm.calls == 0
+    assert response.context_relation == "research_pipeline_empty"
+    assert "当前没有召回到可引用证据" in response.answer
+    assert "常见类型" not in response.answer
+
+
+def test_web_regular_chat_does_not_auto_create_topic_card():
+    source = Path("personal_news_agent/static/web.js").read_text()
+    regular_branch = source.split("if (!command) {", 1)[1].split("appendLocalTurn(\"user\", message);", 1)[0]
+
+    assert "sendChat(message)" in regular_branch
+    assert "createTopicFromFirstMessage" not in regular_branch
+    assert "if (!pendingTopicFromNextMessage && options.force !== true) return null;" in source
+
+
 def test_time_filter_keeps_current_external_results_without_published_date():
     old_local = SearchResult(
         source_id="local",
@@ -369,7 +396,12 @@ def test_time_filter_keeps_current_external_results_without_published_date():
 
 def test_chat_understanding_overrides_stale_sports_scope_for_game_topic():
     assert categories_for_message("我想知道游戏资讯的最近消息", "当前机车品牌", ["sports"]) == ["game"]
-    assert query_from_message("我想知道游戏资讯的最近消息", "当前机车品牌") == "资讯 消息"
+    assert query_from_message("我想知道游戏资讯的最近消息", "当前机车品牌") == "游戏资讯 消息"
+
+
+def test_chat_understanding_preserves_auto_brand_terms():
+    assert query_from_message("追踪汽车之家是否出现后续回应") == "追踪汽车之家是否出现后续回应"
+    assert "新能源汽车" in query_from_message("近一个月新能源汽车价格战有哪些值得关注的新变化？")
 
 
 def test_chat_understanding_keeps_topic_for_contextual_followup():
@@ -451,6 +483,111 @@ def test_chat_does_not_auto_create_attention_topic_for_normal_question(services)
     assert response.context_relation != "topic_agent_created"
     topics = [item for item in store.list_topics("topic_guard_user") if item["topic_type"] == "user"]
     assert topics == []
+
+
+def test_chat_quoted_tracking_subject_does_not_create_attention_card(services):
+    _, store, search = services
+    chat = NewsChatService(store, search)
+
+    response = asyncio.run(
+        chat.chat(
+            "quoted_tracking_topic",
+            "追踪「汽车之家_看车 买车 用车 换车,省时省心省钱!」是否出现后续回应或新进展。",
+            category_scope=["auto"],
+            user_id="quoted_topic_user",
+        )
+    )
+
+    topics = [item for item in store.list_topics("quoted_topic_user") if item["topic_type"] == "user"]
+    assert response.focus_object is not None
+    assert response.focus_object.type == "topic"
+    assert topics == []
+
+
+def test_chat_new_question_answers_without_changing_topic_or_creating_card(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    reports = ReportGenerationService(store, search)
+    tasks = ScheduledTaskService(store, reports)
+    topic_agent = TopicAgentService(store, tasks)
+    chat = NewsChatService(store, search, topic_agent=topic_agent)
+
+    response = asyncio.run(
+        chat.chat(
+            "off_topic_notice_conv",
+            "现在的ai公司们的发展前景是怎么样的",
+            topic="用户与游戏公司起冲突的案例",
+            category_scope=["game"],
+            user_id="off_topic_user",
+        )
+    )
+
+    assert response.context_relation == "topic_grounded"
+    assert response.topic == "用户与游戏公司起冲突的案例"
+    assert response.focus_object is not None
+    assert response.focus_object.text == "用户与游戏公司起冲突的案例"
+    assert search.calls
+    assert "ai公司" in search.calls[0]["query"]
+    assert "发展前景" in search.calls[0]["query"]
+    topics = [item for item in store.list_topics("off_topic_user") if item["topic_type"] == "user"]
+    assert topics == []
+    turn = store.last_turn("off_topic_notice_conv", user_id="off_topic_user")
+    assert turn["topic"] == "用户与游戏公司起冲突的案例"
+
+
+def test_chat_related_reputation_question_answers_under_current_topic(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    chat = NewsChatService(store, search)
+
+    response = asyncio.run(
+        chat.chat(
+            "reputation_followup_conv",
+            "对于这种美丽却没什么素质的人，网络风评一般是什么走向",
+            topic="粗口港姐晒照片 _ 游民星空 GamerSky.com",
+            category_scope=["game"],
+            user_id="reputation_user",
+        )
+    )
+
+    assert response.context_relation == "topic_grounded"
+    assert response.topic == "粗口港姐晒照片 _ 游民星空 GamerSky.com"
+    assert response.focus_object is not None
+    assert response.focus_object.text == "粗口港姐晒照片 _ 游民星空 GamerSky.com"
+    assert search.calls
+    assert "网络风评" in search.calls[0]["query"]
+    topics = [item for item in store.list_topics("reputation_user") if item["topic_type"] == "user"]
+    assert topics == []
+    turn = store.last_turn("reputation_followup_conv", user_id="reputation_user")
+    assert turn["topic"] == "粗口港姐晒照片 _ 游民星空 GamerSky.com"
+
+
+def test_chat_celebrity_privacy_followup_does_not_replace_current_topic(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    chat = NewsChatService(store, search)
+    current_topic = "突发 中国香港演员余文乐官宣离婚：今后仍是家人 _ 游民星空 GamerSky.com"
+
+    response = asyncio.run(
+        chat.chat(
+            "celebrity_privacy_followup_conv",
+            "明星的私生活被过度关注的坏影响",
+            topic=current_topic,
+            category_scope=["game"],
+            user_id="privacy_user",
+        )
+    )
+
+    assert response.context_relation == "topic_grounded"
+    assert response.topic == current_topic
+    assert response.focus_object is not None
+    assert response.focus_object.text == current_topic
+    assert search.calls
+    assert "明星" in search.calls[0]["query"]
+    topics = [item for item in store.list_topics("privacy_user") if item["topic_type"] == "user"]
+    assert topics == []
+    turn = store.last_turn("celebrity_privacy_followup_conv", user_id="privacy_user")
+    assert turn["topic"] == current_topic
 
 
 def test_topic_agent_creates_from_next_message_after_create_command(services):
@@ -775,7 +912,7 @@ def test_source_due_plan_uses_crawl_metadata(services):
 def test_chat_resolves_second_article_followup(services):
     _, store, search = services
     chat = NewsChatService(store, search)
-    first = asyncio.run(chat.chat("conv_test", "今天游戏圈有什么新闻？"))
+    first = asyncio.run(chat.chat("conv_test", "车型", category_scope=["auto"]))
     assert len(first.recommendations) >= 2
 
     second = asyncio.run(chat.chat("conv_test", "第二条展开说说。"))
@@ -795,6 +932,7 @@ def test_report_contains_timeline_and_required_sections(services):
     assert "一、结论摘要" in report.sections
     assert "三、关键时间线" in report.sections
     assert "八、来源列表与不确定性说明" in report.sections
+    assert "provider" not in report.sections["八、来源列表与不确定性说明"].lower()
     with store.connect() as conn:
         operations = [row["operation"] for row in conn.execute("SELECT operation FROM operation_logs").fetchall()]
     assert "news_search" in operations
@@ -832,6 +970,374 @@ def test_chat_executes_brief_skill_with_local_agent(services):
     assert response.skill_result["data"]["sections"]["generation_source"] == "local_agent"
     assert "AI 今日简报" in response.answer
     assert store.last_turn("brief_conv")["response"]["context_relation"] == "skill:/brief"
+
+
+def test_brief_fallback_uses_human_importance_not_source_noise(services):
+    registry, store, search = services
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    response = asyncio.run(chat.chat("brief_fallback_conv", "/brief --category tech", user_id="default"))
+
+    assert response.context_relation == "skill:/brief"
+    assert "匹配当前主题或用户偏好" not in response.answer
+    assert "\n- -36" not in response.answer
+    assert "\n- GamerSky.com" not in response.answer
+    assert "本次简报汇总了" in response.answer
+
+
+def test_brief_without_inline_topic_uses_latest_conversation_topic(services):
+    registry, store, _ = services
+    search = RecordingSearchService()
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    first = asyncio.run(chat.chat("brief_context_conv", "追踪汽车之家是否出现后续回应", category_scope=["auto"], user_id="default"))
+    search.calls.clear()
+    response = asyncio.run(
+        chat.chat(
+            "brief_context_conv",
+            "/brief",
+            topic="今日资讯",
+            category_scope=["tech"],
+            user_id="default",
+        )
+    )
+
+    assert first.topic == "追踪汽车之家是否出现后续回应"
+    assert response.context_relation == "skill:/brief"
+    assert response.skill_result["data"]["topic"] == "追踪汽车之家是否出现后续回应"
+    assert response.skill_result["data"]["category_scope"] == ["auto"]
+    assert search.calls[0]["query"] == "追踪汽车之家是否出现后续回应"
+    assert search.calls[0]["category_scope"] == ["auto"]
+    assert "今日简报：追踪汽车之家是否出现后续回应" in response.answer
+
+
+def _assert_fixed_report_modules(answer: str):
+    modules = [
+        "### 一句话结论",
+        "### 覆盖范围",
+        "### 发生了什么",
+        "### 关键证据",
+        "### 各方说法",
+        "### 为什么重要",
+        "### 争议与不确定性",
+        "### 后续观察点",
+        "### 时间线",
+        "### 证据来源列表",
+    ]
+    positions = [answer.index(module) for module in modules]
+    assert positions == sorted(positions)
+
+
+def test_report_marks_truncated_excerpts_instead_of_dangling_ellipsis():
+    answer = _report_skill_answer(
+        "专题报告：工信部利润率…",
+        "报告已生成。",
+        {
+            "report_id": "rpt_test",
+            "topic": "工信部利润率…",
+            "category_scope": ["tech"],
+            "sections": {
+                "一、结论摘要": "工信部相关数据需要结合统计局历史口径一起看…",
+                "二、事件背景": "对话内讨论了 2024 年和 2026 年规模以上工业企业营业收入利润率差异…",
+                "六、不同来源的主要说法": [
+                    {
+                        "source_id": "kr36",
+                        "title": "工信部：前5个月规模以上工业企业营业收入利润率5.66% 为2024年以来月度累计最高水平-36氪…",
+                        "summary": "2024年1—5月份全国规模以上工业企业利润增长3.4%。1—5月份，规模以上工业企业实现营业收入53.03万亿元，同比增长2.9%…",
+                    }
+                ],
+                "八、来源列表与不确定性说明": "对话内材料可能只是摘录…",
+            },
+            "timeline": [{"date": "2026-07-20", "event": "工信部发布相关利润率数据…"}],
+            "sources": [
+                {
+                    "source_id": "kr36",
+                    "title": "工信部：前5个月规模以上工业企业营业收入利润率5.66% 为2024年以来月度累计最高水平-36氪…",
+                    "url": "https://36kr.com/newsflashes/test",
+                }
+            ],
+        },
+    )
+
+    assert "工信部利润率…" not in answer
+    assert "文章标题.…" not in answer
+    assert "（已截断，仅展示对话内摘录）" in answer
+    assert "2026-07-20：工信部发布相关利润率数据…" not in answer
+    _assert_fixed_report_modules(answer)
+
+
+def test_report_export_filters_keyword_fragments_from_reader_sections():
+    exported = export_report(
+        {
+            "report_id": "rpt_noise",
+            "topic": "同花顺：董事长提议实施2026年中期利润分配方案，拟10派2元-36氪",
+            "category_scope": ["economy"],
+            "sections": {
+                "一、结论摘要": (
+                    "同花顺：董事长提议实施2026年中期利润分配方案，拟10派2元-36氪。"
+                    "燕京啤酒：2025年度每10股派2元 - 财经- 同花顺。"
+                    "中文传媒2025年全年每10股派2元股权登记日为2026年6月11日。"
+                    "同益中2025年全年每10股派1元股权登记日为2026年6月23日。"
+                    "同花顺股票频道—提供最新的A股上市公司新闻、行情、公告及资讯。"
+                ),
+                "五、主要争议点/看点": ["10", "2025", "2026", "同花顺", "亿元"],
+                "六、不同来源的主要说法": [
+                    {
+                        "source_id": "news.10jqka.com.cn",
+                        "title": "燕京啤酒：2025年度每10股派2元 - 财经- 同花顺",
+                        "summary": "这是燕京啤酒公告。",
+                    },
+                    {
+                        "source_id": "36kr",
+                        "title": "同花顺：董事长提议实施2026年中期利润分配方案，拟10派2元-36氪",
+                        "summary": "标题指向同花顺利润分配方案。",
+                    },
+                ],
+                "七、可能影响与后续观察指标": ["10", "2025", "2026"],
+            },
+            "timeline": [
+                {"date": "2026-07-20", "event": "燕京啤酒：2025年度每10股派2元 - 财经- 同花顺"},
+                {"date": "2026-07-20", "event": "同花顺：董事长提议实施2026年中期利润分配方案"},
+            ],
+            "sources": [
+                {"source_id": "news.10jqka.com.cn", "title": "燕京啤酒：2025年度每10股派2元 - 财经- 同花顺", "url": "https://example.com/a"},
+                {"source_id": "36kr", "title": "同花顺：董事长提议实施2026年中期利润分配方案，拟10派2元-36氪", "url": "https://example.com/b"},
+            ],
+        },
+        "docx",
+    )
+
+    with zipfile.ZipFile(BytesIO(exported.content)) as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+
+    assert "<w:t>10</w:t>" not in document_xml
+    assert "<w:t>2025</w:t>" not in document_xml
+    assert "<w:t>同花顺</w:t>" not in document_xml
+    assert "当前报告围绕" in document_xml
+    assert "避免把来源名、年份或金额碎片误当成结论" in document_xml
+    assert "继续查找原始公告" in document_xml
+    assert "燕京啤酒" not in document_xml
+    assert "标题指向同花顺利润分配方案" in document_xml
+
+
+def test_report_export_keeps_full_text_while_web_bubble_truncates():
+    long_summary = "这是完整报告正文。" + "用于验证下载文件不应截断的长段落，" * 45 + "末尾保留完整结论。"
+    source_full_text = "这是来源完整正文。" + "导出文件应优先采用 sources 里的完整内容，" * 40 + "来源正文末尾也必须保留。"
+    payload = {
+        "report_id": "rpt_full_export",
+        "topic": "绿色家电主题宣传月",
+        "category_scope": ["economy"],
+        "sections": {
+            "一、结论摘要": "绿色家电主题宣传月围绕消费政策、企业动作和后续补贴执行展开。",
+            "二、事件背景": long_summary,
+            "六、不同来源的主要说法": [
+                {
+                    "source_id": "test",
+                    "title": "绿色家电主题宣传月在青岛启动",
+                    "summary": "短摘要",
+                }
+            ],
+            "五、主要争议点/看点": ["政策执行节奏、企业参与范围和消费者实际获得感仍需继续观察。"],
+        },
+        "timeline": [{"date": "2026-07-20", "event": "绿色家电主题宣传月在青岛启动"}],
+        "sources": [{"source_id": "test", "title": "绿色家电主题宣传月在青岛启动", "url": "https://example.com/green", "full_text": source_full_text}],
+    }
+
+    bubble = _report_skill_answer("专题报告：绿色家电主题宣传月", "报告已生成。", payload)
+    exported = export_report(payload, "docx")
+    with zipfile.ZipFile(BytesIO(exported.content)) as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+
+    assert "（已截断，仅展示对话内摘录）" in bubble
+    assert "末尾保留完整结论" not in bubble
+    assert "（已截断" not in document_xml
+    assert "末尾保留完整结论" in document_xml
+    assert "来源正文末尾也必须保留" in document_xml
+
+
+def test_report_topic_filter_ignores_source_name_only_matches():
+    topic = "同花顺：董事长提议实施2026年中期利润分配方案，拟10派2元-36氪"
+    evidence = [
+        {
+            "title": "燕京啤酒：2025年度每10股派2元 - 财经- 同花顺",
+            "summary": "燕京啤酒公告，2025年度利润分配方案为每10股派2元。",
+        },
+        {
+            "title": "同花顺：2026年中期利润分配方案，拟10派2元",
+            "summary": "同花顺董事长提议实施中期利润分配方案。",
+        },
+    ]
+
+    filtered = _filter_conversation_evidence_by_topic(evidence, topic)
+
+    assert [item["title"] for item in filtered] == ["同花顺：2026年中期利润分配方案，拟10派2元"]
+
+
+def test_chat_executes_report_skill_as_full_topic_summary(services):
+    registry, store, search = services
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    response = asyncio.run(
+        chat.chat(
+            "report_conv",
+            "/report",
+            topic="新能源汽车价格战",
+            category_scope=["auto", "economy"],
+            user_id="default",
+        )
+    )
+
+    assert response.context_relation == "skill:/report"
+    assert response.skill_result["command"] == "/report"
+    assert response.skill_result["data"]["topic"] == "新能源汽车价格战"
+    assert "专题报告：新能源汽车价格战" in response.answer
+    _assert_fixed_report_modules(response.answer)
+    assert "新能源汽车价格战进入新阶段" in response.answer
+    assert "provider" not in response.answer.lower()
+
+
+def test_report_uses_existing_conversation_content_without_new_search(services):
+    registry, store, _ = services
+    search = RecordingSearchService()
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    first = asyncio.run(chat.chat("conversation_report_conv", "绿色家电企业有哪些动作", user_id="default"))
+    search.calls.clear()
+    response = asyncio.run(chat.chat("conversation_report_conv", "/report", user_id="default"))
+
+    assert first.recommendations
+    assert search.calls == []
+    assert response.context_relation == "skill:/report"
+    assert response.skill_result["data"]["topic"] == "绿色家电企业有哪些动作"
+    assert response.skill_result["data"]["sources"][0]["title"] == "绿色家电企业有哪些动作 报道"
+    assert "本报告只整理当前对话" in response.answer
+    assert "报告阶段未新增检索" in response.answer
+    _assert_fixed_report_modules(response.answer)
+
+
+def test_report_after_brief_uses_structured_stories_not_raw_markdown(services):
+    registry, store, search = services
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    brief = asyncio.run(chat.chat("report_after_brief_conv", "/brief --category tech", user_id="default"))
+    report = asyncio.run(chat.chat("report_after_brief_conv", "/report", user_id="default"))
+
+    assert brief.context_relation == "skill:/brief"
+    assert report.context_relation == "skill:/report"
+    assert report.skill_result["data"]["sources"]
+    assert "## 今日简报" not in report.answer
+    assert "/brief（对话回答）" not in report.answer
+    assert "相关证据：0 条" not in report.answer
+    _assert_fixed_report_modules(report.answer)
+
+
+def test_report_excludes_unrelated_conversation_content(services):
+    registry, store, _ = services
+    search = RecordingSearchService()
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    asyncio.run(chat.chat("mixed_report_conv", "绿色家电企业有哪些动作", user_id="default"))
+    asyncio.run(chat.chat("mixed_report_conv", "大型体育赛事运营有什么新闻", user_id="default"))
+    search.calls.clear()
+    response = asyncio.run(chat.chat("mixed_report_conv", "/report 绿色家电企业有哪些动作", user_id="default"))
+
+    assert search.calls == []
+    assert response.context_relation == "skill:/report"
+    assert "绿色家电企业有哪些动作 报道" in response.answer
+    assert "大型体育赛事运营 报道" not in response.answer
+    assert len(response.skill_result["data"]["sources"]) == 1
+    assert response.skill_result["data"]["sources"][0]["title"] == "绿色家电企业有哪些动作 报道"
+    assert "明显偏离主题的内容已排除" in response.answer
+    _assert_fixed_report_modules(response.answer)
+
+
+def test_bare_report_keeps_original_conversation_topic_and_includes_expansions(services):
+    registry, store, _ = services
+    class TopicExpansionSearchService(RecordingSearchService):
+        async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
+            self.calls.append(
+                {
+                    "query": query,
+                    "category_scope": category_scope,
+                    "source_scope": source_scope,
+                    "time_range": time_range,
+                    "include_remote": include_remote,
+                }
+            )
+            return [
+                SearchResult(
+                    source_id="test",
+                    title=f"{query} 报道",
+                    url=f"https://example.com/{stable_id('q', query)}",
+                    summary=f"{query} 的摘要",
+                    category=(category_scope or ["all"])[0],
+                    published_at=datetime.now(timezone.utc),
+                    score=1.0,
+                    origin="local",
+                )
+            ]
+
+    search = TopicExpansionSearchService()
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+    original_topic = "几十年的游戏账号说删就删！数字所有权就是个笑话？ _ 游民星空 GamerSky.com"
+
+    first = asyncio.run(chat.chat("game_ownership_report_conv", f"基于资讯“{original_topic}”继续深挖，给我结论、证据和后续观察点。", category_scope=["game"], user_id="default"))
+    second = asyncio.run(chat.chat("game_ownership_report_conv", "用户与游戏公司起冲突的案例", category_scope=["game"], user_id="default"))
+    third = asyncio.run(chat.chat("game_ownership_report_conv", "有哪些游戏与玩家的冲突闹上了法庭呢", category_scope=["game"], user_id="default"))
+    response = asyncio.run(chat.chat("game_ownership_report_conv", "/report", user_id="default"))
+
+    assert first.topic == original_topic
+    assert second.topic != original_topic
+    assert third.topic != original_topic
+    assert response.context_relation == "skill:/report"
+    assert response.skill_result["data"]["topic"] == original_topic
+    titles = [item["title"] for item in response.skill_result["data"]["sources"]]
+    assert any("用户与游戏公司起冲突" in title for title in titles)
+    assert any("冲突闹上了法庭" in title for title in titles)
+    assert "共覆盖 3 轮相关对话" in response.answer
+    _assert_fixed_report_modules(response.answer)
 
 
 def test_factcheck_uses_local_agent_verdict(services):
@@ -930,6 +1436,59 @@ def test_check_skill_continues_last_factcheck_with_remote_search(services):
     assert "为什么仍是证据不足" in second.answer
     assert "检索到的全部证据" in second.answer
     assert "本轮已按「确认时间、地点、主体是否明确」补充搜索" in second.answer
+
+
+def test_report_after_check_uses_original_claim_not_skill_title(services):
+    registry, store, search = services
+    local_agent = FakeFailingLocalAgent()
+    reports = ReportGenerationService(store, search)
+    factcheck = FactCheckService(store, search, local_agent=local_agent)
+    chat = NewsChatService(
+        store,
+        search,
+        local_agent=local_agent,
+        skill_registry=build_default_registry(),
+        services={"factcheck": factcheck, "reports": reports, "store": store, "registry": registry},
+    )
+
+    asyncio.run(chat.chat("report_after_check_conv", "/factcheck 国际粮食安全议题引发多方关注 --category politics", user_id="default"))
+    check_response = asyncio.run(chat.chat("report_after_check_conv", "/check 查找原始发布方或权威媒体全文", user_id="default"))
+    report_response = asyncio.run(chat.chat("report_after_check_conv", "/report", user_id="default"))
+
+    assert check_response.topic == "国际粮食安全议题引发多方关注"
+    assert check_response.focus_object is not None
+    assert check_response.focus_object.text == "国际粮食安全议题引发多方关注"
+    assert report_response.context_relation == "skill:/report"
+    assert report_response.skill_result["data"]["topic"] == "国际粮食安全议题引发多方关注"
+    assert "专题报告：国际粮食安全议题引发多方关注" in report_response.answer
+    assert "事实核查：继续核查" not in report_response.answer
+    assert "相关证据：0 条" not in report_response.answer
+    assert report_response.skill_result["data"]["sources"]
+
+
+def test_report_cleans_polluted_factcheck_title(services):
+    registry, store, search = services
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    response = asyncio.run(
+        chat.chat(
+            "polluted_report_conv",
+            "/report 事实核查：继续核查：国际粮食安全议题引发多方关注 --category politics",
+            user_id="default",
+        )
+    )
+
+    assert response.context_relation == "skill:/report"
+    assert response.skill_result["data"]["topic"] == "国际粮食安全议题引发多方关注"
+    assert "专题报告：国际粮食安全议题引发多方关注" in response.answer
+    assert "专题报告：事实核查" not in response.answer
+    assert response.skill_result["data"]["sources"]
 
 
 def test_topic_view_builds_event_line_and_relation_graph(services):
@@ -1075,6 +1634,27 @@ class FakeSearchPlannerLLM:
             '"keywords":["目标对象","影响","变化"]}'
             "\n```"
         )
+
+
+class FakeAnswerLLM:
+    configured = True
+
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, messages, model_key=None):
+        self.calls += 1
+        return "这段回答不应该出现。"
+
+
+class EmptySearchService:
+    external_configured = False
+
+    async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
+        return []
+
+    async def search_external(self, query, category_scope, source_scope, max_results=8):
+        return []
 
 
 class FakeRelatedMessage:

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from personal_news_agent.api.schemas import (
     ChatRequest,
@@ -31,6 +32,7 @@ from personal_news_agent.api.schemas import (
 from personal_news_agent.config import Settings
 from personal_news_agent.core.categories import CATEGORIES
 from personal_news_agent.services.auth import AuthError
+from personal_news_agent.services.report_export import export_report
 
 
 def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, settings: Settings) -> None:
@@ -390,6 +392,21 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     async def reports(payload: ReportRequest) -> Any:
         return await services["reports"].generate(payload.user_id, payload.topic, payload.category_scope, payload.time_range, payload.report_type)
 
+    @app.get("/api/reports/{report_id}/download")
+    async def download_report(report_id: str, format: str = Query(default="pdf", pattern="^(pdf|docx)$"), user_id: str = "default") -> Response:
+        report = store.get_report(report_id, user_id=user_id) or store.get_report(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="report not found")
+        try:
+            exported = export_report(_hydrate_report_for_export(report, store), format)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(
+            content=exported.content,
+            media_type=exported.media_type,
+            headers={"Content-Disposition": f'attachment; filename="{exported.filename}"'},
+        )
+
     @app.post("/api/tasks")
     async def create_task(payload: TaskRequest) -> dict[str, Any]:
         try:
@@ -429,3 +446,44 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             return await services["crawl"].crawl_category(category)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _hydrate_report_for_export(report: dict[str, Any], store: Any) -> dict[str, Any]:
+    hydrated = deepcopy(report)
+    article_cache: dict[str, dict[str, Any]] = {}
+
+    def article_for(item: dict[str, Any]) -> dict[str, Any]:
+        article_id = item.get("article_id")
+        if not article_id:
+            return {}
+        if article_id not in article_cache:
+            article_cache[article_id] = store.get_article(article_id) or {}
+        return article_cache[article_id]
+
+    def hydrate_item(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+        article = article_for(item)
+        if not article:
+            return item
+        if not item.get("summary"):
+            item["summary"] = article.get("summary") or ""
+        if not item.get("content"):
+            item["content"] = article.get("content") or ""
+        if not item.get("full_text"):
+            item["full_text"] = article.get("content") or article.get("summary") or item.get("summary") or ""
+        if not item.get("published_at"):
+            item["published_at"] = article.get("published_at")
+        return item
+
+    for item in hydrated.get("sources") or []:
+        hydrate_item(item)
+    for item in hydrated.get("timeline") or []:
+        hydrate_item(item)
+    sections = hydrated.get("sections") or {}
+    if isinstance(sections, dict):
+        for value in sections.values():
+            if isinstance(value, list):
+                for item in value:
+                    hydrate_item(item)
+    return hydrated

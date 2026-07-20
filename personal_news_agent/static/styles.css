@@ -749,6 +749,33 @@ input {
   padding: 8px 10px;
 }
 
+.report-downloads {
+  border-top: 1px solid #e4e9f2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.report-downloads a {
+  align-items: center;
+  background: #eef4ff;
+  border: 1px solid #c7d7fe;
+  border-radius: 8px;
+  color: #155eef;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
+  min-height: 34px;
+  padding: 0 12px;
+  text-decoration: none;
+}
+
+.report-downloads a:hover {
+  background: #dbe8ff;
+}
+
 .related-mind-map-host {
   min-width: 0;
 }

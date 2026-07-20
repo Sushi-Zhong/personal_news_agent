@@ -35,8 +35,7 @@ def infer_categories(message: str) -> list[str] | None:
 def query_from_message(message: str, topic: str | None = None) -> str:
     original = message
     message = message.replace("别的", "其他")
-    for zh, key in CATEGORIES.items():
-        message = message.replace(zh, " ")
+    for key in CATEGORIES.keys():
         message = message.replace(key, " ")
     cleanup = [
         "早上好",

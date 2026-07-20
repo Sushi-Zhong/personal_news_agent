@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -25,6 +26,7 @@ class ReportGenerationService:
             results = await self.search_service.search(topic, category_scope or None, None, None, max_results=12)
             articles = [self.store.get_article(item.article_id) for item in results if item.article_id]
             rows = [row for row in articles if row]
+            row_by_id = {row.get("id"): row for row in rows}
             combined = "\n".join(f"{row['title']}。{row.get('summary') or row.get('content') or ''}" for row in rows)
             keywords = extract_keywords(combined or topic, limit=10)
             entities = extract_entities(combined or topic, limit=10)
@@ -36,11 +38,18 @@ class ReportGenerationService:
                 "四、相关主体与关系": entities,
                 "五、主要争议点/看点": keywords[:5],
                 "六、不同来源的主要说法": [
-                    {"source_id": row["source_id"], "title": row["title"], "summary": row.get("summary") or ""}
+                    {
+                        "article_id": row.get("id"),
+                        "source_id": row["source_id"],
+                        "title": row["title"],
+                        "summary": row.get("summary") or "",
+                        "content": row.get("content") or "",
+                        "full_text": row.get("content") or row.get("summary") or "",
+                    }
                     for row in rows[:6]
                 ],
                 "七、可能影响与后续观察指标": ["后续价格/产品动作", "多源报道是否交叉验证", "用户反馈和市场数据变化"],
-                "八、来源列表与不确定性说明": "默认结果来自本地已抓取库；外部搜索 provider 未配置时，实时覆盖不足。",
+                "八、来源列表与不确定性说明": "本报告主要基于已入库资料整理；若未开启实时联网搜索，可能遗漏最新报道。",
             }
             report = {
                 "topic": topic,
@@ -48,7 +57,22 @@ class ReportGenerationService:
                 "report_type": report_type,
                 "sections": sections,
                 "timeline": timeline,
-                "sources": [{"article_id": item.article_id, "source_id": item.source_id, "title": item.title, "url": item.url} for item in results],
+                "sources": [
+                    {
+                        "article_id": item.article_id,
+                        "source_id": item.source_id,
+                        "title": item.title,
+                        "url": item.url,
+                        "summary": (row_by_id.get(item.article_id) or {}).get("summary") or item.summary,
+                        "content": (row_by_id.get(item.article_id) or {}).get("content") or "",
+                        "full_text": (
+                            (row_by_id.get(item.article_id) or {}).get("content")
+                            or (row_by_id.get(item.article_id) or {}).get("summary")
+                            or item.summary
+                        ),
+                    }
+                    for item in results
+                ],
             }
             report_id = self.store.save_report(user_id, topic, category_scope, report)
             self.store.log("report_generation", "ok", topic, {"report_id": report_id, "source_count": len(results), "timeline_count": len(timeline)})
@@ -56,6 +80,80 @@ class ReportGenerationService:
         except Exception as exc:
             self.store.log("report_generation", "error", topic, {"error": str(exc), "category_scope": category_scope})
             raise
+
+    async def generate_from_conversation(
+        self,
+        user_id: str,
+        conversation_id: str,
+        topic: str = "",
+        category_scope: list[str] | None = None,
+        limit: int = 40,
+        strict_topic_filter: bool = True,
+    ) -> ReportResponse:
+        turns = [
+            turn
+            for turn in self.store.list_turns(conversation_id, user_id=user_id, limit=limit)
+            if not str(turn.get("user_message") or "").strip().startswith("/report")
+        ]
+        visible_turns = [turn for turn in turns if _turn_context_relation(turn) != "query_moderation_blocked"]
+        if not visible_turns and topic:
+            return await self.generate(user_id, topic, category_scope or [], report_type="timeline_analysis")
+        report_topic = _clean_topic_prefix(topic) or _conversation_topic(visible_turns) or "当前对话"
+        scoped_turns = _filter_conversation_turns_by_topic(visible_turns, report_topic) if strict_topic_filter else visible_turns
+        categories = category_scope or _conversation_categories(scoped_turns)
+        evidence = _filter_conversation_evidence_by_topic(_conversation_evidence(scoped_turns), report_topic) if strict_topic_filter else _conversation_evidence(scoped_turns)
+        combined = _conversation_combined_text(scoped_turns, evidence, report_topic)
+        keywords = extract_keywords(combined, limit=10)
+        entities = extract_entities(combined, limit=10)
+        timeline = _conversation_timeline(scoped_turns, evidence)
+        source_claims = _conversation_source_claims(evidence, scoped_turns)
+        importance_points = _conversation_importance_points(report_topic, categories, evidence, scoped_turns)
+        watch_points = _conversation_watch_points(scoped_turns, report_topic, evidence)
+        sections: dict[str, Any] = {
+            "一、结论摘要": _conversation_summary(scoped_turns, combined, report_topic),
+            "二、事件背景": f"本报告只整理当前对话「{conversation_id}」里与“{report_topic}”相关的已出现内容，共覆盖 {len(scoped_turns)} 轮相关对话、{len(evidence)} 条已展示证据。",
+            "三、关键时间线": timeline,
+            "四、相关主体与关系": entities,
+            "五、主要争议点/看点": importance_points,
+            "六、不同来源的主要说法": source_claims,
+            "七、可能影响与后续观察指标": watch_points,
+            "八、来源列表与不确定性说明": "本报告只基于当前对话中已经出现且与主题相关的回答、证据和核查结果整理；报告阶段未新增检索、未补抓资料，明显偏离主题的内容已排除。",
+        }
+        sources = [
+            {
+                "article_id": item.get("article_id"),
+                "source_id": item.get("source_id"),
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "published_at": item.get("published_at"),
+                "summary": item.get("summary") or "",
+                "content": item.get("content") or "",
+                "full_text": item.get("full_text") or item.get("content") or item.get("summary") or "",
+            }
+            for item in evidence
+        ]
+        report = {
+            "topic": report_topic,
+            "category_scope": categories,
+            "report_type": "conversation_summary",
+            "conversation_id": conversation_id,
+            "sections": sections,
+            "timeline": timeline,
+            "sources": sources,
+        }
+        report_id = self.store.save_report(user_id, report_topic, categories, report)
+        self.store.log(
+            "report_generation",
+            "ok",
+            report_topic,
+            {
+                "report_id": report_id,
+                "source_count": len(sources),
+                "timeline_count": len(timeline),
+                "report_type": "conversation_summary",
+            },
+        )
+        return ReportResponse(report_id=report_id, topic=report_topic, category_scope=categories, sections=sections, timeline=timeline, sources=sources)
 
     async def _generate_daily_digest(
         self,
@@ -213,6 +311,435 @@ def _days_from_range(value: str | None, default: int = 1) -> int:
     return default
 
 
+def _turn_context_relation(turn: dict[str, Any]) -> str:
+    response = turn.get("response") or {}
+    return str(response.get("context_relation") or "")
+
+
+def _clean_topic_prefix(value: str | None) -> str:
+    topic = " ".join(str(value or "").split()).strip()
+    prefixes = ("专题报告：", "专题报告:", "事实核查：", "事实核查:", "继续核查：", "继续核查:")
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if topic.startswith(prefix):
+                topic = topic[len(prefix):].strip()
+                changed = True
+    return topic
+
+
+def _conversation_topic(turns: list[dict[str, Any]]) -> str:
+    for turn in turns:
+        topic = _clean_topic_prefix(turn.get("topic"))
+        if topic:
+            return topic
+        response = turn.get("response") or {}
+        skill_data = ((response.get("skill_result") or {}).get("data") or {})
+        topic = _clean_topic_prefix(skill_data.get("claim") or skill_data.get("topic"))
+        if topic:
+            return topic
+        focus = response.get("focus_object") or turn.get("focus_object") or {}
+        topic = _clean_topic_prefix(focus.get("text"))
+        if topic:
+            return topic
+    for turn in turns:
+        message = str(turn.get("user_message") or "").strip()
+        if message and not message.startswith("/"):
+            return _clean_topic_prefix(message)
+    return ""
+
+
+def _conversation_categories(turns: list[dict[str, Any]]) -> list[str]:
+    categories: list[str] = []
+    for turn in turns:
+        for item in turn.get("category_scope") or []:
+            if item and item not in categories:
+                categories.append(item)
+        response = turn.get("response") or {}
+        for item in response.get("category_scope") or []:
+            if item and item not in categories:
+                categories.append(item)
+    return categories
+
+
+def _filter_conversation_turns_by_topic(turns: list[dict[str, Any]], topic: str) -> list[dict[str, Any]]:
+    if not turns or not topic or topic == "当前对话":
+        return turns
+    if _is_broad_report_topic(topic):
+        return turns
+    matched = [turn for turn in turns if _turn_matches_topic(turn, topic)]
+    return matched or turns[-1:]
+
+
+def _turn_matches_topic(turn: dict[str, Any], topic: str) -> bool:
+    response = turn.get("response") or {}
+    skill_data = ((response.get("skill_result") or {}).get("data") or {})
+    focus = response.get("focus_object") or turn.get("focus_object") or {}
+    text = " ".join(
+        str(item or "")
+        for item in (
+            turn.get("topic"),
+            skill_data.get("claim"),
+            skill_data.get("topic"),
+            focus.get("text"),
+            turn.get("user_message"),
+            turn.get("assistant_answer"),
+        )
+    )
+    if _text_matches_topic(text, topic, min_hits=1):
+        return True
+    return any(
+        _text_matches_topic(f"{item.get('title') or ''} {item.get('summary') or ''}", topic, min_hits=1)
+        for item in _conversation_evidence([turn])
+    )
+
+
+def _filter_conversation_evidence_by_topic(evidence: list[dict[str, Any]], topic: str) -> list[dict[str, Any]]:
+    if not evidence or not topic or topic == "当前对话":
+        return evidence
+    if _is_broad_report_topic(topic):
+        return evidence
+    anchor_terms = _topic_anchor_terms(topic)
+    filtered = []
+    for item in evidence:
+        text = _evidence_topic_text(item)
+        compact_text = _compact_for_topic(text)
+        if anchor_terms and not any(term in compact_text for term in anchor_terms):
+            continue
+        if _text_matches_topic(text, topic, min_hits=2 if anchor_terms else 1):
+            filtered.append(item)
+    for index, item in enumerate(filtered, start=1):
+        item["index"] = index
+    return filtered
+
+
+def _is_broad_report_topic(topic: str) -> bool:
+    return _clean_topic_prefix(topic) in {"今日资讯", "今日简报", "每日摘要", "今日新闻"}
+
+
+def _text_matches_topic(text: str, topic: str, min_hits: int = 1) -> bool:
+    compact_topic = _compact_for_topic(topic)
+    compact_text = _compact_for_topic(text)
+    if not compact_topic:
+        return True
+    if compact_topic in compact_text or compact_text in compact_topic:
+        return True
+    terms = _topic_match_terms(topic)
+    if not terms:
+        return True
+    hits = sum(1 for term in terms if term in compact_text)
+    return hits >= min_hits
+
+
+def _topic_match_terms(topic: str) -> list[str]:
+    stopwords = {"新闻", "热点", "相关", "最新", "进展", "情况", "哪些", "什么", "怎么", "为什么", "继续", "核查", "报告", "2025", "2026", "亿元", "万元"}
+    terms: list[str] = []
+    for value in [*extract_entities(topic, limit=8), *extract_keywords(topic, limit=12)]:
+        compact = _compact_for_topic(value)
+        if len(compact) >= 2 and not compact.isdigit() and compact not in stopwords and compact not in terms:
+            terms.append(compact)
+    compact_topic = _compact_for_topic(topic)
+    if _is_cjk_text(compact_topic):
+        for size in (4, 3, 2):
+            for index in range(0, max(0, len(compact_topic) - size + 1)):
+                term = compact_topic[index : index + size]
+                if term.isdigit() or term in stopwords or term in terms:
+                    continue
+                terms.append(term)
+            if len(terms) >= 12:
+                break
+    return terms[:12]
+
+
+def _compact_for_topic(value: Any) -> str:
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+def _topic_anchor_terms(topic: str) -> list[str]:
+    cleaned = _clean_topic_prefix(topic)
+    primary = re.split(r"[：:，,。；;|｜\\-]", cleaned, maxsplit=1)[0].strip()
+    primary = re.sub(r"^(中新网相关热点|2026相关热点|相关热点)\s*", "", primary).strip()
+    primary = re.sub(r"(中新网|36氪|新浪财经|新华网)$", "", primary).strip(" -_")
+    compact = _compact_for_topic(primary)
+    if 2 <= len(compact) <= 12 and not compact.isdigit():
+        return [compact]
+    entities = []
+    for item in extract_entities(cleaned, limit=4):
+        compact_item = _compact_for_topic(item)
+        if 2 <= len(compact_item) <= 12 and not compact_item.isdigit() and compact_item not in entities:
+            entities.append(compact_item)
+    return entities[:2]
+
+
+def _evidence_topic_text(item: dict[str, Any]) -> str:
+    title = _strip_source_tail(item.get("title") or "")
+    return f"{title}。{item.get('summary') or ''}"
+
+
+def _strip_source_tail(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"\s*[-—_]\s*(财经\s*[-—]\s*)?同花顺\s*$", "", text)
+    text = re.sub(r"\s*[-—_]\s*(36氪|新浪财经|新华网|中国新闻网|中新网)\s*$", "", text)
+    return text.strip()
+
+
+def _is_cjk_text(value: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in value)
+
+
+def _conversation_evidence(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for turn in turns:
+        response = turn.get("response") or {}
+        skill_data = ((response.get("skill_result") or {}).get("data") or {})
+        candidates: list[Any] = []
+        candidates.extend(_brief_story_evidence_from_skill_data(skill_data))
+        for key in ("supporting_evidence", "evidence", "sources"):
+            value = skill_data.get(key)
+            if isinstance(value, list):
+                candidates.extend(value)
+        if isinstance(response.get("evidence"), list):
+            candidates.extend(response["evidence"])
+        if isinstance(response.get("recommendations"), list):
+            candidates.extend(response["recommendations"])
+        if isinstance(turn.get("recommendations"), list):
+            candidates.extend(turn["recommendations"])
+        for item in candidates:
+            normalized = _normalize_conversation_evidence(item, turn)
+            title = normalized.get("title")
+            if not title:
+                continue
+            key = normalized.get("url") or normalized.get("article_id") or f"{normalized.get('source_id')}:{title}"
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized["index"] = len(evidence) + 1
+            evidence.append(normalized)
+    return evidence
+
+
+def _brief_story_evidence_from_skill_data(skill_data: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(skill_data, dict):
+        return []
+    sections = skill_data.get("sections") or {}
+    if not isinstance(sections, dict):
+        return []
+    stories = sections.get("top_stories") or []
+    sources = sections.get("sources") or skill_data.get("sources") or []
+    source_by_index = {
+        item.get("index"): item
+        for item in sources
+        if isinstance(item, dict) and item.get("index") is not None
+    }
+    rows: list[dict[str, Any]] = []
+    for story in stories:
+        if not isinstance(story, dict):
+            continue
+        source = source_by_index.get(story.get("source_index")) or {}
+        rows.append(
+            {
+                "article_id": source.get("article_id"),
+                "source_id": source.get("source_id") or "brief",
+                "title": story.get("title") or source.get("title") or "",
+                "url": source.get("url") or "",
+                "published_at": source.get("published_at"),
+                "category": source.get("category") or "",
+                "summary": story.get("summary") or "",
+            }
+        )
+    return rows
+
+
+def _normalize_conversation_evidence(item: Any, turn: dict[str, Any]) -> dict[str, Any]:
+    if hasattr(item, "model_dump"):
+        item = item.model_dump(mode="json")
+    if not isinstance(item, dict):
+        return {}
+    summary = (
+        item.get("summary")
+        or item.get("snippet")
+        or item.get("content")
+        or item.get("content_excerpt")
+        or item.get("description")
+        or item.get("quote")
+        or ""
+    )
+    return {
+        "article_id": item.get("article_id") or item.get("id"),
+        "source_id": item.get("source_id") or item.get("source") or item.get("origin") or "对话证据",
+        "title": _clean_text(item.get("title") or item.get("name") or "", 180),
+        "url": item.get("url") or "",
+        "published_at": item.get("published_at"),
+        "category": item.get("category") or "",
+        "summary": _clean_text(summary, 4000),
+        "content": _clean_text(item.get("content") or "", 12000),
+        "full_text": _clean_text(item.get("full_text") or item.get("content") or summary, 12000),
+        "turn_id": turn.get("id"),
+    }
+
+
+def _conversation_combined_text(turns: list[dict[str, Any]], evidence: list[dict[str, Any]], topic: str) -> str:
+    parts = [topic]
+    for item in evidence[:12]:
+        parts.append(f"{item.get('title') or ''}。{item.get('summary') or ''}")
+    for turn in turns[-8:]:
+        message = str(turn.get("user_message") or "").strip()
+        answer = str(turn.get("assistant_answer") or "").strip()
+        if message:
+            parts.append(message)
+        if answer and not _turn_is_structured_skill(turn):
+            parts.append(answer[:1200])
+    return "\n".join(part for part in parts if part)
+
+
+def _turn_is_structured_skill(turn: dict[str, Any]) -> bool:
+    response = turn.get("response") or {}
+    skill_result = response.get("skill_result") or {}
+    command = skill_result.get("command")
+    return command in {"/brief", "/factcheck", "/check", "/report"}
+
+
+def _conversation_summary(turns: list[dict[str, Any]], combined: str, topic: str) -> str:
+    if not turns:
+        return f"当前对话里还没有可用于生成“{topic}”报告的内容。"
+    return summarize(combined, 300) or f"已根据当前对话中出现的内容整理“{topic}”。"
+
+
+def _conversation_timeline(turns: list[dict[str, Any]], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for item in evidence:
+        date_text = _date_text(item.get("published_at")) or _date_text(_turn_created_at(turns, item.get("turn_id")))
+        events.append(
+            {
+                "date": date_text or datetime.utcnow().date().isoformat(),
+                "event": item.get("title") or "对话内证据",
+                "actors": extract_entities(f"{item.get('title') or ''} {item.get('summary') or ''}", limit=4),
+                "related_entities": extract_keywords(f"{item.get('title') or ''} {item.get('summary') or ''}", limit=4),
+                "source_article_ids": [item.get("article_id")] if item.get("article_id") else [],
+                "confidence": 0.7,
+            }
+        )
+    if events:
+        return events[:12]
+    for turn in turns[-6:]:
+        message = str(turn.get("user_message") or "").strip()
+        if not message:
+            continue
+        events.append(
+            {
+                "date": _date_text(turn.get("created_at")) or datetime.utcnow().date().isoformat(),
+                "event": _clean_text(message, 120),
+                "actors": [],
+                "related_entities": [],
+                "source_article_ids": [],
+                "confidence": 0.35,
+            }
+        )
+    return events or [
+        {
+            "date": datetime.utcnow().date().isoformat(),
+            "event": "当前对话尚无足够内容形成时间线",
+            "actors": [],
+            "related_entities": [],
+            "source_article_ids": [],
+            "confidence": 0.2,
+        }
+    ]
+
+
+def _conversation_source_claims(evidence: list[dict[str, Any]], turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if evidence:
+        return [
+            {
+                "source_id": item.get("source_id") or "对话证据",
+                "title": item.get("title") or "",
+                "summary": item.get("summary") or "",
+            }
+            for item in evidence[:12]
+        ]
+    claims: list[dict[str, Any]] = []
+    for turn in turns[-6:]:
+        if _turn_is_structured_skill(turn):
+            continue
+        answer = _clean_text(turn.get("assistant_answer"), 260)
+        if answer:
+            claims.append({"source_id": "对话回答", "title": _clean_text(turn.get("user_message"), 120), "summary": answer})
+    return claims
+
+
+def _conversation_importance_points(topic: str, categories: list[str], evidence: list[dict[str, Any]], turns: list[dict[str, Any]]) -> list[str]:
+    if not evidence and not turns:
+        return ["当前对话内可用资料不足，需要先补充与主题直接相关的证据，才能判断重要性。"]
+    compact = _compact_for_topic(topic)
+    points: list[str] = []
+    if any(term in compact for term in ("分红", "派息", "利润分配", "现金红利")) or "economy" in categories:
+        points.append("这类信息会影响投资者对公司现金回报、盈利质量和股东权益安排的判断。")
+        points.append("需要区分公司自身公告、媒体转述和同类公司案例，避免把其他公司的分红信息误当成该主题证据。")
+    elif "auto" in categories:
+        points.append("该主题可能影响消费者决策、企业营销动作和行业竞争预期。")
+    elif "tech" in categories:
+        points.append("该主题可能影响产品路线、产业链合作或监管与市场预期。")
+    elif "politics" in categories:
+        points.append("该主题可能影响政策执行、公共讨论和相关主体后续回应。")
+    if evidence:
+        points.append(f"当前对话已展示 {len(evidence)} 条与主题相关的证据，后续应继续确认来源是否为原始公告或权威媒体。")
+    else:
+        points.append("当前对话没有筛出足够直接证据，报告应把结论保持为初步整理而非确定判断。")
+    return _dedupe_preserve_order(points)[:4]
+
+
+def _conversation_watch_points(turns: list[dict[str, Any]], topic: str, evidence: list[dict[str, Any]]) -> list[str]:
+    points: list[str] = []
+    for turn in turns:
+        response = turn.get("response") or {}
+        skill_data = ((response.get("skill_result") or {}).get("data") or {})
+        for key in ("next_checks", "missing_evidence"):
+            value = skill_data.get(key)
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                text = _clean_text(item, 160)
+                if text and text not in points:
+                    points.append(text)
+                if len(points) >= 6:
+                    return points
+    defaults = [
+        f"查找“{topic}”对应主体发布的原始公告或正式声明。",
+        "对比后续新增报道是否与当前已展示证据一致，尤其留意标题和正文是否指向同一主体。",
+        "关注关键时间点后的市场反应、主体回应或补充披露。",
+    ]
+    if evidence:
+        defaults.append("复核证据来源中是否混入同名平台、同类案例或泛行业文章。")
+    return _dedupe_preserve_order(points or defaults)[:4]
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = _clean_text(value, 220)
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _turn_created_at(turns: list[dict[str, Any]], turn_id: Any) -> Any:
+    for turn in turns:
+        if turn.get("id") == turn_id:
+            return turn.get("created_at")
+    return None
+
+
+def _date_text(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text[:10]
+
+
 def _search_results_from_rows(rows: list[dict[str, Any]]) -> list[SearchResult]:
     results: list[SearchResult] = []
     seen: set[str] = set()
@@ -272,18 +799,17 @@ def _fallback_brief_sections(
         {
             "title": item.get("title") or "",
             "summary": item.get("summary") or "",
-            "why_it_matters": "匹配当前主题或用户偏好，适合作为今日简报重点。",
+            "why_it_matters": _brief_story_reason(item),
             "source_index": item.get("index"),
         }
         for item in evidence[:5]
     ]
-    keywords = extract_keywords(combined or topic, limit=8)
     sections = {
         "headline": f"今日简报：{topic}",
         "summary": summary or f"围绕“{topic}”暂无足够入库资料形成完整简报。",
         "top_stories": top_stories,
-        "why_it_matters": keywords[:4] or ["需要更多来源交叉验证后再判断重要性。"],
-        "impact": ["关注相关主体的后续动作、市场/用户反馈和多源报道是否一致。"],
+        "why_it_matters": _brief_why_it_matters(topic, categories, evidence),
+        "impact": _brief_impact(categories, evidence),
         "watch_next": ["新增权威来源报道", "关键主体回应", "数据或政策变化"],
         "sources": [
             {
@@ -310,16 +836,22 @@ def _normalize_brief_sections(parsed: dict[str, Any], fallback: dict[str, Any], 
             sections[key] = value.strip()[:1200]
     for key in ("why_it_matters", "impact", "watch_next"):
         values = _clean_string_list(parsed.get(key), limit=6, max_length=180)
+        values = [item for item in values if not _brief_noise_text(item)]
         if values:
             sections[key] = values
     stories = []
+    evidence_by_index = {item.get("index"): item for item in evidence}
     for item in parsed.get("top_stories") or []:
         if not isinstance(item, dict):
             continue
+        source_item = evidence_by_index.get(item.get("source_index")) or {}
+        reason = _clean_text(item.get("why_it_matters"), 180)
+        if _brief_noise_text(reason):
+            reason = _brief_story_reason(source_item)
         story = {
             "title": _clean_text(item.get("title"), 120),
             "summary": _clean_text(item.get("summary"), 260),
-            "why_it_matters": _clean_text(item.get("why_it_matters"), 180),
+            "why_it_matters": reason,
             "source_index": item.get("source_index"),
         }
         if story["title"]:
@@ -340,6 +872,90 @@ def _normalize_brief_sections(parsed: dict[str, Any], fallback: dict[str, Any], 
     sections["一、结论摘要"] = sections["summary"]
     sections["八、来源列表与不确定性说明"] = sections["uncertainty"]
     return sections
+
+
+def _brief_story_reason(item: dict[str, Any]) -> str:
+    category = item.get("category") or ""
+    category_reasons = {
+        "tech": "涉及技术产品或产业链变化，适合观察后续商业化与监管反馈。",
+        "auto": "涉及汽车消费或产业动作，适合观察价格、销量和企业后续回应。",
+        "economy": "涉及市场或经营数据变化，适合观察后续政策与企业经营影响。",
+        "game": "涉及游戏内容、发行或用户反馈，适合观察平台热度和口碑变化。",
+        "sports": "涉及赛事或体育产业动态，适合观察赛果、组织方回应和商业影响。",
+        "politics": "涉及公共政策或治理议题，适合观察后续执行细则和官方回应。",
+        "entertainment": "涉及文娱内容或文化活动，适合观察传播效果和公众反馈。",
+    }
+    return category_reasons.get(category, "这条资讯包含明确主体和后续变量，适合纳入今日简报继续观察。")
+
+
+def _brief_why_it_matters(topic: str, categories: list[str], evidence: list[dict[str, Any]]) -> list[str]:
+    if not evidence:
+        return ["当前对话内可用资料不足，需要补充权威来源后再判断重要性。"]
+    category_label = "、".join(categories or sorted({item.get("category") for item in evidence if item.get("category")})) or "多个板块"
+    points = [f"本次简报汇总了 {len(evidence)} 条已入库资讯，覆盖{category_label}，便于快速把握今日信息面。"]
+    themes = _brief_clean_themes(evidence)
+    if themes:
+        points.append("高频议题集中在：" + "、".join(themes[:4]) + "。")
+    points.append("这些资讯仍主要来自本地已抓取库，后续需要用新增报道和主体回应交叉验证。")
+    return points
+
+
+def _brief_impact(categories: list[str], evidence: list[dict[str, Any]]) -> list[str]:
+    if not evidence:
+        return ["暂无足够证据判断影响。"]
+    impacts = []
+    if "tech" in categories:
+        impacts.append("可能影响技术产品、产业链合作和企业研发节奏。")
+    if "auto" in categories:
+        impacts.append("可能影响汽车消费决策、价格预期和企业营销动作。")
+    if "game" in categories:
+        impacts.append("可能影响内容热度、玩家反馈和平台分发。")
+    if not impacts:
+        impacts.append("关注相关主体的后续动作、市场/用户反馈和多源报道是否一致。")
+    return impacts
+
+
+def _brief_clean_themes(evidence: list[dict[str, Any]]) -> list[str]:
+    combined = "\n".join(f"{item.get('title') or ''} {item.get('summary') or ''}" for item in evidence)
+    banned = {
+        "36",
+        "-36",
+        "36氪",
+        "kr36",
+        "游民星空",
+        "gamersky",
+        "gamersky.com",
+        "com",
+        "重要性",
+        "匹配当前主题或用户偏好",
+        "适合作为今日简报重点",
+    }
+    themes = []
+    for item in extract_keywords(combined, limit=16):
+        cleaned = str(item).strip(" -—_·|：:，,。")
+        if len(cleaned) < 2 or cleaned.lower() in banned or cleaned in banned:
+            continue
+        if cleaned not in themes:
+            themes.append(cleaned)
+    return themes[:6]
+
+
+def _brief_noise_text(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    banned_fragments = (
+        "匹配当前主题或用户偏好",
+        "适合作为今日简报重点",
+        "gamersky",
+        "gamerSky.com".lower(),
+        "网络游戏新闻",
+        "_17173.com",
+    )
+    if any(fragment in text for fragment in banned_fragments):
+        return True
+    cleaned = text.strip(" -—_·|：:，,。")
+    return cleaned in {"36", "-36", "36氪", "kr36", "com"}
 
 
 def _decode_json_object(raw: str) -> dict[str, Any]:

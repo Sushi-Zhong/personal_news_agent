@@ -301,12 +301,21 @@ async function handleMobileAssistantInput(message) {
     }
     if (["report", "r"].includes(command.name)) {
       applyMobileTopicCommand(command);
-      return sendChatIntoTurn(`围绕${mobileState.topic}生成一份专题报告，汇总最新进展、关键证据、主要参与方、影响与不确定性。`, assistantNode);
+      const reportTopic = cleanMobileSkillTopicTitle(commandText(command) || "");
+      const category = commandArg(command, "category", "cat");
+      const timeRange = commandArg(command, "time-range", "time", "range") || "30d";
+      const reportCommand = [
+        "/report",
+        reportTopic,
+        category ? `--category ${category}` : "",
+        timeRange ? `--time-range ${timeRange}` : "",
+      ].filter(Boolean).join(" ");
+      return sendChatIntoTurn(reportCommand, assistantNode);
     }
     if (["brief"].includes(command.name)) {
       applyMobileTopicCommand(command);
-      const briefTopic = commandText(command) || mobileState.topic || "";
-      const briefCategory = commandArg(command, "category", "cat") || (mobileState.categoryScope || []).join(",");
+      const briefTopic = commandText(command) || "";
+      const briefCategory = commandArg(command, "category", "cat");
       const briefCommand = ["/brief", briefTopic, briefCategory ? `--category ${briefCategory}` : ""].filter(Boolean).join(" ");
       return sendChatIntoTurn(briefCommand, assistantNode);
     }
@@ -437,11 +446,27 @@ function syncMobileChatContext() {
 }
 
 function applyMobileChatConversationContext(context = {}) {
-  if (context.topic) mobileState.topic = context.topic;
+  if (context.topic) mobileState.topic = cleanMobileSkillTopicTitle(context.topic);
   if (Array.isArray(context.category_scope)) mobileState.categoryScope = context.category_scope;
   mobileCategory = mobileState.categoryScope[0] || "";
   syncMobileTabs();
   syncMobileChatContext();
+}
+
+function cleanMobileSkillTopicTitle(value) {
+  let topic = String(value || "").replace(/\s+/g, " ").trim();
+  const prefixes = ["专题报告：", "专题报告:", "事实核查：", "事实核查:", "继续核查：", "继续核查:"];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const prefix of prefixes) {
+      if (topic.startsWith(prefix)) {
+        topic = topic.slice(prefix.length).trim();
+        changed = true;
+      }
+    }
+  }
+  return topic;
 }
 
 function syncMobileTabs() {

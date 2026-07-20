@@ -1114,6 +1114,34 @@ class NewsStore:
             )
         return report_id
 
+    def get_report(self, report_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        clause = "id = ?"
+        params: list[Any] = [report_id]
+        if user_id is not None:
+            clause += " AND user_id = ?"
+            params.append(user_id)
+        with self.connect() as conn:
+            row = conn.execute(f"SELECT * FROM reports WHERE {clause}", params).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        report = json.loads(data.pop("report_json") or "{}")
+        if isinstance(report, dict):
+            report.setdefault("report_id", data["id"])
+            report.setdefault("topic", data.get("topic") or "")
+            report.setdefault("category_scope", json.loads(data.get("category_scope_json") or "[]"))
+            report.setdefault("created_at", data.get("created_at"))
+            return report
+        return {
+            "report_id": data["id"],
+            "topic": data.get("topic") or "",
+            "category_scope": json.loads(data.get("category_scope_json") or "[]"),
+            "created_at": data.get("created_at"),
+            "sections": {},
+            "timeline": [],
+            "sources": [],
+        }
+
     def create_task(self, task: dict[str, Any]) -> dict[str, Any]:
         task_id = stable_id("task", f"{task.get('user_id')}:{task.get('task_type')}:{_now()}")
         now = _now()

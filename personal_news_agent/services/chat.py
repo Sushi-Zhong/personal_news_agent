@@ -84,7 +84,7 @@ class NewsChatService:
         if moderation_response:
             self._save_response_turn(moderation_response, message, user_id, topic, category_scope)
             return moderation_response
-        skill_response = await self._skill_response(conv_id, message, user_id)
+        skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope)
         if skill_response:
             self._save_response_turn(skill_response, message, user_id, topic, category_scope)
             return skill_response
@@ -239,7 +239,7 @@ class NewsChatService:
             self._save_response_turn(moderation_response, message, user_id, topic, category_scope)
             yield {"type": "final", "response": moderation_response.model_dump(mode="json")}
             return
-        skill_response = await self._skill_response(conv_id, message, user_id)
+        skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope)
         if skill_response:
             self._save_response_turn(skill_response, message, user_id, topic, category_scope)
             yield {"type": "trace", "item": {"stage": "Skill 执行", "status": "completed", "message": skill_response.context_relation}}
@@ -303,14 +303,28 @@ class NewsChatService:
             if not task.done():
                 task.cancel()
 
-    async def _skill_response(self, conversation_id: str, message: str, user_id: str) -> ChatResponse | None:
+    async def _skill_response(
+        self,
+        conversation_id: str,
+        message: str,
+        user_id: str,
+        topic: str | None = None,
+        category_scope: list[str] | None = None,
+    ) -> ChatResponse | None:
         text = message.strip()
         if not text.startswith("/") or not self.skill_registry:
             return None
+        topic, category_scope = self._skill_context_from_turns(conversation_id, text, user_id, topic, category_scope)
         try:
             result = await self.skill_registry.execute(
                 text,
-                SkillContext(services=self.services, user_id=user_id, conversation_id=conversation_id),
+                SkillContext(
+                    services=self.services,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    topic=topic,
+                    category_scope=category_scope,
+                ),
             )
         except ValueError as exc:
             answer = str(exc)
@@ -324,14 +338,17 @@ class NewsChatService:
             )
         payload = result.data or {}
         answer = _skill_answer(result.title, result.message, payload)
+        response_topic = _skill_context_topic(result.command, payload)
+        focus_type = "topic" if response_topic else "skill"
+        focus_text = response_topic or result.title
         return ChatResponse(
             conversation_id=conversation_id,
             answer=answer,
             markdown=answer,
             context_relation=f"skill:{result.command}",
-            topic=payload.get("topic"),
+            topic=response_topic,
             category_scope=payload.get("category_scope") or [],
-            focus_object=FocusObject(type="topic", text=payload.get("topic") or result.title),
+            focus_object=FocusObject(type=focus_type, text=focus_text),
             required_context_items=["skill_registry"],
             skill_result={
                 "command": result.command,
@@ -340,6 +357,29 @@ class NewsChatService:
                 "data": payload,
             },
         )
+
+    def _skill_context_from_turns(
+        self,
+        conversation_id: str,
+        text: str,
+        user_id: str,
+        topic: str | None,
+        category_scope: list[str] | None,
+    ) -> tuple[str | None, list[str] | None]:
+        command = text.split(maxsplit=1)[0].lower() if text.split() else ""
+        if command not in {"/report", "/brief"}:
+            return topic, category_scope
+        if _skill_command_has_topic_arg(text):
+            return topic, category_scope
+        if command == "/report":
+            last = self.store.last_turn(conversation_id, user_id=user_id)
+            if not last:
+                return topic, category_scope
+            return None, last.get("category_scope") or category_scope
+        last = self.store.last_turn(conversation_id, user_id=user_id)
+        if not last:
+            return topic, category_scope
+        return last.get("topic") or topic, last.get("category_scope") or category_scope
 
     async def _topic_agent_response(self, conversation_id: str, user_id: str, message: str) -> ChatResponse | None:
         if not self.topic_agent:
@@ -494,8 +534,8 @@ class NewsChatService:
         request_topic: str | None,
         request_categories: list[str] | None,
     ) -> str:
-        resolved_topic = response.topic or (
-            response.focus_object.text if response.focus_object and response.focus_object.type == "topic" else request_topic
+        resolved_topic = request_topic or response.topic or (
+            response.focus_object.text if response.focus_object and response.focus_object.type == "topic" else None
         )
         resolved_categories = response.category_scope or request_categories or []
         turn_id = self.store.save_turn(
@@ -547,9 +587,9 @@ class NewsChatService:
             conversation_id=conversation_id,
             answer=answer,
             context_relation=context_relation,
-            topic=query,
+            topic=topic or query,
             category_scope=categories or [],
-            focus_object=FocusObject(type="topic", text=query),
+            focus_object=FocusObject(type="topic", text=topic or query),
             required_context_items=["current_topic", "local_news_index", "retrieved_evidence"],
             recommendations=results,
         )
@@ -728,7 +768,7 @@ class NewsChatService:
         if event_line and event_line.get("items"):
             await _add_trace(trace, {"stage": "事件线", "status": "completed", "message": f"生成 {len(event_line.get('items') or [])} 个时间节点。", "count": len(event_line.get("items") or [])}, on_trace)
 
-        if self.llm_client.configured :#and evidence:
+        if self.llm_client.configured and evidence:
             try:
                 await _add_trace(trace, {"stage": "生成回答", "status": "running", "message": "正在组织 markdown 回答。"}, on_trace)
                 history = self._conversation_memory(conversation_id, user_id)
@@ -747,9 +787,9 @@ class NewsChatService:
             answer=answer,
             markdown=answer,
             context_relation=context_relation,
-            topic=query,
+            topic=topic or query,
             category_scope=categories or [],
-            focus_object=FocusObject(type="topic", text=query),
+            focus_object=FocusObject(type="topic", text=topic or query),
             required_context_items=["research_pipeline", "source_search_ingest", "retrieved_evidence", "event_line"],
             recommendations=merged_results[:8],
             research_trace=trace,
@@ -970,6 +1010,8 @@ def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
                 lines.extend(f"- {item}" for item in values[:6] if item)
         return "\n".join(lines).strip()
     sections = payload.get("sections") or {}
+    if title.startswith("专题报告") and payload.get("report_id") and sections:
+        return _report_skill_answer(title, message, payload)
     if sections.get("headline") or sections.get("summary"):
         lines = [f"## {sections.get('headline') or title}", "", sections.get("summary") or message]
         top_stories = sections.get("top_stories") or []
@@ -996,6 +1038,180 @@ def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
             lines.extend(["", f"> {uncertainty}"])
         return "\n".join(lines).strip()
     return f"{title}\n\n{message}".strip()
+
+
+def _skill_context_topic(command: str, payload: dict[str, Any]) -> str | None:
+    if command in {"/factcheck", "/check"}:
+        return payload.get("claim") or None
+    if command in {"/report", "/brief"}:
+        return payload.get("topic") or None
+    return None
+
+
+def _skill_command_has_topic_arg(text: str) -> bool:
+    parts = text.split()
+    if len(parts) <= 1:
+        return False
+    index = 1
+    while index < len(parts):
+        item = parts[index]
+        if item.startswith("--"):
+            index += 2
+            continue
+        return True
+    return False
+
+
+def _report_skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
+    sections = payload.get("sections") or {}
+    topic = payload.get("topic") or title.replace("专题报告：", "").strip()
+    sources = payload.get("sources") or []
+    timeline = payload.get("timeline") or sections.get("三、关键时间线") or []
+    conclusion = sections.get("一句话结论") or sections.get("一、结论摘要") or sections.get("summary") or message
+    background = sections.get("发生了什么") or sections.get("二、事件背景")
+    key_evidence = sections.get("关键证据") or sections.get("六、不同来源的主要说法") or []
+    source_claims = sections.get("各方说法") or sections.get("六、不同来源的主要说法") or []
+    importance = sections.get("为什么重要") or _report_importance_points(topic, payload.get("category_scope") or [], sections)
+    uncertainty = sections.get("争议与不确定性") or sections.get("八、来源列表与不确定性说明") or sections.get("uncertainty")
+    watch_points = sections.get("后续观察点") or sections.get("七、可能影响与后续观察指标") or []
+    lines = [
+        f"## 专题报告：{_report_title_text(topic)}",
+        "",
+        "### 一句话结论",
+        _report_body_text(conclusion, max_length=420),
+        "",
+        "### 覆盖范围",
+        f"- 主题：{_report_title_text(topic)}",
+        f"- 分类：{' / '.join(payload.get('category_scope') or []) or '不限'}",
+        f"- 相关证据：{len(sources)} 条",
+    ]
+    lines.extend(["", "### 发生了什么", _report_body_text(background or "对话内暂未出现足够的事件背景。", max_length=520)])
+    lines.extend(["", "### 关键证据"])
+    _extend_report_dict_list(lines, key_evidence, empty="对话内暂未出现可引用的关键证据。")
+    lines.extend(["", "### 各方说法"])
+    _extend_report_dict_list(lines, source_claims, empty="对话内暂未出现不同主体或来源的明确说法。")
+    lines.extend(["", "### 为什么重要"])
+    _extend_report_string_list(lines, importance, empty="对话内暂未出现足够信息判断重要性。")
+    lines.extend(["", "### 争议与不确定性"])
+    _extend_report_string_list(lines, uncertainty, empty="对话内暂未出现明确争议或不确定性说明。")
+    lines.extend(["", "### 后续观察点"])
+    _extend_report_string_list(lines, watch_points, empty="对话内暂未出现后续观察点。")
+    lines.extend(["", "### 时间线"])
+    _extend_report_timeline(lines, timeline)
+    lines.extend(["", "### 证据来源列表"])
+    _extend_report_sources(lines, sources)
+    return "\n".join(str(line) for line in lines if line is not None).strip()
+
+
+def _extend_report_dict_list(lines: list[str], values: Any, empty: str) -> None:
+    if not isinstance(values, list) or not values:
+        lines.append(f"- {empty}")
+        return
+    appended = False
+    for item in values[:8]:
+        if isinstance(item, dict):
+            summary = _report_body_text(item.get("summary") or "", max_length=360)
+            title = _report_title_text(item.get("title") or "未命名来源")
+            source = item.get("source_id") or item.get("source") or "unknown"
+            lines.append(f"- {title}（{source}）{f'：{summary}' if summary else ''}")
+            appended = True
+        elif item:
+            lines.append(f"- {_report_body_text(item, max_length=360)}")
+            appended = True
+    if not appended:
+        lines.append(f"- {empty}")
+
+
+def _extend_report_string_list(lines: list[str], values: Any, empty: str) -> None:
+    if isinstance(values, str):
+        text = _report_body_text(values, max_length=360)
+        lines.append(f"- {text}" if text else f"- {empty}")
+        return
+    if not isinstance(values, list) or not values:
+        lines.append(f"- {empty}")
+        return
+    appended = False
+    for item in values[:8]:
+        if item and not _report_fragment_text(item):
+            lines.append(f"- {_report_body_text(item, max_length=360)}")
+            appended = True
+    if not appended:
+        lines.append(f"- {empty}")
+
+
+def _extend_report_timeline(lines: list[str], timeline: Any) -> None:
+    if not isinstance(timeline, list) or not timeline:
+        lines.append("- 时间未知：对话内暂未出现足够内容形成时间线")
+        return
+    appended = False
+    for item in timeline[:10]:
+        if not isinstance(item, dict):
+            continue
+        date = item.get("date") or "时间未知"
+        event = _report_title_text(item.get("event") or item.get("title") or "")
+        if event:
+            lines.append(f"- {date}：{event}")
+            appended = True
+    if not appended:
+        lines.append("- 时间未知：对话内暂未出现足够内容形成时间线")
+
+
+def _extend_report_sources(lines: list[str], sources: Any) -> None:
+    if not isinstance(sources, list) or not sources:
+        lines.append("- 对话内暂未出现可列出的证据来源。")
+        return
+    appended = False
+    for index, item in enumerate(sources[:12], start=1):
+        if not isinstance(item, dict):
+            continue
+        source = item.get("source_id") or "unknown"
+        source_title = _report_title_text(item.get("title") or "未命名来源")
+        url = item.get("url") or ""
+        lines.append(f"- [{index}] {source_title}（{source}）{f' {url}' if url else ''}")
+        appended = True
+    if not appended:
+        lines.append("- 对话内暂未出现可列出的证据来源。")
+
+
+def _report_importance_points(topic: str, categories: list[str], sections: dict[str, Any]) -> list[str]:
+    points = sections.get("五、主要争议点/看点") or []
+    if points:
+        readable_points = [item for item in points if item and not _report_fragment_text(item)]
+        if readable_points:
+            return [f"对“{topic}”的判断主要取决于：{item}" for item in readable_points[:3]]
+    if categories:
+        return [f"该主题涉及 {' / '.join(categories)} 板块，后续变化可能影响相关主体和公众判断。"]
+    return [f"该主题后续走向可能改变对“{topic}”的判断，需要继续关注证据是否补齐。"]
+
+
+def _report_fragment_text(value: Any) -> bool:
+    text = " ".join(str(value or "").split()).strip(" -—_·|：:，,。")
+    if not text:
+        return True
+    lowered = text.lower()
+    if lowered in {"36", "-36", "36氪", "kr36", "com", "同花顺", "亿元", "万元", "2025", "2026", "10"}:
+        return True
+    if text.isdigit() or re.fullmatch(r"20\d{2}", text):
+        return True
+    has_cjk = any("\u4e00" <= char <= "\u9fff" for char in text)
+    return has_cjk and len(text) <= 4
+
+
+def _report_title_text(value: Any) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    return text.rstrip("…")
+
+
+def _report_body_text(value: Any, max_length: int = 360) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if not text:
+        return ""
+    was_previously_truncated = text.endswith("…") or text.endswith("...")
+    if len(text) <= max_length and not was_previously_truncated:
+        return text
+    text = text.rstrip(".…").rstrip()
+    excerpt = text[:max_length].rstrip("，,。；;：:、 ")
+    return f"{excerpt}（已截断，仅展示对话内摘录）"
 
 
 def _factcheck_insufficient_reasons(payload: dict[str, Any]) -> list[str]:
@@ -1624,7 +1840,12 @@ def _research_fallback_answer(
     prefix: str | None = None,
 ) -> str:
     if not evidence:
-        return f"## {query}\n\n暂时没有召回到足够可靠的证据。可以先扩大来源、放宽时间范围，或补充更具体的关键词。"
+        lead = f"> {prefix}\n\n" if prefix else ""
+        return (
+            f"{lead}## {query}\n\n"
+            "当前没有召回到可引用证据，因此不生成事实归纳或泛化列表。\n\n"
+            "可以补充更具体的对象、平台、时间范围，或打开联网搜索后重试。"
+        )
     dates = [item.get("published_at") for item in evidence if item.get("published_at")]
     sources = sorted({item.get("source_id") for item in evidence if item.get("source_id")})
     lead = f"> {prefix}\n\n" if prefix else ""

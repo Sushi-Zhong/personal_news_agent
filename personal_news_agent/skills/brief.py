@@ -15,11 +15,12 @@ class BriefSkill:
 
     async def run(self, args: list[str], context: SkillContext) -> SkillResult:
         topic, options = _parse_args(args)
-        topic = topic or "今日资讯"
+        topic = topic or (context.topic or "").strip() or "今日资讯"
+        categories = _categories(options.get("category")) or (context.category_scope or [])
         report = await context.services["reports"].generate(
             user_id=context.user_id,
             topic=topic,
-            category_scope=_categories(options.get("category")),
+            category_scope=categories,
             time_range="1d",
             report_type="daily_digest",
         )

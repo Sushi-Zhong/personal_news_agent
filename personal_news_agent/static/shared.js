@@ -419,7 +419,7 @@ async function restoreChatMemory(target = "#messages") {
 
 function syncChatResponseContext(response) {
   localStorage.removeItem(chatMemoryKey());
-  if (response?.context_relation === "topic_agent_created" && typeof window.applyChatConversationContext === "function") {
+  if (isTopicChatResponse(response) && typeof window.applyChatConversationContext === "function") {
     window.applyChatConversationContext({
       topic: response?.topic || response?.focus_object?.text || null,
       category_scope: response?.category_scope || [],
@@ -428,6 +428,13 @@ function syncChatResponseContext(response) {
   if (typeof window.handleChatResponseSideEffects === "function") {
     Promise.resolve(window.handleChatResponseSideEffects(response)).catch(() => {});
   }
+}
+
+function isTopicChatResponse(response) {
+  if (!response) return false;
+  if (response.context_relation === "query_moderation_blocked") return false;
+  if (response.focus_object?.type === "topic") return Boolean(response.topic || response.focus_object?.text);
+  return response.context_relation === "topic_agent_created";
 }
 
 function appendLocalTurn(role, text, target = "#messages", loading = false) {
@@ -605,9 +612,23 @@ function chatResponseHtml(data) {
   const isRelated = data.context_relation === "related_search" || data.mind_map?.type === "related_mind_map";
   const answerText = isRelated ? stripRelatedGeneratedMarkdown(data.markdown || data.answer || "", true) : data.markdown || data.answer || "";
   const answer = renderMarkdown(answerText);
+  const reportDownloads = renderReportDownloads(data);
   const evidenceIndex = isRelated ? renderChatEvidenceIndex(data.evidence || []) : "";
   const timeline = renderChatEventLine(data.event_line, data.evidence || []);
-  return `${trace}${mindMap}<div class="assistant-markdown">${answer}</div>${evidenceIndex}${timeline}`;
+  return `${trace}${mindMap}<div class="assistant-markdown">${answer}</div>${reportDownloads}${evidenceIndex}${timeline}`;
+}
+
+function renderReportDownloads(data) {
+  const result = data?.skill_result || {};
+  const payload = result.data || {};
+  const reportId = payload.report_id;
+  if (result.command !== "/report" || !reportId) return "";
+  const userId = activeUserId || "default";
+  const base = `/api/reports/${encodeURIComponent(reportId)}/download?user_id=${encodeURIComponent(userId)}`;
+  return `<div class="report-downloads" aria-label="报告下载">
+    <a href="${base}&format=pdf" download>下载 PDF</a>
+    <a href="${base}&format=docx" download>下载 Word</a>
+  </div>`;
 }
 
 function chatStreamingHtml(state) {
@@ -1051,7 +1072,13 @@ function bindAskButtons() {
     const button = event.target.closest("[data-ask]");
     if (!button) return;
     event.preventDefault();
-    await sendChat(button.dataset.ask || button.textContent || "");
+    const ask = button.dataset.ask || button.textContent || "";
+    const handler = window.handleAssistantInput;
+    if (typeof handler === "function") {
+      await handler(ask);
+      return;
+    }
+    await sendChat(ask);
   });
 }
 

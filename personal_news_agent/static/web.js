@@ -169,9 +169,6 @@ async function handleAssistantInput(message) {
   const command = parseAssistantCommand(message);
   if (!command) {
     const response = await sendChat(message);
-    if (pendingTopicFromNextMessage) {
-      await createTopicFromFirstMessage(message, response);
-    }
     return response;
   }
 
@@ -200,15 +197,22 @@ async function handleAssistantInput(message) {
       return result;
     }
     if (["report", "r"].includes(command.name)) {
-      await applyTopicCommand(command);
-      const result = await generateTopicReport({ chatFollowup: false });
-      setAssistantTurnText(assistantNode, result ? `报告已生成：${result.report_id}` : "报告生成失败。");
-      return result;
+      await applyTopicCommand(command, { reload: false });
+      const reportTopic = cleanSkillTopicTitle(commandText(command) || "");
+      const category = commandArg(command, "category", "cat");
+      const timeRange = commandArg(command, "time-range", "time", "range") || "30d";
+      const reportCommand = [
+        "/report",
+        reportTopic,
+        category ? `--category ${category}` : "",
+        timeRange ? `--time-range ${timeRange}` : "",
+      ].filter(Boolean).join(" ");
+      return sendChatIntoTurn(reportCommand, assistantNode);
     }
     if (["brief"].includes(command.name)) {
       await applyTopicCommand(command, { reload: false });
-      const briefTopic = commandText(command) || consoleState.topic || "";
-      const briefCategory = commandArg(command, "category", "cat") || (consoleState.categoryScope || []).join(",");
+      const briefTopic = commandText(command) || "";
+      const briefCategory = commandArg(command, "category", "cat");
       const briefCommand = ["/brief", briefTopic, briefCategory ? `--category ${briefCategory}` : ""].filter(Boolean).join(" ");
       return sendChatIntoTurn(briefCommand, assistantNode);
     }
@@ -272,9 +276,14 @@ async function runRelatedSearchIntoTurn(assistantNode, explicitTopic = "") {
 }
 
 async function createTopicFromFirstMessage(message, response, options = {}) {
+  if (!pendingTopicFromNextMessage && options.force !== true) return null;
   const createdConversationId = response?.conversation_id || conversationId;
   if (!createdConversationId) return null;
-  const title = canonicalTopicTitle(options.title || response?.topic || response?.focus_object?.text || message) || message;
+  if (isSafetyBlockedResponse(response)) {
+    setStatus("这条内容未通过安全检查，未新增关注。");
+    return null;
+  }
+  const title = canonicalTopicTitle(cleanSkillTopicTitle(options.title || response?.topic || response?.focus_object?.text || message)) || message;
   const categoryScope = options.categoryScope || response?.category_scope || consoleState.categoryScope || [];
   try {
     const result = await request("/api/topics", {
@@ -305,6 +314,10 @@ async function createTopicFromFirstMessage(message, response, options = {}) {
     setStatus(error.message);
     return null;
   }
+}
+
+function isSafetyBlockedResponse(response) {
+  return response?.context_relation === "query_moderation_blocked";
 }
 
 async function applyTopicCommand(command, options = {}) {
@@ -685,7 +698,15 @@ function mergeTopics(items) {
 
 function canonicalTopicTitle(title) {
   let cleaned = String(title || "").replace(/\s+/g, " ").trim();
+  const quoted =
+    cleaned.match(/追踪[「“"《](.+?)[」”"》]/) ||
+    cleaned.match(/围绕[「“"《](.+?)[」”"》]/) ||
+    cleaned.match(/基于资讯[「“"《](.+?)[」”"》]/);
+  if (quoted?.[1]) cleaned = quoted[1].trim();
   cleaned = cleaned
+    .replace(/^追踪\s*/, "")
+    .replace(/是否出现后续回应或新进展.*$/, "")
+    .replace(/后续回应或新进展.*$/, "")
     .replace(/\s*有什么.*$/, "")
     .replace(/\s*有哪些.*$/, "")
     .replace(/\s*最近.*$/, "")
@@ -764,10 +785,14 @@ function renderReportCard(data) {
   if (!target) return;
   const sections = data.sections || {};
   const summary = sections["一、结论摘要"] || sections.summary || "";
+  const reportId = data.report_id || "";
+  const userId = activeUserId || "default";
+  const base = reportId ? `/api/reports/${encodeURIComponent(reportId)}/download?user_id=${encodeURIComponent(userId)}` : "";
   target.innerHTML = `<div class="deep-section">
     <strong>${escapeHtml(data.topic || consoleState.topic)}</strong>
     <p>${escapeHtml(summary)}</p>
-    <span>${escapeHtml(data.report_id || "")}</span>
+    <span>${escapeHtml(reportId)}</span>
+    ${base ? `<div class="report-downloads"><a href="${base}&format=pdf" download>下载 PDF</a><a href="${base}&format=docx" download>下载 Word</a></div>` : ""}
   </div>`;
 }
 
@@ -989,7 +1014,7 @@ function syncChatContext() {
 }
 
 function applyChatConversationContext(context = {}) {
-  if (Object.prototype.hasOwnProperty.call(context, "topic")) consoleState.topic = context.topic || "";
+  if (Object.prototype.hasOwnProperty.call(context, "topic")) consoleState.topic = cleanSkillTopicTitle(context.topic || "");
   if (Array.isArray(context.category_scope)) consoleState.categoryScope = context.category_scope;
   const topicInput = document.querySelector("#topicInput");
   const categorySelect = document.querySelector("#categoryScope");
@@ -998,6 +1023,22 @@ function applyChatConversationContext(context = {}) {
   syncChatContext();
   syncContextDock();
   syncTaskTopic();
+}
+
+function cleanSkillTopicTitle(value) {
+  let topic = String(value || "").replace(/\s+/g, " ").trim();
+  const prefixes = ["专题报告：", "专题报告:", "事实核查：", "事实核查:", "继续核查：", "继续核查:"];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const prefix of prefixes) {
+      if (topic.startsWith(prefix)) {
+        topic = topic.slice(prefix.length).trim();
+        changed = true;
+      }
+    }
+  }
+  return topic;
 }
 
 function syncContextDock() {
@@ -1134,14 +1175,8 @@ function closeEventActionPopover() {
 }
 
 async function runFeedEventAsk(item, title, ask, isEventCard) {
-  if (!isEventCard) {
-    return sendChat(ask);
-  }
-  const category = eventCardCategory(item);
+  const category = isEventCard ? eventCardCategory(item) : feedItemCategory(item);
   const categoryScope = category ? [category] : [];
-  if (!pendingTopicFromNextMessage) {
-    return sendChat(ask);
-  }
   consoleState.topic = title;
   consoleState.categoryScope = categoryScope;
   const topicInput = document.querySelector("#topicInput");
@@ -1154,6 +1189,12 @@ async function runFeedEventAsk(item, title, ask, isEventCard) {
   const response = await sendChat(ask);
   await createTopicFromFirstMessage(ask, response, { title, categoryScope });
   return response;
+}
+
+function feedItemCategory(item) {
+  const meta = item.querySelector(".meta")?.textContent || "";
+  const parts = meta.split("·").map((part) => part.trim()).filter(Boolean);
+  return isKnownCategory(parts[1]) ? parts[1] : "";
 }
 
 function eventCardCategory(item) {

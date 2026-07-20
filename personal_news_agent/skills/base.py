@@ -18,6 +18,8 @@ class SkillContext:
     services: dict[str, Any]
     user_id: str = "default"
     conversation_id: str | None = None
+    topic: str | None = None
+    category_scope: list[str] | None = None
 
 
 @dataclass(frozen=True)
