@@ -315,10 +315,21 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             },
         }
 
+    def _event_payload(item: Any) -> dict[str, Any]:
+        data = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+        article_ids = data.get("article_ids") or []
+        article = store.get_article(article_ids[0]) if article_ids else None
+        if article:
+            data["source_url"] = article.get("url")
+            data["source_title"] = article.get("title")
+            data["source_id"] = article.get("source_id")
+            data["source_published_at"] = article.get("published_at")
+        return data
+
     @app.get("/api/events")
     async def list_events(category: str | None = None, limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
         clusters = events.discover(category=category, limit=limit)
-        return {"items": clusters}
+        return {"items": [_event_payload(item) for item in clusters]}
 
     @app.post("/api/chat")
     async def chat(payload: ChatRequest) -> Any:

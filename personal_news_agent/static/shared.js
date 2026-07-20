@@ -141,7 +141,7 @@ function prototypeItemHtml(item, actionText = "追问") {
 }
 
 function eventHtml(item) {
-  return `<article class="item">
+  return `<article class="item" data-event-title="${escapeAttr(item.title || "")}" data-event-url="${escapeAttr(item.source_url || "")}" data-event-source-title="${escapeAttr(item.source_title || "")}">
     <div class="title">${escapeHtml(item.title)}</div>
     <div class="meta">${escapeHtml(item.category)} · ${item.article_count}篇 · 热度${item.hot_score}</div>
     <div class="summary">${escapeHtml((item.keywords || []).join(" / "))}</div>
@@ -294,6 +294,10 @@ async function renderWechatStatus(targetSelector) {
 
 async function loadFeed(category = "", limit = 10, target = "#feed") {
   const data = await request(`/api/feed?limit=${limit}&user_id=${encodeURIComponent(activeUserId)}${category ? `&category=${category}` : ""}`);
+  if (target === "#feed") {
+    const count = document.querySelector("[data-related-article-count]");
+    if (count) count.textContent = `${(data.items || []).length} 条`;
+  }
   document.querySelector(target).innerHTML = data.items.map(itemHtml).join("");
 }
 
@@ -315,14 +319,15 @@ async function sendChat(message, target = "#messages") {
 
 async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   const chatContext = window.currentChatContext || {};
+  const messageFocus = focusFromChatMessage(message);
   const targetNode = document.querySelector(target) || document.querySelector("#messages");
   targetNode.classList.add("chat-stream");
   const payload = {
     conversation_id: conversationId,
     user_id: activeUserId || "default",
     message,
-    topic: chatContext.topic || null,
-    category_scope: chatContext.category_scope || null,
+    topic: messageFocus || chatContext.topic || null,
+    category_scope: messageFocus ? null : chatContext.category_scope || null,
     use_llm: Boolean(chatContext.use_llm),
     allow_web_search: Boolean(chatContext.allow_web_search),
   };
@@ -342,6 +347,24 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   syncChatResponseContext(data);
   await notifyConversationHistoryChanged();
   return data;
+}
+
+function focusFromChatMessage(message) {
+  const text = String(message || "");
+  const quoted =
+    text.match(/围绕热点事件[“"《](.+?)[”"》]/) ||
+    text.match(/基于资讯[“"《](.+?)[”"》]/);
+  if (!quoted) return "";
+  return cleanFocusTitle(quoted[1]);
+}
+
+function cleanFocusTitle(value) {
+  let text = String(value || "").trim();
+  text = text.replace(/^.*?相关热点[:：]/, "");
+  text = text.replace(/^(围绕)?热点事件/, "");
+  text = text.replace(/展开.*$/, "");
+  text = text.replace(/[-—]+(中新网|人民网|新华网|央视网|中国新闻网|中国共产党新闻网)\s*$/, "");
+  return text.trim().slice(0, 120);
 }
 
 async function notifyConversationHistoryChanged() {
@@ -396,11 +419,14 @@ async function restoreChatMemory(target = "#messages") {
 
 function syncChatResponseContext(response) {
   localStorage.removeItem(chatMemoryKey());
-  if (typeof window.applyChatConversationContext === "function") {
+  if (response?.context_relation === "topic_agent_created" && typeof window.applyChatConversationContext === "function") {
     window.applyChatConversationContext({
       topic: response?.topic || response?.focus_object?.text || null,
       category_scope: response?.category_scope || [],
     });
+  }
+  if (typeof window.handleChatResponseSideEffects === "function") {
+    Promise.resolve(window.handleChatResponseSideEffects(response)).catch(() => {});
   }
 }
 
@@ -576,11 +602,12 @@ async function copyTurnText(text) {
 function chatResponseHtml(data) {
   const trace = renderResearchTrace(data.research_trace || []);
   const mindMap = renderChatMindMapPlaceholder(data.mind_map);
-  const answerText = data.mind_map ? stripRelatedMindMapMarkdown(data.markdown || data.answer || "") : data.markdown || data.answer || "";
+  const isRelated = data.context_relation === "related_search" || data.mind_map?.type === "related_mind_map";
+  const answerText = isRelated ? stripRelatedGeneratedMarkdown(data.markdown || data.answer || "", true) : data.markdown || data.answer || "";
   const answer = renderMarkdown(answerText);
-  const timeline = renderChatEventLine(data.event_line);
-  const sources = renderChatSources(data.evidence || []);
-  return `${trace}${mindMap}<div class="assistant-markdown">${answer}</div>${timeline}${sources}`;
+  const evidenceIndex = isRelated ? renderChatEvidenceIndex(data.evidence || []) : "";
+  const timeline = renderChatEventLine(data.event_line, data.evidence || []);
+  return `${trace}${mindMap}<div class="assistant-markdown">${answer}</div>${evidenceIndex}${timeline}`;
 }
 
 function chatStreamingHtml(state) {
@@ -598,27 +625,33 @@ function renderResearchTrace(items) {
     .join("")}</div>`;
 }
 
-function renderChatEventLine(eventLine) {
+function renderChatEventLine(eventLine, evidenceItems = []) {
   const items = (eventLine && eventLine.items) || [];
   if (!items.length) return "";
   return `<div class="chat-event-line">${items
     .slice(0, 6)
-    .map(
-      (item) =>
-        `<div class="chat-event"><time>${escapeHtml(item.date || "")}</time><strong>${escapeHtml(item.title || "")}</strong><p>${escapeHtml(item.summary || "")}</p></div>`
-    )
+    .map((item) => renderChatEvent(item, evidenceItems))
     .join("")}</div>`;
 }
 
-function renderChatSources(items) {
-  if (!items.length) return "";
-  return `<details class="chat-sources"><summary>证据 ${items.length}</summary>${items
-    .slice(0, 8)
-    .map(
-      (item) =>
-        `<a href="${escapeAttr(item.url || "#")}" target="_blank" rel="noreferrer"><span>[${escapeHtml(item.index || "")}]</span>${escapeHtml(item.title || "")}<small>${escapeHtml(item.source_id || "")} ${escapeHtml(item.published_at || "")}</small></a>`
-    )
-    .join("")}</details>`;
+function renderChatEvent(item, evidenceItems) {
+  const url = eventItemUrl(item, evidenceItems);
+  const tag = url ? "a" : "div";
+  const attrs = url ? ` href="${escapeAttr(url)}" target="_blank" rel="noreferrer"` : "";
+  return `<${tag} class="chat-event"${attrs}><time>${escapeHtml(item.date || "")}</time><strong>${escapeHtml(item.title || "")}</strong><p>${escapeHtml(item.summary || "")}</p></${tag}>`;
+}
+
+function eventItemUrl(item, evidenceItems) {
+  if (item?.url) return item.url;
+  const sourceIds = new Set((item?.source_article_ids || []).filter(Boolean));
+  if (sourceIds.size) {
+    const match = evidenceItems.find((evidence) => evidence.article_id && sourceIds.has(evidence.article_id) && evidence.url);
+    if (match) return match.url;
+  }
+  const title = String(item?.title || "").trim();
+  if (!title) return "";
+  const match = evidenceItems.find((evidence) => String(evidence.title || "").trim() === title && evidence.url);
+  return match?.url || "";
 }
 
 function renderChatMindMapPlaceholder(map) {
@@ -702,7 +735,6 @@ function RelatedMindMapExplorer({ map }) {
             width: layout.branches[index].width,
             height: layout.branches[index].height,
             eyebrow: "联想依据",
-            title: branch.relationLabel,
             detail: branch.edgeReason,
             onClick: () => setActiveIndex(index),
           })
@@ -723,7 +755,7 @@ function RelatedMindMapExplorer({ map }) {
                   "a",
                   { key: `${point.title}_${index}`, href: point.url || "#", target: "_blank", rel: "noreferrer" },
                   React.createElement("span", null, point.evidence_index ? `#${point.evidence_index}` : `0${index + 1}`),
-                  React.createElement("strong", null, point.title || "相关证据"),
+                  React.createElement("strong", null, evidenceTitle(point.title || "相关证据")),
                   React.createElement("small", null, evidenceSnippet(point.summary || point.connection_reason || "暂无摘要"))
                 )
               )
@@ -760,26 +792,25 @@ function ExplorerLinks({ branches, layout, activeIndex }) {
         React.Fragment,
         { key: `links_${index}` },
         React.createElement("path", {
+          className: "explorer-link-rail",
+          d: curvePath(startX, startY, endX, endY),
+        }),
+        React.createElement("path", {
           className: `explorer-link ${active ? "active" : ""}`,
           d: curvePath(startX, startY, endX, endY),
           style: { "--relation-color": color },
           filter: active ? "url(#explorerGlow)" : "",
-        }),
-        React.createElement(
-          "foreignObject",
-          { x: (startX + endX) / 2 - 52, y: (startY + endY) / 2 - 15, width: 104, height: 30 },
-          React.createElement("div", { xmlns: "http://www.w3.org/1999/xhtml", className: `explorer-edge-label ${active ? "active" : ""}`, style: { "--relation-color": color } }, branch.relationLabel)
-        )
+        })
       );
     })
   );
 }
 
-function ExplorerNode({ kind, relationType = "other", active = false, muted = false, x, y, width, height, eyebrow, title, detail, href, onClick }) {
+function ExplorerNode({ kind, relationType = "other", active = false, x, y, width, height, eyebrow, title, detail, onClick }) {
   const props = {
     role: onClick ? "button" : undefined,
     tabIndex: onClick ? 0 : undefined,
-    className: `explorer-node ${kind} ${active ? "active" : ""} ${muted ? "muted" : ""}`,
+    className: `explorer-node ${kind} ${active ? "active" : ""}`,
     style: { left: x, top: y, width, minHeight: height, "--relation-color": relationColor(relationType) },
     onClick,
     onKeyDown: onClick
@@ -791,13 +822,15 @@ function ExplorerNode({ kind, relationType = "other", active = false, muted = fa
         }
       : undefined,
   };
-  const content = [
-    React.createElement("span", { key: "eyebrow" }, eyebrow),
-    React.createElement("strong", { key: "title" }, truncateText(title, kind === "point" ? 54 : 38)),
-    React.createElement("small", { key: "detail" }, truncateText(detail, kind === "point" ? 64 : 56)),
-  ];
-  if (href) {
-    return React.createElement("a", { ...props, href, target: "_blank", rel: "noreferrer" }, content);
+  const content = [];
+  if (eyebrow) {
+    content.push(React.createElement("span", { key: "eyebrow" }, eyebrow));
+  }
+  if (title) {
+    content.push(React.createElement("strong", { key: "title" }, truncateText(title, 38)));
+  }
+  if (detail) {
+    content.push(React.createElement("small", { key: "detail" }, truncateText(detail, 56)));
   }
   return React.createElement("div", props, content);
 }
@@ -822,7 +855,7 @@ function buildExplorerLayout(branches) {
   const branchYs = branchYPositions(branches.length, height, branchHeight);
   center.y = height / 2 - center.height / 2;
   const branchesLayout = [];
-  branches.forEach((branch, branchIndex) => {
+  branches.forEach((_, branchIndex) => {
     const xOffset = branchIndex % 2 === 0 ? 18 : 78;
     branchesLayout.push({ x: branchX + xOffset, y: branchYs[branchIndex], width: branchWidth, height: branchHeight });
   });
@@ -863,43 +896,73 @@ function renderMindMapFallback(map) {
   const branches = (map && map.branches) || [];
   return `<section class="related-explorer-fallback">
     <strong>${escapeHtml(map.topic || "相关联想图")}</strong>
-    <p>${escapeHtml(branches.length)} 个方向 · ${escapeHtml(map.evidence_count || 0)} 条证据</p>
-    <div>${branches
-      .slice(0, 6)
+      <p>${escapeHtml(branches.length)} 个方向 · ${escapeHtml(map.evidence_count || 0)} 条证据</p>
+      <div>${branches
+      .slice(0, 8)
       .map((branch) => `<span>${escapeHtml(branch.relation_label || "相关")}：${escapeHtml(truncateText(branch.title || "", 24))}</span>`)
       .join("")}</div>
   </section>`;
 }
 
+function cleanEvidenceText(value) {
+  return String(value || "")
+    .replace(/!\[[^\]]*](?:\([^)]*\))?/g, "")
+    .replace(/\[([^\]]+)](?:\([^)]*\))?/g, "$1")
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/#+\s*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function evidenceTitle(value) {
+  return truncateText(cleanEvidenceText(value), 34);
+}
+
 function evidenceSnippet(value) {
   return truncateText(
-    String(value || "")
-      .replace(/!\[[^\]]*]\([^)]+\)/g, "")
-      .replace(/\[([^\]]+)]\([^)]+\)/g, "$1")
-      .replace(/https?:\/\/\S+/g, "")
-      .replace(/#+\s*/g, "")
-      .replace(/\s+/g, " ")
-      .trim(),
-    96
+    cleanEvidenceText(value),
+    66
   );
 }
 
-function stripRelatedMindMapMarkdown(markdown) {
+function stripRelatedGeneratedMarkdown(markdown, stripEvidenceIndex = false) {
   const lines = String(markdown || "").split(/\r?\n/);
   const output = [];
-  let skippingMindMap = false;
+  let skippingSection = false;
   for (const line of lines) {
     const trimmed = line.trim();
-    if (trimmed === "## 相关思维导图") {
-      skippingMindMap = true;
+    if (skippingSection && trimmed.startsWith("## ")) {
+      skippingSection = false;
+    }
+    if (trimmed === "## 相关思维导图" || (stripEvidenceIndex && trimmed === "## 证据索引")) {
+      skippingSection = true;
       continue;
     }
-    if (skippingMindMap && trimmed.startsWith("## ")) {
-      skippingMindMap = false;
-    }
-    if (!skippingMindMap) output.push(line);
+    if (!skippingSection) output.push(line);
   }
   return output.join("\n").trim();
+}
+
+function renderChatEvidenceIndex(items) {
+  if (!items.length) return "";
+  return `<div class="assistant-markdown related-evidence-index"><h3>证据索引</h3><ul>${items
+    .map((item, index) => {
+      const number = item.index || index + 1;
+      const title = _markdownEvidenceLabel(`证据 ${number}｜${item.title || "未命名证据"}`);
+      const source = item.source_id || "来源未知";
+      const date = item.published_at || item.date || "发布时间未知";
+      const summary = truncateText(cleanEvidenceText(item.summary || ""), 150);
+      const url = String(item.url || "").trim();
+      const titleHtml = url.startsWith("http")
+        ? `<a href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${escapeHtml(title)}</a>`
+        : escapeHtml(title);
+      return `<li>${titleHtml}（${escapeHtml(source)}，${escapeHtml(date)}）${summary ? `：${escapeHtml(summary)}` : ""}</li>`;
+    })
+    .join("")}</ul></div>`;
+}
+
+function _markdownEvidenceLabel(value) {
+  return String(value || "").replace("[", "【").replace("]", "】").replace(/\s+/g, " ").trim();
 }
 
 function truncateText(value, maxLength) {
@@ -951,6 +1014,21 @@ function renderMarkdown(markdown) {
 }
 
 function renderInlineMarkdown(value) {
+  const text = String(value || "");
+  const linkPattern = /\[([^\]]+)]\((https?:\/\/[^)\s]+)\)/g;
+  let html = "";
+  let lastIndex = 0;
+  let match;
+  while ((match = linkPattern.exec(text))) {
+    html += renderInlinePlain(text.slice(lastIndex, match.index));
+    html += `<a href="${escapeAttr(match[2])}" target="_blank" rel="noreferrer">${renderInlinePlain(match[1])}</a>`;
+    lastIndex = linkPattern.lastIndex;
+  }
+  html += renderInlinePlain(text.slice(lastIndex));
+  return html;
+}
+
+function renderInlinePlain(value) {
   return escapeHtml(value)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/`(.+?)`/g, "<code>$1</code>");
@@ -978,6 +1056,12 @@ function bindAskButtons() {
 }
 
 const assistantSlashCommands = [
+  {
+    name: "check",
+    label: "继续核查",
+    description: "沿用上一条事实核查，联网补证据并重新判断",
+    icon: "↻",
+  },
   {
     name: "factcheck",
     label: "事实核查",

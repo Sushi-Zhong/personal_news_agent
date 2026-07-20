@@ -305,15 +305,26 @@ async function handleMobileAssistantInput(message) {
     }
     if (["brief"].includes(command.name)) {
       applyMobileTopicCommand(command);
-      return sendChatIntoTurn(`基于我的兴趣和当前关注的${mobileState.topic}，生成一份简洁的新闻简报，包含重点、影响和接下来值得关注的事项。`, assistantNode);
+      const briefTopic = commandText(command) || mobileState.topic || "";
+      const briefCategory = commandArg(command, "category", "cat") || (mobileState.categoryScope || []).join(",");
+      const briefCommand = ["/brief", briefTopic, briefCategory ? `--category ${briefCategory}` : ""].filter(Boolean).join(" ");
+      return sendChatIntoTurn(briefCommand, assistantNode);
     }
     if (["related"].includes(command.name)) {
-      applyMobileTopicCommand(command);
-      return runMobileRelatedSearchIntoTurn(assistantNode);
+      const relatedTopic = commandText(command) || commandArg(command, "topic", "q", "query");
+      if (relatedTopic) mobileState.topic = relatedTopic;
+      applyMobileTopicCommand({ ...command, args: { ...command.args, _: relatedTopic ? [relatedTopic] : [] } });
+      return runMobileRelatedSearchIntoTurn(assistantNode, relatedTopic);
+    }
+    if (["check"].includes(command.name)) {
+      return sendChatIntoTurn(message, assistantNode);
     }
     if (["factcheck", "verify"].includes(command.name)) {
       applyMobileTopicCommand(command);
-      return sendChatIntoTurn(`对“${mobileState.topic}”进行事实核查。先明确待核查的核心说法，再按已证实、存在争议、缺乏证据分类，列出可引用来源、证据时间和局限；没有可靠证据时明确说明，不要推测。`, assistantNode);
+      const claim = commandText(command) || mobileState.topic || "";
+      const category = commandArg(command, "category", "cat") || (mobileState.categoryScope || []).join(",");
+      const factCommand = ["/factcheck", claim, category ? `--category ${category}` : ""].filter(Boolean).join(" ");
+      return sendChatIntoTurn(factCommand, assistantNode);
     }
     if (["feed"].includes(command.name)) {
       mobileCategory = commandArg(command, "cat", "category") || commandText(command) || "";
@@ -324,7 +335,7 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/check、/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/feed。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);
@@ -332,16 +343,17 @@ async function handleMobileAssistantInput(message) {
   }
 }
 
-async function runMobileRelatedSearchIntoTurn(assistantNode) {
+async function runMobileRelatedSearchIntoTurn(assistantNode, explicitTopic = "") {
+  const topic = explicitTopic || mobileState.topic || "当前关注";
   const data = await request("/api/news/related", {
     method: "POST",
     body: JSON.stringify({
       conversation_id: conversationId,
       user_id: activeUserId || "default",
-      query: mobileState.topic || "当前关注",
-      topic: mobileState.topic,
+      query: topic,
+      topic,
       category_scope: mobileState.categoryScope,
-      max_queries: 5,
+      max_queries: 8,
       allow_web_search: isWebSearchEnabled(),
     }),
   });

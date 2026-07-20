@@ -1,5 +1,5 @@
 (function () {
-  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260717-related-clean-1";
+  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260717-feed-category-restore-1";
   const mobileQuery = window.matchMedia("(max-width: 760px)");
   const mode = mobileQuery.matches ? "mobile" : "web";
   const template = document.querySelector(`#${mode}Template`);

@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from personal_news_agent.config import settings
 from personal_news_agent.core.models import NormalizedArticle, RawArticle, RawArticleLink, RawSearchResult, SectionConfig, SourceConfig
 from personal_news_agent.core.text import content_hash, extract_entities, extract_keywords, stable_id, summarize
-from personal_news_agent.services.article_fetch import ArticleFetchService, _host_allowed
+from personal_news_agent.services.article_fetch import ArticleFetchService, _host_allowed, _parse_published_datetime
 
 
 class ListPageAdapter:
@@ -27,6 +27,8 @@ class ListPageAdapter:
         if not section.crawl_enabled:
             return []
         allowed_domains = list(self.source.search.domain_filters or (self.source.root_domain,))
+        if section.crawl_strategy == "rss_feed":
+            return await self.fetcher.list_rss_links(self.source.source_id, section.key, section.url, limit, allowed_domains)
         return await self.fetcher.list_links(self.source.source_id, section.key, section.url, limit, allowed_domains)
 
     async def search(self, query: str, limit: int = 10) -> list[RawSearchResult]:
@@ -118,6 +120,7 @@ class ListPageAdapter:
                     title=_strip_html(str(record.get(title_field) or record.get(url_field))),
                     url=url_value,
                     snippet=_strip_html(str(record.get(snippet_field) or ""))[:240],
+                    published_at=_parse_search_record_datetime(record, request),
                 )
             )
             if len(results) >= limit:
@@ -145,6 +148,29 @@ def _extract_path(payload: Any, path: str) -> Any:
             return None
         current = current.get(part)
     return current
+
+
+def _parse_search_record_datetime(record: dict[str, Any], request: dict[str, Any]) -> datetime | None:
+    fields = [
+        str(request.get("date_field") or ""),
+        "published_at",
+        "publishedAt",
+        "published_date",
+        "publish_date",
+        "pubDate",
+        "datePublished",
+        "date",
+        "time",
+        "created_at",
+    ]
+    for field in fields:
+        if not field:
+            continue
+        value = _extract_path(record, field) if "." in field else record.get(field)
+        parsed = _parse_published_datetime(str(value or ""))
+        if parsed:
+            return parsed
+    return None
 
 
 def _strip_html(value: str) -> str:

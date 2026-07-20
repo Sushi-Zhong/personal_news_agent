@@ -184,21 +184,19 @@ def test_api_chat_report_and_task_flow():
         assert api_conversation["first_message"] == "今天汽车圈有什么新闻？"
         assert api_conversation["turn_count"] >= 2
 
-        auto_topic_user = f"auto_topic_{uuid4().hex[:8]}"
-        new_topic = client.post(
+        normal_topic_user = f"normal_topic_{uuid4().hex[:8]}"
+        normal_topic = client.post(
             "/api/chat",
             json={
-                "conversation_id": f"auto_topic_conv_{uuid4().hex[:8]}",
-                "user_id": auto_topic_user,
+                "conversation_id": f"normal_topic_conv_{uuid4().hex[:8]}",
+                "user_id": normal_topic_user,
                 "message": "量子计算产业最近消息",
             },
         )
-        assert new_topic.status_code == 200
-        detected_title = new_topic.json()["topic"]
-        detected_topics = client.get(f"/api/topics?user_id={auto_topic_user}")
-        detected = next(item for item in detected_topics.json()["items"] if item["title"] == detected_title)
-        assert detected["topic_type"] == "user"
-        assert detected["task_id"] is None
+        assert normal_topic.status_code == 200
+        detected_topics = client.get(f"/api/topics?user_id={normal_topic_user}")
+        assert detected_topics.status_code == 200
+        assert [item for item in detected_topics.json()["items"] if item["topic_type"] == "user"] == []
 
         report = client.post(
             "/api/reports",

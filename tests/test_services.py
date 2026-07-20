@@ -8,11 +8,12 @@ import pytest
 
 from personal_news_agent.config import Settings
 from personal_news_agent.core.models import RawArticle, RawArticleLink, RawSearchResult, SearchResult, TimeRange
-from personal_news_agent.services.chat import NewsChatService, _filter_by_time, _rank_for_chat
+from personal_news_agent.services.chat import NewsChatService, _filter_by_time, _rank_for_chat, _related_base_query, _related_search_answer
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
-from personal_news_agent.services.article_fetch import _parse_published_datetime, _unwrap_search_link
+from personal_news_agent.services.factcheck import FactCheckService
+from personal_news_agent.services.article_fetch import ArticleFetchService, _parse_published_datetime, _unwrap_search_link
 from personal_news_agent.services.chat_understanding import (
     categories_for_message,
     is_contextual_followup,
@@ -36,6 +37,7 @@ from personal_news_agent.services.store import NewsStore
 from personal_news_agent.services.tasks import ScheduledTaskService
 from personal_news_agent.services.topic_agent import TopicAgentService
 from personal_news_agent.services.topic_views import TopicViewService
+from personal_news_agent.skills.registry import build_default_registry
 
 
 @pytest.fixture()
@@ -206,23 +208,128 @@ def test_related_search_uses_local_agent_queries_and_saves_turn(services):
             "AI Agent",
             category_scope=["tech"],
             user_id="default",
-            max_queries=2,
+            max_queries=3,
         )
     )
     assert response.context_relation == "related_search"
-    assert [item["query"] for item in response.expanded_queries] == ["AI Agent 最新进展", "AI Agent 产业影响"]
+    assert [item["query"] for item in response.expanded_queries] == ["AI Agent 最新进展", "AI Agent 产业影响", "AI Agent 背景 脉络"]
     assert response.mind_map
     assert response.mind_map["topic"] == "AI Agent"
-    assert [branch["title"] for branch in response.mind_map["branches"]] == ["AI Agent 最新进展", "AI Agent 产业影响"]
+    assert [branch["title"] for branch in response.mind_map["branches"]] == ["AI Agent 最新进展", "AI Agent 产业影响", "AI Agent 背景 脉络"]
     assert response.mind_map["branches"][0]["relation_label"] == "最新进展"
     assert response.mind_map["branches"][0]["edge_reason"] == "查看近期变化"
     assert response.mind_map["branches"][0]["points"][0]["title"] == "AI Agent 最新进展 报道"
     assert response.mind_map["branches"][0]["points"][0]["connection_reason"] == "检索命中「最新进展」方向"
     assert "相关思维导图" in response.answer
-    assert search.queries == ["AI Agent 最新进展", "AI Agent 产业影响"]
+    assert search.queries == ["AI Agent 最新进展", "AI Agent 产业影响", "AI Agent 背景 脉络"]
     assert response.recommendations
     turns = store.list_turns("related_conv", "default")
     assert turns[-1]["response"]["context_relation"] == "related_search"
+
+
+def test_related_base_query_prefers_latest_hot_event_title():
+    raw = (
+        "现在什么水果利率最高 围绕热点事件“农学热！超八成受访高考生和家长感觉大家对涉农专业看法有改观”展开，"
+        "发生了什么、为什么重要、后续看什么。 围绕热点事件“强化问题导向推进作风建设相关热点：强化问题导向推进作风建设--党建-中国共产党新闻网”展开，"
+        "发生了什么、为什么重要、后续看什么。"
+    )
+    assert _related_base_query(raw, raw) == "强化问题导向推进作风建设"
+
+
+def test_related_search_uses_clean_hot_event_topic(services):
+    _, store, _ = services
+    search = FakeRelatedSearchService()
+    chat = NewsChatService(store, search, local_agent=FakeRelatedLocalAgent())
+    raw = (
+        "现在什么水果利率最高 围绕热点事件“农学热！超八成受访高考生和家长感觉大家对涉农专业看法有改观”展开，"
+        "发生了什么、为什么重要、后续看什么。 围绕热点事件“强化问题导向推进作风建设相关热点：强化问题导向推进作风建设--党建-中国共产党新闻网”展开，"
+        "发生了什么、为什么重要、后续看什么。"
+    )
+    response = asyncio.run(
+        chat.related_search(
+            "related_dirty_conv",
+            raw,
+            category_scope=["economy"],
+            user_id="default",
+            max_queries=3,
+        )
+    )
+    assert response.mind_map["topic"] == "强化问题导向推进作风建设"
+    assert response.topic == "强化问题导向推进作风建设"
+    assert all("农学热" not in query for query in search.queries)
+    assert all("水果" not in query for query in search.queries)
+
+
+def test_chat_uses_explicit_hot_event_as_current_focus(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    chat = NewsChatService(store, search, llm_client=FakeDisabledLLM())
+    message = (
+        "追踪「人民日报理论版--理论--人民网」是否出现后续回应或新进展。"
+        "围绕热点事件“中新网相关热点：徽州文化艺术展亮相上海市历史博物馆-中新网”展开，"
+        "告诉我发生了什么、为什么重要、后续看什么。"
+    )
+
+    response = asyncio.run(
+        chat.chat(
+            "unrelated_followup_conv",
+            message,
+            topic="人民日报理论版--理论--人民网",
+            category_scope=["politics"],
+            use_llm=True,
+            user_id="default",
+        )
+    )
+
+    assert response.topic == "徽州文化艺术展亮相上海市历史博物馆"
+    assert response.focus_object is not None
+    assert response.focus_object.type == "topic"
+    assert response.focus_object.text == "徽州文化艺术展亮相上海市历史博物馆"
+    assert search.calls[0]["query"] == "徽州文化艺术展亮相上海市历史博物馆"
+    assert search.calls[0]["category_scope"] is None
+    assert response.attention_suggestion is None
+    assert "手动新增关注" not in response.answer
+    assert all(item.get("stage") != "主题关系" for item in response.research_trace)
+
+
+def test_chat_uses_explicit_article_title_over_stale_topic(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    chat = NewsChatService(store, search, llm_client=FakeDisabledLLM())
+
+    response = asyncio.run(
+        chat.chat(
+            "stale_topic_article_conv",
+            "基于资讯“人气动画新篇章定档”继续深挖，给我结论、证据和后续观察点。",
+            topic="inappropriate_oral",
+            category_scope=["inappropriate_oral"],
+            use_llm=True,
+            user_id="default",
+        )
+    )
+
+    assert response.topic == "人气动画新篇章定档"
+    assert response.focus_object is not None
+    assert response.focus_object.text == "人气动画新篇章定档"
+    assert search.calls[0]["query"] == "人气动画新篇章定档"
+    assert search.calls[0]["category_scope"] == ["anime"]
+
+
+def test_related_answer_lists_all_merged_evidence():
+    evidence = [
+        {
+            "index": index,
+            "title": f"证据标题 {index}",
+            "source_id": "example.com",
+            "published_at": None,
+            "summary": "摘要",
+            "url": f"https://example.com/{index}",
+        }
+        for index in range(1, 13)
+    ]
+    answer = _related_search_answer("测试主题", [], evidence, "fallback")
+    assert "合并证据：12 条" in answer
+    assert "证据 12｜证据标题 12" in answer
 
 
 def test_chat_source_ingestion_requires_explicit_permission(services):
@@ -505,9 +612,56 @@ def test_search_redirect_link_unwraps_targetpage():
     assert _unwrap_search_link(wrapped) == "https://sports.cctv.com/2026/06/01/ARTITest.shtml"
 
 
+def test_article_fetch_service_parses_rss_links():
+    fetcher = ArticleFetchService()
+
+    async def fake_get_text(url):
+        return """<?xml version="1.0" encoding="utf-8"?>
+        <rss><channel>
+          <item>
+            <title>政策发布新进展</title>
+            <link>https://www.gov.cn/zhengce/2026-07/17/content_123.htm</link>
+            <pubDate>Fri, 17 Jul 2026 09:30:00 +0800</pubDate>
+          </item>
+          <item>
+            <title>外部站点应被过滤</title>
+            <link>https://example.com/a.html</link>
+          </item>
+        </channel></rss>"""
+
+    fetcher._get_text = fake_get_text
+    links = asyncio.run(fetcher.list_rss_links("gov_cn", "policy_latest", "https://www.gov.cn/rss.xml", allowed_domains=["gov.cn"]))
+    assert len(links) == 1
+    assert links[0].title == "政策发布新进展"
+    assert links[0].url == "https://www.gov.cn/zhengce/2026-07/17/content_123.htm"
+    assert links[0].published_at.isoformat() == "2026-07-17T01:30:00+00:00"
+
+
 def test_parse_published_datetime_assumes_china_timezone_for_naive_time():
     parsed = _parse_published_datetime("2026年05月18日 10:30")
     assert parsed.isoformat() == "2026-05-18T02:30:00+00:00"
+
+
+def test_parse_published_datetime_handles_relative_english_time():
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    parsed = _parse_published_datetime("3 days ago", now=now)
+    assert parsed.isoformat() == "2026-07-14T12:00:00+00:00"
+
+
+def test_parse_published_datetime_handles_relative_chinese_time():
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    parsed = _parse_published_datetime("2小时前", now=now)
+    assert parsed.isoformat() == "2026-07-17T10:00:00+00:00"
+
+
+def test_parse_published_datetime_handles_embedded_markdown_time():
+    parsed = _parse_published_datetime("# 标题 **2026年07月14日 08:53** 来源")
+    assert parsed.isoformat() == "2026-07-14T00:53:00+00:00"
+
+
+def test_parse_published_datetime_handles_dotted_date():
+    parsed = _parse_published_datetime("发布时间：2026.07.14 08:53")
+    assert parsed.isoformat() == "2026-07-14T00:53:00+00:00"
 
 
 def test_native_search_ingestion_fetches_and_indexes_articles(services):
@@ -613,7 +767,7 @@ def test_source_due_plan_uses_crawl_metadata(services):
     assert first["category"] == "tech"
     assert first["source_tags"]
     store.mark_section_crawled(first["source_id"], first["section_key"])
-    updated = scheduler.due_plan(category="tech", limit=5)
+    updated = scheduler.due_plan(category="tech", limit=50)
     same = [item for item in updated["sections"] if item["source_id"] == first["source_id"] and item["section_key"] == first["section_key"]]
     assert same and same[0]["due"] is False
 
@@ -645,6 +799,137 @@ def test_report_contains_timeline_and_required_sections(services):
         operations = [row["operation"] for row in conn.execute("SELECT operation FROM operation_logs").fetchall()]
     assert "news_search" in operations
     assert "report_generation" in operations
+
+
+def test_daily_digest_uses_local_agent_when_available(services):
+    _, store, search = services
+    local_agent = FakeBriefLocalAgent()
+    reports = ReportGenerationService(store, search, local_agent=local_agent)
+    report = asyncio.run(reports.generate("default", "今日资讯", ["tech"], "1d", "daily_digest"))
+
+    assert local_agent.calls == 1
+    assert report.sections["generation_source"] == "local_agent"
+    assert report.sections["headline"] == "AI 今日简报"
+    assert report.sections["top_stories"][0]["title"] == "AI Agent 产品更新"
+    assert report.sources
+
+
+def test_chat_executes_brief_skill_with_local_agent(services):
+    registry, store, search = services
+    local_agent = FakeBriefLocalAgent()
+    reports = ReportGenerationService(store, search, local_agent=local_agent)
+    chat = NewsChatService(
+        store,
+        search,
+        local_agent=local_agent,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+    response = asyncio.run(chat.chat("brief_conv", "/brief --category tech", user_id="default"))
+
+    assert response.context_relation == "skill:/brief"
+    assert response.skill_result["command"] == "/brief"
+    assert response.skill_result["data"]["sections"]["generation_source"] == "local_agent"
+    assert "AI 今日简报" in response.answer
+    assert store.last_turn("brief_conv")["response"]["context_relation"] == "skill:/brief"
+
+
+def test_factcheck_uses_local_agent_verdict(services):
+    _, store, search = services
+    local_agent = FakeFactCheckLocalAgent()
+    factcheck = FactCheckService(store, search, local_agent=local_agent)
+
+    result = asyncio.run(factcheck.run("default", "AI Agent 产品更新带动开发工具竞争", ["tech"]))
+
+    assert local_agent.calls == 1
+    assert result.agent_source == "local_agent"
+    assert result.verdict == "supported"
+    assert result.confidence == 0.82
+    assert result.supporting_evidence
+    assert result.supporting_evidence[0]["index"] == 1
+
+
+def test_factcheck_falls_back_when_agent_fails(services):
+    _, store, search = services
+    factcheck = FactCheckService(store, search, local_agent=FakeFailingLocalAgent())
+
+    result = asyncio.run(factcheck.run("default", "AI Agent 产品更新带动开发工具竞争", ["tech"]))
+
+    assert result.agent_source == "fallback"
+    assert result.verdict == "insufficient"
+    assert result.evidence
+    assert "未启用外部实时搜索" in result.source_notes[0]
+
+
+def test_chat_executes_factcheck_skill_with_local_agent(services):
+    registry, store, search = services
+    local_agent = FakeFactCheckLocalAgent()
+    factcheck = FactCheckService(store, search, local_agent=local_agent)
+    chat = NewsChatService(
+        store,
+        search,
+        local_agent=local_agent,
+        skill_registry=build_default_registry(),
+        services={"factcheck": factcheck, "registry": registry},
+    )
+
+    response = asyncio.run(
+        chat.chat(
+            "factcheck_conv",
+            "/factcheck AI Agent 产品更新带动开发工具竞争 --category tech",
+            user_id="default",
+        )
+    )
+
+    assert response.context_relation == "skill:/factcheck"
+    assert response.skill_result["command"] == "/factcheck"
+    assert response.skill_result["data"]["agent_source"] == "local_agent"
+    assert response.skill_result["data"]["verdict"] == "supported"
+    assert "结论：supported" in response.answer
+    assert "支持证据" in response.answer
+
+
+def test_check_skill_continues_last_factcheck_with_remote_search(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    local_agent = FakeFailingLocalAgent()
+    factcheck = FactCheckService(store, search, local_agent=local_agent)
+    chat = NewsChatService(
+        store,
+        search,
+        local_agent=local_agent,
+        skill_registry=build_default_registry(),
+        services={"factcheck": factcheck, "store": store},
+    )
+
+    first = asyncio.run(
+        chat.chat(
+            "check_followup_conv",
+            "/factcheck AI Agent 产品更新带动开发工具竞争 --category tech",
+            user_id="default",
+        )
+    )
+    second = asyncio.run(
+        chat.chat(
+            "check_followup_conv",
+            "/check 确认时间、地点、主体是否明确",
+            user_id="default",
+        )
+    )
+
+    assert first.context_relation == "skill:/factcheck"
+    assert second.context_relation == "skill:/check"
+    assert second.skill_result["data"]["claim"] == "AI Agent 产品更新带动开发工具竞争"
+    assert second.skill_result["data"]["check_query"] == "确认时间、地点、主体是否明确"
+    assert search.calls[0]["include_remote"] is False
+    assert search.calls[1]["include_remote"] is True
+    assert "AI Agent 产品更新带动开发工具竞争" in search.calls[1]["query"]
+    assert "确认时间、地点、主体是否明确" in search.calls[1]["query"]
+    assert "联网补证据" in second.skill_result["message"]
+    assert second.skill_result["data"]["verdict"] == "insufficient"
+    assert "为什么仍是证据不足" in second.answer
+    assert "检索到的全部证据" in second.answer
+    assert "本轮已按「确认时间、地点、主体是否明确」补充搜索" in second.answer
 
 
 def test_topic_view_builds_event_line_and_relation_graph(services):
@@ -810,6 +1095,53 @@ class FakeRelatedLocalAgent:
         return type("FakeRelatedResponse", (), {"status": "ok", "message": FakeRelatedMessage()})()
 
 
+class FakeBriefMessage:
+    content = (
+        '{"headline":"AI 今日简报","summary":"AI Agent 工具竞争升温。",'
+        '"top_stories":[{"title":"AI Agent 产品更新","summary":"开发工具密集发布。","why_it_matters":"影响企业集成节奏。","source_index":1}],'
+        '"why_it_matters":["开发工具竞争加速"],'
+        '"impact":["企业集成和上下文管理会成为重点"],'
+        '"watch_next":["继续观察工具调用能力"],'
+        '"uncertainty":"仅基于本地证据。",'
+        '"personalization_reason":"匹配用户关注 AI。"}'
+    )
+
+
+class FakeBriefLocalAgent:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, payload):
+        self.calls += 1
+        return type("FakeBriefResponse", (), {"status": "ok", "message": FakeBriefMessage()})()
+
+
+class FakeFactCheckMessage:
+    content = (
+        '{"verdict":"supported","confidence":0.82,'
+        '"summary":"证据支持该说法。",'
+        '"supporting_evidence":[1],'
+        '"contradicting_evidence":[],'
+        '"missing_evidence":["更多原始公告"],'
+        '"source_notes":["以本地证据为准"],'
+        '"next_checks":["查原始来源"]}'
+    )
+
+
+class FakeFactCheckLocalAgent:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, payload):
+        self.calls += 1
+        return type("FakeFactCheckResponse", (), {"status": "ok", "message": FakeFactCheckMessage()})()
+
+
+class FakeFailingLocalAgent:
+    async def chat(self, payload):
+        raise RuntimeError("agent unavailable")
+
+
 class FakeRelatedSearchService:
     def __init__(self):
         self.queries = []
@@ -823,6 +1155,35 @@ class FakeRelatedSearchService:
                 url=f"https://example.com/{len(self.queries)}",
                 summary=f"{query} 的摘要",
                 category=(category_scope or ["tech"])[0],
+                published_at=datetime.now(timezone.utc),
+                score=1.0,
+                origin="local",
+            )
+        ]
+
+
+class RecordingSearchService:
+    def __init__(self):
+        self.calls = []
+        self.external_configured = False
+
+    async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
+        self.calls.append(
+            {
+                "query": query,
+                "category_scope": category_scope,
+                "source_scope": source_scope,
+                "time_range": time_range,
+                "include_remote": include_remote,
+            }
+        )
+        return [
+            SearchResult(
+                source_id="test",
+                title=f"{query} 报道",
+                url="https://example.com/unrelated",
+                summary=f"{query} 的摘要",
+                category=(category_scope or ["all"])[0],
                 published_at=datetime.now(timezone.utc),
                 score=1.0,
                 origin="local",

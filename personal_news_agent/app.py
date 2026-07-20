@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -15,7 +17,7 @@ def create_app() -> FastAPI:
     services = build_services(settings)
     app = FastAPI(title=settings.app_name)
     app.state.services = services
-    app.include_router(create_local_agent_router())
+    app.include_router(create_local_agent_router(services["local_agent"]))
 
     static_dir = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
@@ -48,8 +50,39 @@ def create_app() -> FastAPI:
             store.seed_demo_articles()
         services["topic_agent"].seed_system_topics()
         events.discover(limit=20)
+        if settings.background_crawl_enabled:
+            app.state.background_crawl_task = asyncio.create_task(_background_crawl_loop(services, settings.background_crawl_interval_seconds))
+
+    @app.on_event("shutdown")
+    async def shutdown() -> None:
+        task = getattr(app.state, "background_crawl_task", None)
+        if task:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     return app
 
 
 app = create_app()
+
+
+async def _background_crawl_loop(services: dict, interval_seconds: int) -> None:
+    store = services["store"]
+    crawl = services["crawl"]
+    events = services["events"]
+    interval = max(10, int(interval_seconds or 10))
+    await asyncio.sleep(5)
+    while True:
+        try:
+            result = await crawl.crawl_due(limit=20, per_section_limit=8, fetch_articles=1)
+            clusters = events.discover(limit=20)
+            store.log(
+                "background_crawl",
+                "ok",
+                "crawl_due",
+                {"saved_articles": result.get("saved_articles", 0), "planned_sections": result.get("planned_sections", 0), "cluster_count": len(clusters)},
+            )
+        except Exception as exc:
+            store.log("background_crawl", "error", "crawl_due", {"error": str(exc)})
+        await asyncio.sleep(interval)

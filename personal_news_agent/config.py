@@ -46,6 +46,8 @@ class Settings:
     )
     crawl_interval_min_minutes: int = int(os.getenv("PERSONAL_NEWS_CRAWL_INTERVAL_MINUTES", "10"))
     crawl_interval_max_minutes: int = int(os.getenv("PERSONAL_NEWS_CRAWL_INTERVAL_MAX_MINUTES", "20"))
+    background_crawl_enabled: bool = os.getenv("PERSONAL_NEWS_BACKGROUND_CRAWL", "1") == "1"
+    background_crawl_interval_seconds: int = int(os.getenv("PERSONAL_NEWS_BACKGROUND_CRAWL_SECONDS", "10"))
     external_search_provider: str = os.getenv("EXTERNAL_SEARCH_PROVIDER", "none")
     bing_search_key: str | None = os.getenv("BING_SEARCH_KEY")
     bing_search_endpoint: str = os.getenv("BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")

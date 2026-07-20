@@ -167,6 +167,8 @@ class ChatResponse(BaseModel):
     expanded_queries: list[dict[str, Any]] = []
     event_line: dict[str, Any] | None = None
     mind_map: dict[str, Any] | None = None
+    attention_suggestion: dict[str, Any] | None = None
+    skill_result: dict[str, Any] | None = None
 
 
 class ReportResponse(BaseModel):
@@ -176,3 +178,19 @@ class ReportResponse(BaseModel):
     sections: dict[str, Any]
     timeline: list[dict[str, Any]]
     sources: list[dict[str, Any]]
+
+
+class FactCheckResponse(BaseModel):
+    factcheck_id: str
+    claim: str
+    verdict: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    summary: str
+    category_scope: list[str] = []
+    supporting_evidence: list[dict[str, Any]] = []
+    contradicting_evidence: list[dict[str, Any]] = []
+    missing_evidence: list[str] = []
+    source_notes: list[str] = []
+    next_checks: list[str] = []
+    evidence: list[dict[str, Any]] = []
+    agent_source: str = "fallback"

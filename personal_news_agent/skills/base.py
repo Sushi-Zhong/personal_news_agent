@@ -17,6 +17,7 @@ class SkillSpec:
 class SkillContext:
     services: dict[str, Any]
     user_id: str = "default"
+    conversation_id: str | None = None
 
 
 @dataclass(frozen=True)

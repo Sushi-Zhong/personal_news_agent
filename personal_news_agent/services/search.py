@@ -8,6 +8,7 @@ import httpx
 
 from personal_news_agent.config import Settings
 from personal_news_agent.core.models import RawSearchResult, SearchResult, TimeRange
+from personal_news_agent.services.article_fetch import _parse_published_datetime
 from personal_news_agent.services.search_index import ArticleSearchIndex
 from personal_news_agent.services.source_adapter import ListPageAdapter
 from personal_news_agent.core.categories import validate_category
@@ -48,6 +49,7 @@ class BingSearchProvider(ExternalSearchProvider):
                     title=item.get("name") or item.get("url", ""),
                     url=item.get("url", ""),
                     snippet=item.get("snippet", ""),
+                    published_at=_parse_published_datetime(str(item.get("datePublished") or item.get("dateLastCrawled") or "")),
                 )
             )
         return results[:limit]
@@ -110,6 +112,7 @@ class TavilySearchProvider(ExternalSearchProvider):
                     title=title,
                     url=url,
                     snippet=snippet,
+                    published_at=_parse_published_datetime(str(item.get("published_date") or item.get("published_at") or item.get("date") or "")),
                 )
             )
         return results[:limit]

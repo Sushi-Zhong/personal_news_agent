@@ -75,6 +75,7 @@ class TopicViewService:
                     "date_source": date_source,
                     "title": row.get("title") or topic,
                     "summary": summarize(text, 140),
+                    "url": row.get("url") or "",
                     "stage": _stage(index, len(rows)),
                     "actors": actors,
                     "keywords": keywords,

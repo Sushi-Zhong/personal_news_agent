@@ -20,6 +20,8 @@ const consoleState = {
   topicPayload: null,
 };
 let pendingTopicFromNextMessage = false;
+let activeEventActionPopover = null;
+let activeEventActionCleanup = null;
 const bootstrapTopics = [
   { title: "科技公司上市观察", category_scope: ["tech", "economy"], topic_type: "system" },
   { title: "大型体育赛事运营", category_scope: ["sports"], topic_type: "system" },
@@ -141,6 +143,7 @@ bindNotificationReads();
 bindRailTooltips();
 window.handleAssistantInput = handleAssistantInput;
 window.applyChatConversationContext = applyChatConversationContext;
+window.handleChatResponseSideEffects = handleWebChatResponseSideEffects;
 window.refreshTopics = loadTopics;
 restoreChatMemory("#messages");
 loadOnboardingOptions("#onboardingForm").then(() => loadProfileIntoForm("#onboardingForm"));
@@ -204,15 +207,26 @@ async function handleAssistantInput(message) {
     }
     if (["brief"].includes(command.name)) {
       await applyTopicCommand(command, { reload: false });
-      return sendChatIntoTurn(`基于我的兴趣和当前关注的${consoleState.topic}，生成一份简洁的新闻简报，包含重点、影响和接下来值得关注的事项。`, assistantNode);
+      const briefTopic = commandText(command) || consoleState.topic || "";
+      const briefCategory = commandArg(command, "category", "cat") || (consoleState.categoryScope || []).join(",");
+      const briefCommand = ["/brief", briefTopic, briefCategory ? `--category ${briefCategory}` : ""].filter(Boolean).join(" ");
+      return sendChatIntoTurn(briefCommand, assistantNode);
     }
     if (["related"].includes(command.name)) {
-      await applyTopicCommand(command, { reload: false });
-      return runRelatedSearchIntoTurn(assistantNode);
+      const relatedTopic = commandText(command) || commandArg(command, "topic", "q", "query");
+      if (relatedTopic) consoleState.topic = relatedTopic;
+      await applyTopicCommand({ ...command, args: { ...command.args, _: relatedTopic ? [relatedTopic] : [] } }, { reload: false });
+      return runRelatedSearchIntoTurn(assistantNode, relatedTopic);
+    }
+    if (["check"].includes(command.name)) {
+      return sendChatIntoTurn(message, assistantNode);
     }
     if (["factcheck", "verify"].includes(command.name)) {
       await applyTopicCommand(command, { reload: false });
-      return sendChatIntoTurn(`对“${consoleState.topic}”进行事实核查。先明确待核查的核心说法，再按已证实、存在争议、缺乏证据分类，列出可引用来源、证据时间和局限；没有可靠证据时明确说明，不要推测。`, assistantNode);
+      const claim = commandText(command) || consoleState.topic || "";
+      const category = commandArg(command, "category", "cat") || (consoleState.categoryScope || []).join(",");
+      const factCommand = ["/factcheck", claim, category ? `--category ${category}` : ""].filter(Boolean).join(" ");
+      return sendChatIntoTurn(factCommand, assistantNode);
     }
     if (["ingest", "source"].includes(command.name)) {
       await applyTopicCommand(command);
@@ -227,7 +241,7 @@ async function handleAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${category ? `：${category}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/ingest、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/check、/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/ingest、/feed。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);
@@ -235,8 +249,8 @@ async function handleAssistantInput(message) {
   }
 }
 
-async function runRelatedSearchIntoTurn(assistantNode) {
-  const topic = consoleState.topic || document.querySelector("#topicInput")?.value?.trim() || "";
+async function runRelatedSearchIntoTurn(assistantNode, explicitTopic = "") {
+  const topic = explicitTopic || consoleState.topic || document.querySelector("#topicInput")?.value?.trim() || "";
   const data = await request("/api/news/related", {
     method: "POST",
     body: JSON.stringify({
@@ -245,7 +259,7 @@ async function runRelatedSearchIntoTurn(assistantNode) {
       query: topic || "当前关注",
       topic,
       category_scope: consoleState.categoryScope,
-      max_queries: 5,
+      max_queries: 8,
       allow_web_search: isWebSearchEnabled(),
     }),
   });
@@ -257,11 +271,11 @@ async function runRelatedSearchIntoTurn(assistantNode) {
   return data;
 }
 
-async function createTopicFromFirstMessage(message, response) {
+async function createTopicFromFirstMessage(message, response, options = {}) {
   const createdConversationId = response?.conversation_id || conversationId;
   if (!createdConversationId) return null;
-  const title = canonicalTopicTitle(response?.topic || response?.focus_object?.text || message) || message;
-  const categoryScope = response?.category_scope || consoleState.categoryScope || [];
+  const title = canonicalTopicTitle(options.title || response?.topic || response?.focus_object?.text || message) || message;
+  const categoryScope = options.categoryScope || response?.category_scope || consoleState.categoryScope || [];
   try {
     const result = await request("/api/topics", {
       method: "POST",
@@ -495,6 +509,7 @@ async function loadTopicView() {
     renderTopicHeader(payload);
     renderTopicVisual(payload, consoleState.view);
     renderEvidence(payload.source_articles || []);
+    renderInsightRail(payload);
   } catch (error) {
     document.querySelector("[data-topic-visual]").textContent = error.message;
   }
@@ -849,6 +864,59 @@ function renderEvidence(articles) {
     .join("");
 }
 
+function renderInsightRail(payload) {
+  const articles = payload?.source_articles || [];
+  const events = payload?.event_line?.items || [];
+  const nodes = (payload?.relation_graph?.nodes || []).filter((node) => node.id !== "topic");
+  renderFollowUps(events, nodes);
+  renderEntitySources(nodes, articles);
+}
+
+function handleWebChatResponseSideEffects(response) {
+  return response;
+}
+
+function renderFollowUps(events, nodes, attentionSuggestion = null) {
+  const target = document.querySelector("[data-follow-up-list]");
+  if (!target) return;
+  const latest = events[events.length - 1];
+  const leadEntity = nodes[0]?.label || "关键主体";
+  const questions = [
+    latest ? `追踪「${latest.title}」是否出现后续回应或新进展。` : `继续观察「${consoleState.topic}」是否出现新的权威来源。`,
+    `关注${leadEntity}相关的政策、数据或执行动作。`,
+    "对比不同来源的说法是否一致，留意争议、反转和补充证据。",
+    "观察后续是否影响市场、行业、公众服务或地方执行。",
+  ];
+  const buttons = questions
+    .slice(0, 4)
+    .map((item) => `<button type="button" data-ask="${escapeAttr(item)}">${escapeHtml(item)}</button>`);
+  if (attentionSuggestion?.topic) {
+    buttons.unshift(`<p>${escapeHtml(attentionSuggestion.message || `这条追问更像新的关注：${attentionSuggestion.topic}`)}</p>`);
+  }
+  target.innerHTML = buttons.join("");
+}
+
+function renderEntitySources(nodes, articles) {
+  const entityTarget = document.querySelector("[data-entity-list]");
+  const sourceTarget = document.querySelector("[data-source-list]");
+  if (entityTarget) {
+    const entities = nodes.slice(0, 8);
+    entityTarget.innerHTML = `<strong>相关主体</strong>${entities.length ? entities.map((node) => `<span>${escapeHtml(node.label)}</span>`).join("") : "<p>暂无</p>"}`;
+  }
+  if (sourceTarget) {
+    const sources = [];
+    articles.forEach((item) => {
+      if (!item.source_id || sources.some((source) => source.id === item.source_id)) return;
+      sources.push({ id: item.source_id, url: item.url || "" });
+    });
+    sourceTarget.innerHTML = `<strong>来源网站</strong>${
+      sources.length
+        ? sources.slice(0, 8).map((source) => source.url ? `<a href="${escapeAttr(source.url)}" target="_blank" rel="noreferrer">${escapeHtml(source.id)}</a>` : `<span>${escapeHtml(source.id)}</span>`).join("")
+        : "<p>暂无</p>"
+    }`;
+  }
+}
+
 function renderDueUrls(items) {
   const target = document.querySelector("[data-due-urls]");
   if (!items.length) {
@@ -981,18 +1049,121 @@ function wireTitleEntryPrompts() {
     item.tabIndex = 0;
     item.setAttribute("role", "button");
     item.setAttribute("aria-label", `在对话中查看：${title}`);
-    const ask = item.closest("#events")
+    const isEventCard = Boolean(item.closest("#events"));
+    const ask = isEventCard
       ? `围绕热点事件“${title}”展开，告诉我发生了什么、为什么重要、后续看什么。`
       : `基于资讯“${title}”继续深挖，给我结论、证据和后续观察点。`;
-    const run = () => sendChat(ask);
-    item.addEventListener("click", run);
+    const run = () => runFeedEventAsk(item, title, ask, isEventCard);
+    item.addEventListener("click", (event) => {
+      if (isEventCard) {
+        event.preventDefault();
+        showEventActionPopover(item, title, ask);
+        return;
+      }
+      run();
+    });
     item.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
-        run();
+        if (isEventCard) {
+          showEventActionPopover(item, title, ask);
+        } else {
+          run();
+        }
       }
     });
   });
+}
+
+function showEventActionPopover(item, title, ask) {
+  closeEventActionPopover();
+  const sourceUrl = item.dataset.eventUrl || "";
+  const sourceTitle = item.dataset.eventSourceTitle || title;
+  const rect = item.getBoundingClientRect();
+  const popover = document.createElement("div");
+  popover.className = "event-action-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", `热点事件操作：${title}`);
+  popover.innerHTML = `
+    <strong>${escapeHtml(title)}</strong>
+    <p>${escapeHtml(sourceTitle || "选择接下来要做的动作。")}</p>
+    <div>
+      <button type="button" data-event-popover-send>发送到对话框</button>
+      <button type="button" data-event-popover-open ${sourceUrl ? "" : "disabled"}>打开原网址</button>
+    </div>
+  `;
+  document.body.appendChild(popover);
+  const left = Math.min(window.innerWidth - popover.offsetWidth - 12, Math.max(12, rect.right + 8));
+  const top = Math.min(window.innerHeight - popover.offsetHeight - 12, Math.max(12, rect.top));
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+
+  popover.querySelector("[data-event-popover-send]")?.addEventListener("click", async () => {
+    closeEventActionPopover();
+    await runFeedEventAsk(item, title, ask, true);
+  });
+  popover.querySelector("[data-event-popover-open]")?.addEventListener("click", () => {
+    if (!sourceUrl) return;
+    closeEventActionPopover();
+    window.open(sourceUrl, "_blank", "noopener,noreferrer");
+  });
+
+  const onPointerDown = (event) => {
+    if (popover.contains(event.target) || item.contains(event.target)) return;
+    closeEventActionPopover();
+  };
+  const onKeyDown = (event) => {
+    if (event.key === "Escape") closeEventActionPopover();
+  };
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+  }, 0);
+  activeEventActionPopover = popover;
+  activeEventActionCleanup = () => {
+    document.removeEventListener("pointerdown", onPointerDown);
+    document.removeEventListener("keydown", onKeyDown);
+  };
+}
+
+function closeEventActionPopover() {
+  if (activeEventActionCleanup) activeEventActionCleanup();
+  activeEventActionCleanup = null;
+  if (activeEventActionPopover) activeEventActionPopover.remove();
+  activeEventActionPopover = null;
+}
+
+async function runFeedEventAsk(item, title, ask, isEventCard) {
+  if (!isEventCard) {
+    return sendChat(ask);
+  }
+  const category = eventCardCategory(item);
+  const categoryScope = category ? [category] : [];
+  if (!pendingTopicFromNextMessage) {
+    return sendChat(ask);
+  }
+  consoleState.topic = title;
+  consoleState.categoryScope = categoryScope;
+  const topicInput = document.querySelector("#topicInput");
+  const categorySelect = document.querySelector("#categoryScope");
+  if (topicInput) topicInput.value = title;
+  if (categorySelect) categorySelect.value = categoryScope.join(",");
+  syncChatContext();
+  syncContextDock();
+  syncTaskTopic();
+  const response = await sendChat(ask);
+  await createTopicFromFirstMessage(ask, response, { title, categoryScope });
+  return response;
+}
+
+function eventCardCategory(item) {
+  const meta = item.querySelector(".meta")?.textContent || "";
+  const category = meta.split("·")[0]?.trim();
+  return isKnownCategory(category) ? category : "";
+}
+
+function isKnownCategory(category) {
+  return ["politics", "economy", "tech", "auto", "game", "anime", "entertainment", "sports"].includes(String(category || "").trim());
 }
 
 function shortLabel(value, maxLength) {

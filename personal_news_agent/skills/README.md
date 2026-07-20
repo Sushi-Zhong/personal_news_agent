@@ -1,10 +1,12 @@
 # Personal News Agent Skills
 
-当前注册三个斜杠命令：
+当前注册四个斜杠命令：
 
 ```text
 /report <主题> [--category tech,economy] [--time-range 30d]
 /brief [主题] [--category tech,sports]
+/factcheck <待核查说法> [--category tech,economy]
+/check <下一步核查点>
 /sources [category]
 ```
 
@@ -14,4 +16,4 @@
 registry.execute(command_text, SkillContext(services=services, user_id=user_id))
 ```
 
-本目录没有自动接入现有聊天服务或 API 路由；这样可以在不修改已有代码的前提下独立测试和迭代。
+聊天服务会优先识别这些斜杠命令并通过 `skill_result` 返回结构化结果。
