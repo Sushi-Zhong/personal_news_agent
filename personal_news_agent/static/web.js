@@ -222,9 +222,6 @@ async function handleAssistantInput(message) {
       await applyTopicCommand({ ...command, args: { ...command.args, _: relatedTopic ? [relatedTopic] : [] } }, { reload: false });
       return runRelatedSearchIntoTurn(assistantNode, relatedTopic);
     }
-    if (["check"].includes(command.name)) {
-      return sendChatIntoTurn(message, assistantNode);
-    }
     if (["factcheck", "verify"].includes(command.name)) {
       await applyTopicCommand(command, { reload: false });
       const claim = commandText(command) || consoleState.topic || "";
@@ -245,7 +242,7 @@ async function handleAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${category ? `：${category}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/check、/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/ingest、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/ingest、/feed。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);
@@ -898,16 +895,56 @@ function renderInsightRail(payload) {
 }
 
 function handleWebChatResponseSideEffects(response) {
+  const articles = responseScopedArticles(response);
+  const events = response?.event_line?.items || [];
+  const nodes = responseScopedNodes(response, articles);
+  renderResponseScopedFeed(articles);
+  renderFollowUps(events, nodes, null, response?.focus_object?.text || response?.topic || "");
+  renderEntitySources(nodes, articles);
   return response;
 }
 
-function renderFollowUps(events, nodes, attentionSuggestion = null) {
+function responseScopedArticles(response) {
+  const candidates = response?.evidence?.length
+    ? response.evidence
+    : response?.recommendations?.length
+      ? response.recommendations
+      : response?.skill_result?.data?.sources || [];
+  return (candidates || []).filter((item) => item && item.title);
+}
+
+function responseScopedNodes(response, articles) {
+  const nodes = [];
+  const focus = response?.focus_object?.text || response?.topic || "";
+  if (focus) nodes.push({ label: focus });
+  articles.forEach((item) => {
+    const label = item.source_id || item.source || "";
+    if (label && !nodes.some((node) => node.label === label)) nodes.push({ label });
+  });
+  return nodes;
+}
+
+function renderResponseScopedFeed(articles) {
+  const target = document.querySelector("#feed");
+  const count = document.querySelector("[data-related-article-count]");
+  if (count) count.textContent = `${articles.length} 条`;
+  if (!target) return;
+  if (!articles.length) {
+    target.innerHTML = `<div class="empty-state compact-empty">本轮暂无相关资讯</div>`;
+    return;
+  }
+  target.innerHTML = articles.slice(0, 8).map((item) => itemHtml(item)).join("");
+  wireTitleEntryPrompts();
+}
+
+function renderFollowUps(events, nodes, attentionSuggestion = null, topicOverride = "") {
   const target = document.querySelector("[data-follow-up-list]");
   if (!target) return;
   const latest = events[events.length - 1];
   const leadEntity = nodes[0]?.label || "关键主体";
+  const topic = topicOverride || consoleState.topic;
   const questions = [
-    latest ? `追踪「${latest.title}」是否出现后续回应或新进展。` : `继续观察「${consoleState.topic}」是否出现新的权威来源。`,
+    latest ? `追踪「${latest.title}」是否出现后续回应或新进展。` : `继续观察「${topic}」是否出现新的权威来源。`,
     `关注${leadEntity}相关的政策、数据或执行动作。`,
     "对比不同来源的说法是否一致，留意争议、反转和补充证据。",
     "观察后续是否影响市场、行业、公众服务或地方执行。",
@@ -925,7 +962,7 @@ function renderEntitySources(nodes, articles) {
   const entityTarget = document.querySelector("[data-entity-list]");
   const sourceTarget = document.querySelector("[data-source-list]");
   if (entityTarget) {
-    const entities = nodes.slice(0, 8);
+    const entities = nodes.filter((node) => !isSystemEntityLabel(node.label)).slice(0, 8);
     entityTarget.innerHTML = `<strong>相关主体</strong>${entities.length ? entities.map((node) => `<span>${escapeHtml(node.label)}</span>`).join("") : "<p>暂无</p>"}`;
   }
   if (sourceTarget) {
@@ -940,6 +977,16 @@ function renderEntitySources(nodes, articles) {
         : "<p>暂无</p>"
     }`;
   }
+}
+
+function isSystemEntityLabel(value) {
+  const text = String(value || "").replace(/\s+/g, "");
+  if (!text) return true;
+  return [
+    "暂无足够入库资料",
+    "后续将通过源搜索",
+    "抓取和大模型抽取补全",
+  ].some((marker) => text.includes(marker));
 }
 
 function renderDueUrls(items) {

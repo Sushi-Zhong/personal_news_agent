@@ -701,6 +701,10 @@ input {
   display: grid;
   gap: 8px;
   line-height: 1.65;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .assistant-markdown h3,
@@ -724,6 +728,10 @@ input {
   color: #2f3640;
   font-size: 14px;
   margin: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .assistant-markdown ul {
@@ -736,6 +744,8 @@ input {
 .assistant-markdown a {
   color: #155eef;
   font-weight: 700;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   text-decoration: none;
 }
 
@@ -747,6 +757,31 @@ input {
   background: #f5f7fb;
   border-left: 3px solid #7a8aa0;
   padding: 8px 10px;
+}
+
+.assistant-markdown .markdown-table-wrap {
+  overflow-x: auto;
+  width: 100%;
+}
+
+.assistant-markdown table {
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 100%;
+}
+
+.assistant-markdown th,
+.assistant-markdown td {
+  border: 1px solid #dbe3ef;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.assistant-markdown th {
+  background: #f5f7fb;
+  color: #1e2329;
+  font-weight: 800;
 }
 
 .report-downloads {

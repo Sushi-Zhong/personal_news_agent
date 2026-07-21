@@ -4,7 +4,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import parse_qs, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -67,6 +67,16 @@ class ArticleFetchService:
         return links
 
     async def fetch_article(self, source_id: str, url: str) -> RawArticle:
+        chinanews_api_url = _chinanews_mobile_detail_api_url(url)
+        if chinanews_api_url:
+            try:
+                payload = await self._get_text(chinanews_api_url)
+                article = _raw_article_from_chinanews_mobile_payload(source_id, url, payload)
+                if article:
+                    return article
+            except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError):
+                pass
+
         html = await self._get_text(url)
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "noscript", "template"]):
@@ -90,7 +100,7 @@ class ArticleFetchService:
     async def _get_text(self, url: str) -> str:
         headers = {
             "User-Agent": "Mozilla/5.0 personal-news-agent/0.1",
-            "Accept": "text/html,application/xhtml+xml",
+            "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
         }
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, headers=headers, verify=self.verify_ssl) as client:
             response = await client.get(url)
@@ -124,6 +134,34 @@ def _unwrap_search_link(url: str) -> str:
         if values and values[0].startswith(("http://", "https://")):
             return unquote(values[0])
     return url
+
+
+def _chinanews_mobile_detail_api_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.netloc.split(":", 1)[0].removeprefix("www.") != "m.chinanews.com":
+        return None
+    match = re.fullmatch(r"/wap/detail/([^/]+)/([^/]+)/([^/.]+)\.shtml", parsed.path)
+    if not match:
+        return None
+    language, _classify, article_id = match.groups()
+    api_id = f"ft{article_id}" if language == "cht" and not article_id.startswith("ft") else article_id
+    return f"https://dw.chinanews.com/cns/app/v1/wapDetail/content/{quote(api_id)}.json?language={quote(language)}"
+
+
+def _raw_article_from_chinanews_mobile_payload(source_id: str, url: str, raw: str) -> RawArticle | None:
+    payload = json.loads(raw)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return None
+    title = str(data.get("title") or "").strip()
+    content = str(data.get("contentNoTag") or "").strip()
+    if not content and data.get("content"):
+        content = BeautifulSoup(str(data.get("content")), "html.parser").get_text("\n", strip=True)
+    summary = str(data.get("cardDesc") or data.get("summary") or "").strip()
+    published_at = _parse_published_datetime(str(data.get("pubtime") or data.get("freshTime") or ""))
+    if not (title or content or published_at):
+        return None
+    return RawArticle(source_id=source_id, url=url, title=title or url, content=content, summary=summary, published_at=published_at)
 
 
 def _rss_item_url(item) -> str:
@@ -203,18 +241,24 @@ def _first_tag_text(item, *names: str) -> str:
 
 
 def _extract_published_at(soup: BeautifulSoup) -> datetime | None:
+    date_only_candidate: datetime | None = None
     selectors = [
         ("meta", {"property": "article:published_time"}),
         ("meta", {"property": "article:modified_time"}),
         ("meta", {"property": "og:published_time"}),
         ("meta", {"property": "og:updated_time"}),
         ("meta", {"name": "pubdate"}),
+        ("meta", {"name": "PubDate"}),
         ("meta", {"name": "pub_date"}),
         ("meta", {"name": "publishdate"}),
         ("meta", {"name": "publish_date"}),
+        ("meta", {"name": "publishTime"}),
         ("meta", {"name": "publish_time"}),
+        ("meta", {"name": "publishedDate"}),
         ("meta", {"name": "published_time"}),
         ("meta", {"name": "publication_date"}),
+        ("meta", {"name": "releaseDate"}),
+        ("meta", {"name": "release_date"}),
         ("meta", {"name": "datePublished"}),
         ("meta", {"name": "datepublished"}),
         ("meta", {"name": "date"}),
@@ -236,6 +280,9 @@ def _extract_published_at(soup: BeautifulSoup) -> datetime | None:
         value = tag.get("content") if tag else None
         parsed = _parse_published_datetime(str(value or ""))
         if parsed:
+            if not _contains_time_component(str(value or "")):
+                date_only_candidate = date_only_candidate or parsed
+                continue
             return parsed
 
     time_tag = soup.find("time", attrs={"datetime": True}) or soup.find("time")
@@ -249,9 +296,10 @@ def _extract_published_at(soup: BeautifulSoup) -> datetime | None:
         if parsed:
             return parsed
 
-    text = soup.get_text(" ", strip=True)
+    text = _normalize_datetime_text(soup.get_text(" ", strip=True))
     match = re.search(r"20\d{2}[年./-]\d{1,2}[月./-]\d{1,2}日?(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?", text)
-    return _parse_published_datetime(match.group(0)) if match else None
+    parsed = _parse_published_datetime(match.group(0)) if match else None
+    return parsed or date_only_candidate
 
 
 def _extract_json_ld_date(raw: str) -> datetime | None:
@@ -276,7 +324,7 @@ def _extract_json_ld_date(raw: str) -> datetime | None:
 
 
 def _parse_published_datetime(value: str, now: datetime | None = None) -> datetime | None:
-    text = re.sub(r"[*_`]+", "", value or "").strip()
+    text = _normalize_datetime_text(re.sub(r"[*_`]+", "", value or "").strip())
     if not text:
         return None
     relative = _parse_relative_datetime(text, now)
@@ -312,6 +360,25 @@ def _parse_published_datetime(value: str, now: datetime | None = None) -> dateti
                 except ValueError:
                     continue
     return None
+
+
+def _normalize_datetime_text(value: str) -> str:
+    return (
+        str(value or "")
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2212", "-")
+        .replace("\uff0d", "-")
+        .replace("\uff1a", ":")
+        .replace("\u3000", " ")
+    )
+
+
+def _contains_time_component(value: str) -> bool:
+    return bool(re.search(r"\d{1,2}\s*:\s*\d{2}", _normalize_datetime_text(value)))
 
 
 def _embedded_datetime_candidates(text: str) -> list[str]:

@@ -4,7 +4,7 @@ import shlex
 
 from personal_news_agent.skills.base import Skill, SkillContext, SkillResult, SkillSpec
 from personal_news_agent.skills.brief import BriefSkill
-from personal_news_agent.skills.factcheck import CheckSkill, FactCheckSkill
+from personal_news_agent.skills.factcheck import FactCheckSkill
 from personal_news_agent.skills.report import ReportSkill
 from personal_news_agent.skills.sources import SourcesSkill
 
@@ -44,4 +44,4 @@ class SkillRegistry:
 
 
 def build_default_registry() -> SkillRegistry:
-    return SkillRegistry([ReportSkill(), BriefSkill(), FactCheckSkill(), CheckSkill(), SourcesSkill()])
+    return SkillRegistry([ReportSkill(), BriefSkill(), FactCheckSkill(), SourcesSkill()])

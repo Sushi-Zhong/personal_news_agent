@@ -17,13 +17,23 @@ class BriefSkill:
         topic, options = _parse_args(args)
         topic = topic or (context.topic or "").strip() or "今日资讯"
         categories = _categories(options.get("category")) or (context.category_scope or [])
-        report = await context.services["reports"].generate(
-            user_id=context.user_id,
-            topic=topic,
-            category_scope=categories,
-            time_range="1d",
-            report_type="daily_digest",
-        )
+        reports = context.services["reports"]
+        if context.conversation_id:
+            report = await reports.generate_brief_from_conversation(
+                user_id=context.user_id,
+                conversation_id=context.conversation_id,
+                topic=topic,
+                category_scope=categories,
+                time_range="1d",
+            )
+        else:
+            report = await reports.generate(
+                user_id=context.user_id,
+                topic=topic,
+                category_scope=categories,
+                time_range="1d",
+                report_type="daily_digest",
+            )
         payload = report.model_dump(mode="json") if hasattr(report, "model_dump") else dict(report)
         return SkillResult(
             command=self.spec.command,

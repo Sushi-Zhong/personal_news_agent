@@ -84,7 +84,7 @@ class NewsChatService:
         if moderation_response:
             self._save_response_turn(moderation_response, message, user_id, topic, category_scope)
             return moderation_response
-        skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope)
+        skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope, allow_web_search)
         if skill_response:
             self._save_response_turn(skill_response, message, user_id, topic, category_scope)
             return skill_response
@@ -239,7 +239,7 @@ class NewsChatService:
             self._save_response_turn(moderation_response, message, user_id, topic, category_scope)
             yield {"type": "final", "response": moderation_response.model_dump(mode="json")}
             return
-        skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope)
+        skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope, allow_web_search)
         if skill_response:
             self._save_response_turn(skill_response, message, user_id, topic, category_scope)
             yield {"type": "trace", "item": {"stage": "Skill 执行", "status": "completed", "message": skill_response.context_relation}}
@@ -310,6 +310,7 @@ class NewsChatService:
         user_id: str,
         topic: str | None = None,
         category_scope: list[str] | None = None,
+        allow_web_search: bool = False,
     ) -> ChatResponse | None:
         text = message.strip()
         if not text.startswith("/") or not self.skill_registry:
@@ -324,6 +325,7 @@ class NewsChatService:
                     conversation_id=conversation_id,
                     topic=topic,
                     category_scope=category_scope,
+                    allow_web_search=allow_web_search,
                 ),
             )
         except ValueError as exc:
@@ -378,6 +380,8 @@ class NewsChatService:
             return None, last.get("category_scope") or category_scope
         last = self.store.last_turn(conversation_id, user_id=user_id)
         if not last:
+            return topic, category_scope
+        if topic and not _is_default_brief_topic(topic):
             return topic, category_scope
         return last.get("topic") or topic, last.get("category_scope") or category_scope
 
@@ -563,6 +567,7 @@ class NewsChatService:
     ) -> ChatResponse:
         query = _explicit_focus_from_message(message) or query_from_message(message, topic)
         categories = categories_for_message(message, topic, category_scope)
+        drift_warning = _topic_drift_warning(topic, query, message)
         results = await self.search_service.search(
             query=query,
             category_scope=categories,
@@ -576,12 +581,14 @@ class NewsChatService:
             try:
                 history = self._conversation_memory(conversation_id, user_id)
                 answer = await self.llm_client.chat(_chat_messages(message, query, categories, results, history))
+                answer = _prepend_notice(answer, drift_warning)
                 context_relation = "topic_grounded_llm"
             except Exception as exc:
-                answer = _grounded_answer(query, message, results, f"模型调用失败，已使用本地证据摘要：{exc}")
+                prefix = _join_notices(drift_warning, f"模型调用失败，已使用本地证据摘要：{exc}")
+                answer = _grounded_answer(query, message, results, prefix)
                 context_relation = "topic_grounded_fallback"
         else:
-            answer = _grounded_answer(query, message, results)
+            answer = _grounded_answer(query, message, results, drift_warning)
             context_relation = "topic_grounded"
         return ChatResponse(
             conversation_id=conversation_id,
@@ -607,6 +614,7 @@ class NewsChatService:
         trace: list[dict[str, Any]] = []
         query = _explicit_focus_from_message(message) or query_from_message(message, topic)
         categories = categories_for_message(message, topic, category_scope)
+        drift_warning = _topic_drift_warning(topic, query, message)
         time_range = time_range_from_message(message)
         search_plan = await self._plan_search_query(message, topic, query, time_range, allow_web_search)
         search_query = search_plan.query
@@ -689,10 +697,7 @@ class NewsChatService:
         await _add_trace(trace, {"stage": "阅读正文", "status": "completed", "message": f"抓取后重新召回 {len(refreshed_results)} 条候选，进入证据合并。", "count": len(refreshed_results)}, on_trace)
 
         external_results: list[SearchResult] = []
-        freshness_terms = ("今天", "今日", "现在", "实时", "最新", "天气")
-        should_search_external = allow_web_search and self.search_service.external_configured and (
-            time_range is not None or len(refreshed_results) < 3 or any(term in message for term in freshness_terms)
-        )
+        should_search_external = allow_web_search and self.search_service.external_configured
         if should_search_external:
             try:
                 await _add_trace(trace, {"stage": "联网搜索", "status": "running", "message": "正在查询实时全网搜索。"}, on_trace)
@@ -773,12 +778,14 @@ class NewsChatService:
                 await _add_trace(trace, {"stage": "生成回答", "status": "running", "message": "正在组织 markdown 回答。"}, on_trace)
                 history = self._conversation_memory(conversation_id, user_id)
                 answer = await self.llm_client.chat(_research_messages(message, query, categories, time_range, evidence, expanded_queries, event_line, trace, history))
+                answer = _prepend_notice(answer, drift_warning)
                 context_relation = "research_pipeline_llm"
             except Exception as exc:
-                answer = _research_fallback_answer(query, evidence, expanded_queries, event_line, f"模型调用失败，已使用本地证据摘要：{exc}")
+                prefix = _join_notices(drift_warning, f"模型调用失败，已使用本地证据摘要：{exc}")
+                answer = _research_fallback_answer(query, evidence, expanded_queries, event_line, prefix)
                 context_relation = "research_pipeline_fallback"
         else:
-            answer = _research_fallback_answer(query, evidence, expanded_queries, event_line)
+            answer = _research_fallback_answer(query, evidence, expanded_queries, event_line, drift_warning)
             context_relation = "research_pipeline_fallback" if evidence else "research_pipeline_empty"
         await _add_trace(trace, {"stage": "生成回答", "status": "completed", "message": "已生成 markdown 回答。"}, on_trace)
 
@@ -1003,7 +1010,7 @@ def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
                 if not isinstance(item, dict):
                     continue
                 lines.append(_factcheck_evidence_line(item))
-        for label, key in (("缺失证据", "missing_evidence"), ("来源说明", "source_notes"), ("下一步核查", "next_checks")):
+        for label, key in (("缺失证据", "missing_evidence"), ("来源说明", "source_notes")):
             values = payload.get(key) or []
             if values:
                 lines.extend(["", f"### {label}"])
@@ -1041,7 +1048,7 @@ def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
 
 
 def _skill_context_topic(command: str, payload: dict[str, Any]) -> str | None:
-    if command in {"/factcheck", "/check"}:
+    if command == "/factcheck":
         return payload.get("claim") or None
     if command in {"/report", "/brief"}:
         return payload.get("topic") or None
@@ -1060,6 +1067,10 @@ def _skill_command_has_topic_arg(text: str) -> bool:
             continue
         return True
     return False
+
+
+def _is_default_brief_topic(topic: str | None) -> bool:
+    return str(topic or "").strip() in {"", "今日资讯", "今日简报", "每日摘要", "今日新闻"}
 
 
 def _report_skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
@@ -1473,6 +1484,95 @@ def _grounded_answer(query: str, message: str, results: list[SearchResult], pref
         + "\n".join(bullets)
         + "\n\n可以继续追问：赛事成绩线、商业/上市传闻线、舆论争议线，或让我把它升级为持续跟踪专题。"
     )
+
+
+def _topic_drift_warning(topic: str | None, query: str, message: str) -> str | None:
+    if not topic or not query:
+        return None
+    if _compact_topic_text(topic) == _compact_topic_text(query):
+        return None
+    if _compact_topic_text(topic) in _compact_topic_text(query) or _compact_topic_text(query) in _compact_topic_text(topic):
+        return None
+    if is_contextual_followup(message):
+        return None
+    if _looks_like_general_topic_extension(message):
+        return None
+    topic_terms = _topic_drift_terms(topic)
+    query_terms = _topic_drift_terms(query)
+    if topic_terms and query_terms and topic_terms.intersection(query_terms):
+        return None
+    if not _has_strong_new_subject(query) and len(query_terms) < 2:
+        return None
+    return "提示：这条追问和当前关注主题关联较弱，我会照常回答，但不会因此更改当前主题或新增关注卡片。"
+
+
+def _prepend_notice(answer: str, notice: str | None) -> str:
+    return f"> {notice}\n\n{answer}" if notice else answer
+
+
+def _join_notices(*items: str | None) -> str | None:
+    notices = [item for item in items if item]
+    return "\n".join(notices) if notices else None
+
+
+def _topic_drift_terms(value: str) -> set[str]:
+    compact = _compact_topic_text(value)
+    terms = set(re.findall(r"[a-z0-9+#._-]{2,}|[\u4e00-\u9fff]{2,}", compact))
+    cjk = re.sub(r"[^\u4e00-\u9fff]", "", compact)
+    for size in (6, 5, 4):
+        if len(cjk) >= size:
+            terms.update(cjk[index : index + size] for index in range(0, len(cjk) - size + 1))
+    return {term for term in terms if term not in _TOPIC_DRIFT_STOP_TERMS}
+
+
+def _has_strong_new_subject(value: str) -> bool:
+    compact = _compact_topic_text(value)
+    if re.search(r"[a-z][a-z0-9+#._-]*[\u4e00-\u9fff]{2,}", compact):
+        return True
+    cjk = re.sub(r"[^\u4e00-\u9fff]", "", compact)
+    cjk = re.sub(r"(是什么|存在吗|有哪些|怎么样|为什么|的影响|影响|走向|风评|前景|情况)$", "", cjk)
+    if len(cjk) >= 4 and cjk not in _TOPIC_DRIFT_GENERIC_SUBJECTS:
+        return True
+    return False
+
+
+def _looks_like_general_topic_extension(message: str) -> bool:
+    compact = _compact_topic_text(message)
+    markers = ("这种", "这类", "这件事", "上述", "一般", "影响", "风评", "舆论", "私生活", "后果", "怎么看")
+    return any(marker in compact for marker in markers)
+
+
+def _compact_topic_text(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "").lower())
+
+
+_TOPIC_DRIFT_STOP_TERMS = {
+    "新闻",
+    "相关",
+    "热点",
+    "资讯",
+    "继续",
+    "深挖",
+    "跟踪",
+    "追踪",
+    "是否",
+    "出现",
+    "后续",
+    "新进展",
+    "怎么样",
+    "为什么",
+    "有哪些",
+    "是什么",
+}
+
+
+_TOPIC_DRIFT_GENERIC_SUBJECTS = {
+    "明星",
+    "私生活",
+    "网络风评",
+    "舆论",
+    "公众讨论",
+}
 
 
 def _related_search_answer(

@@ -20,6 +20,7 @@ class SkillContext:
     conversation_id: str | None = None
     topic: str | None = None
     category_scope: list[str] | None = None
+    allow_web_search: bool = False
 
 
 @dataclass(frozen=True)

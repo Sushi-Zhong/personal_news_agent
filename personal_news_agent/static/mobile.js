@@ -325,9 +325,6 @@ async function handleMobileAssistantInput(message) {
       applyMobileTopicCommand({ ...command, args: { ...command.args, _: relatedTopic ? [relatedTopic] : [] } });
       return runMobileRelatedSearchIntoTurn(assistantNode, relatedTopic);
     }
-    if (["check"].includes(command.name)) {
-      return sendChatIntoTurn(message, assistantNode);
-    }
     if (["factcheck", "verify"].includes(command.name)) {
       applyMobileTopicCommand(command);
       const claim = commandText(command) || mobileState.topic || "";
@@ -344,7 +341,7 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/check、/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/feed。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);

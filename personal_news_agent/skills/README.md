@@ -6,7 +6,6 @@
 /report <主题> [--category tech,economy] [--time-range 30d]
 /brief [主题] [--category tech,sports]
 /factcheck <待核查说法> [--category tech,economy]
-/check <下一步核查点>
 /sources [category]
 ```
 

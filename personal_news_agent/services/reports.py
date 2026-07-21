@@ -155,6 +155,85 @@ class ReportGenerationService:
         )
         return ReportResponse(report_id=report_id, topic=report_topic, category_scope=categories, sections=sections, timeline=timeline, sources=sources)
 
+    async def generate_brief_from_conversation(
+        self,
+        user_id: str,
+        conversation_id: str,
+        topic: str = "",
+        category_scope: list[str] | None = None,
+        time_range: str = "1d",
+        limit: int = 40,
+    ) -> ReportResponse:
+        turns = [
+            turn
+            for turn in self.store.list_turns(conversation_id, user_id=user_id, limit=limit)
+            if not str(turn.get("user_message") or "").strip().startswith("/brief")
+        ]
+        visible_turns = [turn for turn in turns if _turn_context_relation(turn) != "query_moderation_blocked"]
+        if not visible_turns:
+            return await self.generate(user_id, topic or "今日资讯", category_scope or [], time_range=time_range, report_type="daily_digest")
+        report_topic = _clean_topic_prefix(topic) or _conversation_topic(visible_turns) or "今日资讯"
+        scoped_turns = visible_turns
+        categories = category_scope or _conversation_categories(scoped_turns)
+        evidence = _conversation_evidence(scoped_turns)
+        if not evidence:
+            evidence = _brief_turn_evidence_from_conversation(scoped_turns)
+        for index, item in enumerate(evidence, start=1):
+            item["index"] = index
+
+        profile = self.store.get_profile(user_id)
+        fallback = _fallback_brief_sections(report_topic, categories, profile, evidence)
+        fallback["summary"] = _brief_overview_summary(report_topic, evidence) or _conversation_summary(scoped_turns, _conversation_combined_text(scoped_turns, evidence, report_topic), report_topic)
+        fallback["why_it_matters"] = _conversation_importance_points(report_topic, categories, evidence, scoped_turns)
+        fallback["watch_next"] = _conversation_watch_points(scoped_turns, report_topic, evidence)
+        fallback["uncertainty"] = "本次简报只整理当前对话中已经出现且未被排除在主题外的内容；简报阶段未新增检索。"
+        fallback["一、结论摘要"] = fallback["summary"]
+        fallback["八、来源列表与不确定性说明"] = fallback["uncertainty"]
+        sections, agent_source = await self._agent_brief_sections(
+            topic=report_topic,
+            categories=categories,
+            profile=profile,
+            evidence=evidence,
+            fallback=fallback,
+            user_id=user_id,
+        )
+        sections["generation_source"] = f"conversation_{agent_source}"
+        sources = [
+            {
+                "article_id": item.get("article_id"),
+                "source_id": item.get("source_id"),
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "published_at": item.get("published_at"),
+                "summary": item.get("summary") or "",
+                "content": item.get("content") or "",
+                "full_text": item.get("full_text") or item.get("content") or item.get("summary") or "",
+            }
+            for item in evidence
+        ]
+        report = {
+            "topic": report_topic,
+            "category_scope": categories,
+            "report_type": "daily_digest",
+            "conversation_id": conversation_id,
+            "sections": sections,
+            "timeline": [],
+            "sources": sources,
+        }
+        report_id = self.store.save_report(user_id, report_topic, categories, report)
+        self.store.log(
+            "report_generation",
+            "ok",
+            report_topic,
+            {
+                "report_id": report_id,
+                "source_count": len(sources),
+                "report_type": "conversation_daily_digest",
+                "agent_source": sections["generation_source"],
+            },
+        )
+        return ReportResponse(report_id=report_id, topic=report_topic, category_scope=categories, sections=sections, timeline=[], sources=sources)
+
     async def _generate_daily_digest(
         self,
         user_id: str,
@@ -247,6 +326,7 @@ class ReportGenerationService:
             "输出必须是严格 JSON，不要 markdown，不要解释。"
             "JSON 字段：headline, summary, top_stories, why_it_matters, impact, watch_next, uncertainty, personalization_reason。"
             "top_stories 是数组，每项包含 title, summary, why_it_matters, source_index。"
+            "每条 top_stories.summary 必须是对该条资讯的 1 到 3 句总结，不要复制网页推荐流、下一篇标题或无关链接文字。"
             "why_it_matters、impact、watch_next 都是字符串数组。"
             "如果证据不足，明确写入 uncertainty。"
         )
@@ -425,11 +505,21 @@ def _text_matches_topic(text: str, topic: str, min_hits: int = 1) -> bool:
         return True
     if compact_topic in compact_text or compact_text in compact_topic:
         return True
+    if _same_gender_issue_family(compact_topic, compact_text):
+        return True
     terms = _topic_match_terms(topic)
     if not terms:
         return True
     hits = sum(1 for term in terms if term in compact_text)
     return hits >= min_hits
+
+
+def _same_gender_issue_family(compact_topic: str, compact_text: str) -> bool:
+    if "重男轻女" in compact_topic:
+        return any(term in compact_text for term in ("重男轻女", "男女", "性别", "女性", "男性", "女人", "女子", "女", "男", "人口比例", "出生性别比", "参政", "继承"))
+    topic_terms = ("男女", "性别", "女性", "男性", "女子", "女权", "男权", "出生性别比")
+    text_terms = (*topic_terms, "人口比例", "参政", "继承", "生育")
+    return any(term in compact_topic for term in topic_terms) and any(term in compact_text for term in text_terms)
 
 
 def _topic_match_terms(topic: str) -> list[str]:
@@ -520,6 +610,31 @@ def _conversation_evidence(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return evidence
 
 
+def _brief_turn_evidence_from_conversation(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for turn in turns:
+        if _turn_is_structured_skill(turn):
+            continue
+        message = _clean_text(turn.get("user_message"), 180)
+        answer = _clean_text(turn.get("assistant_answer"), 4000)
+        if not message and not answer:
+            continue
+        rows.append(
+            {
+                "article_id": None,
+                "source_id": "对话回答",
+                "title": message or "对话内容",
+                "url": "",
+                "published_at": turn.get("created_at"),
+                "category": (turn.get("category_scope") or [""])[0],
+                "summary": _brief_story_summary(message, answer, answer),
+                "content": answer,
+                "full_text": answer,
+            }
+        )
+    return rows
+
+
 def _brief_story_evidence_from_skill_data(skill_data: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(skill_data, dict):
         return []
@@ -582,7 +697,7 @@ def _normalize_conversation_evidence(item: Any, turn: dict[str, Any]) -> dict[st
 
 def _conversation_combined_text(turns: list[dict[str, Any]], evidence: list[dict[str, Any]], topic: str) -> str:
     parts = [topic]
-    for item in evidence[:12]:
+    for item in evidence:
         parts.append(f"{item.get('title') or ''}。{item.get('summary') or ''}")
     for turn in turns[-8:]:
         message = str(turn.get("user_message") or "").strip()
@@ -598,7 +713,7 @@ def _turn_is_structured_skill(turn: dict[str, Any]) -> bool:
     response = turn.get("response") or {}
     skill_result = response.get("skill_result") or {}
     command = skill_result.get("command")
-    return command in {"/brief", "/factcheck", "/check", "/report"}
+    return command in {"/brief", "/factcheck", "/report"}
 
 
 def _conversation_summary(turns: list[dict[str, Any]], combined: str, topic: str) -> str:
@@ -622,7 +737,7 @@ def _conversation_timeline(turns: list[dict[str, Any]], evidence: list[dict[str,
             }
         )
     if events:
-        return events[:12]
+        return events
     for turn in turns[-6:]:
         message = str(turn.get("user_message") or "").strip()
         if not message:
@@ -657,7 +772,7 @@ def _conversation_source_claims(evidence: list[dict[str, Any]], turns: list[dict
                 "title": item.get("title") or "",
                 "summary": item.get("summary") or "",
             }
-            for item in evidence[:12]
+            for item in evidence
         ]
     claims: list[dict[str, Any]] = []
     for turn in turns[-6:]:
@@ -770,6 +885,7 @@ def _brief_evidence(results: list[SearchResult], rows: list[dict[str, Any]]) -> 
     for index, item in enumerate(results[:12], start=1):
         row = row_by_id.get(item.article_id) or {}
         content = row.get("content") or item.summary or ""
+        summary = _brief_story_summary(item.title, item.summary or "", content)
         evidence.append(
             {
                 "index": index,
@@ -779,8 +895,8 @@ def _brief_evidence(results: list[SearchResult], rows: list[dict[str, Any]]) -> 
                 "url": item.url,
                 "category": item.category,
                 "published_at": item.published_at.isoformat() if item.published_at else None,
-                "summary": item.summary or summarize(content, 160),
-                "content_excerpt": content[:600],
+                "summary": summary,
+                "content_excerpt": _brief_clean_excerpt(content),
             }
         )
     return evidence
@@ -792,13 +908,12 @@ def _fallback_brief_sections(
     profile: dict[str, Any],
     evidence: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    combined = "\n".join(f"{item.get('title')}。{item.get('summary') or item.get('content_excerpt') or ''}" for item in evidence)
-    summary = summarize(combined, 260) if combined else ""
+    summary = _brief_overview_summary(topic, evidence)
     category_label = "、".join(categories) if categories else "不限板块"
     top_stories = [
         {
             "title": item.get("title") or "",
-            "summary": item.get("summary") or "",
+            "summary": _brief_story_summary(item.get("title") or "", item.get("summary") or "", item.get("content_excerpt") or ""),
             "why_it_matters": _brief_story_reason(item),
             "source_index": item.get("index"),
         }
@@ -850,7 +965,11 @@ def _normalize_brief_sections(parsed: dict[str, Any], fallback: dict[str, Any], 
             reason = _brief_story_reason(source_item)
         story = {
             "title": _clean_text(item.get("title"), 120),
-            "summary": _clean_text(item.get("summary"), 260),
+            "summary": _brief_story_summary(
+                item.get("title") or source_item.get("title") or "",
+                item.get("summary") or source_item.get("summary") or "",
+                source_item.get("content_excerpt") or "",
+            ),
             "why_it_matters": reason,
             "source_index": item.get("source_index"),
         }
@@ -886,6 +1005,81 @@ def _brief_story_reason(item: dict[str, Any]) -> str:
         "entertainment": "涉及文娱内容或文化活动，适合观察传播效果和公众反馈。",
     }
     return category_reasons.get(category, "这条资讯包含明确主体和后续变量，适合纳入今日简报继续观察。")
+
+
+def _brief_overview_summary(topic: str, evidence: list[dict[str, Any]]) -> str:
+    sentences: list[str] = []
+    for item in evidence[:5]:
+        summary = _brief_story_summary(item.get("title") or "", item.get("summary") or "", item.get("content_excerpt") or item.get("content") or "")
+        for sentence in _brief_summary_sentences(summary):
+            if sentence and sentence not in sentences:
+                sentences.append(sentence)
+            if len(sentences) >= 3:
+                return " ".join(sentences)
+    return f"围绕“{topic}”暂无足够入库资料形成完整简报。" if topic else ""
+
+
+def _brief_story_summary(title: str, summary: str, content: str) -> str:
+    text = _brief_clean_excerpt(summary or content)
+    if not text:
+        return f"{title}：暂无足够正文信息，需等待后续来源补充。" if title else ""
+    sentences = _brief_summary_sentences(text)
+    return " ".join(sentences[:3]).strip()
+
+
+def _brief_clean_excerpt(value: Any) -> str:
+    text = _clean_text(value, 4000)
+    if not text:
+        return ""
+    text = re.sub(r"上一篇[:：]?.*", "", text)
+    text = re.sub(r"下一篇[:：]?.*", "", text)
+    text = re.sub(r"责任编辑[:：].*", "", text)
+    for marker in _BRIEF_RECOMMENDATION_MARKERS:
+        index = text.find(marker)
+        if index > 20:
+            text = text[:index].strip()
+            break
+    return text.strip()
+
+
+def _brief_summary_sentences(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not normalized:
+        return []
+    parts = [part.strip() for part in re.split(r"(?<=[。！？!?])\s*", normalized) if part.strip()]
+    if not parts:
+        parts = [normalized]
+    sentences = []
+    for part in parts:
+        if _brief_noise_text(part):
+            continue
+        if _brief_boilerplate_sentence(part):
+            continue
+        sentences.append(part)
+        if len(sentences) >= 3:
+            break
+    return sentences or parts[:1]
+
+
+def _brief_boilerplate_sentence(value: str) -> bool:
+    text = str(value or "").strip(" #*·。 ：:\t\r\n")
+    if not text:
+        return True
+    if text in {"信息资讯", "来源", "分享", "上一篇", "下一篇"}:
+        return True
+    return bool(re.fullmatch(r"来源[:：]?.{0,30}(时间[:：]?.*)?", text))
+
+
+_BRIEF_RECOMMENDATION_MARKERS = (
+    "当AI拥有",
+    "APP借钱套路调查",
+    "太阳花",
+    "台风",
+    "更多精彩",
+    "相关推荐",
+    "相关报道",
+    "延伸阅读",
+)
 
 
 def _brief_why_it_matters(topic: str, categories: list[str], evidence: list[dict[str, Any]]) -> list[str]:

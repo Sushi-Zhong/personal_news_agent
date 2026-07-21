@@ -7,16 +7,17 @@ from io import BytesIO
 
 import httpx
 import pytest
+from bs4 import BeautifulSoup
 
 from personal_news_agent.config import Settings
-from personal_news_agent.core.models import RawArticle, RawArticleLink, RawSearchResult, SearchResult, TimeRange
-from personal_news_agent.core.text import stable_id
+from personal_news_agent.core.models import NormalizedArticle, RawArticle, RawArticleLink, RawSearchResult, SearchResult, TimeRange
+from personal_news_agent.core.text import content_hash, stable_id
 from personal_news_agent.services.chat import NewsChatService, _filter_by_time, _rank_for_chat, _related_base_query, _related_search_answer, _report_skill_answer
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
 from personal_news_agent.services.factcheck import FactCheckService
-from personal_news_agent.services.article_fetch import ArticleFetchService, _parse_published_datetime, _unwrap_search_link
+from personal_news_agent.services.article_fetch import ArticleFetchService, _extract_published_at, _parse_published_datetime, _unwrap_search_link
 from personal_news_agent.services.chat_understanding import (
     categories_for_message,
     is_contextual_followup,
@@ -25,7 +26,7 @@ from personal_news_agent.services.chat_understanding import (
 from personal_news_agent.services.native_ingestion import NativeSearchIngestionService
 from personal_news_agent.services.personalization import PersonalizationService
 from personal_news_agent.services.report_export import export_report
-from personal_news_agent.services.reports import ReportGenerationService, _filter_conversation_evidence_by_topic
+from personal_news_agent.services.reports import ReportGenerationService, _brief_story_summary, _fallback_brief_sections, _filter_conversation_evidence_by_topic
 from personal_news_agent.services.search import (
     ExternalSearchProvider,
     TavilySearchProvider,
@@ -362,6 +363,28 @@ def test_research_empty_evidence_does_not_ask_llm_to_invent_answer(services):
     assert "常见类型" not in response.answer
 
 
+def test_research_always_uses_external_search_when_web_enabled(services):
+    _, store, _ = services
+    search = EnoughLocalWithExternalSearchService()
+    chat = NewsChatService(store, search, llm_client=FakeDisabledLLM())
+
+    response = asyncio.run(chat._research_chat("external_required_conv", "证监会在2026年做了什么事", allow_web_search=True))
+
+    assert search.external_calls
+    assert any(item["stage"] == "联网搜索" and item["status"] == "completed" for item in response.research_trace)
+
+
+def test_research_does_not_use_external_search_when_web_disabled(services):
+    _, store, _ = services
+    search = EnoughLocalWithExternalSearchService()
+    chat = NewsChatService(store, search, llm_client=FakeDisabledLLM())
+
+    response = asyncio.run(chat._research_chat("external_disabled_conv", "证监会在2026年做了什么事", allow_web_search=False))
+
+    assert search.external_calls == []
+    assert not any(item["stage"] == "联网搜索" for item in response.research_trace)
+
+
 def test_web_regular_chat_does_not_auto_create_topic_card():
     source = Path("personal_news_agent/static/web.js").read_text()
     regular_branch = source.split("if (!command) {", 1)[1].split("appendLocalTurn(\"user\", message);", 1)[0]
@@ -369,6 +392,67 @@ def test_web_regular_chat_does_not_auto_create_topic_card():
     assert "sendChat(message)" in regular_branch
     assert "createTopicFromFirstMessage" not in regular_branch
     assert "if (!pendingTopicFromNextMessage && options.force !== true) return null;" in source
+
+
+def test_web_chat_response_resets_related_rail_per_query():
+    source = Path("personal_news_agent/static/web.js").read_text()
+    side_effects = source.split("function handleWebChatResponseSideEffects(response) {", 1)[1].split("function responseScopedArticles", 1)[0]
+
+    assert "responseScopedArticles(response)" in side_effects
+    assert "renderResponseScopedFeed(articles)" in side_effects
+    assert "response?.event_line?.items || []" in side_effects
+    assert "本轮暂无相关资讯" in source
+    assert "topicOverride || consoleState.topic" in source
+
+
+def test_web_filters_system_labels_from_related_entities():
+    source = Path("personal_news_agent/static/web.js").read_text()
+
+    assert "!isSystemEntityLabel(node.label)" in source
+    assert "暂无足够入库资料" in source
+    assert "后续将通过源搜索" in source
+    assert "抓取和大模型抽取补全" in source
+
+
+def test_web_markdown_tables_render_as_tables():
+    source = Path("personal_news_agent/static/shared.js").read_text()
+    styles = Path("personal_news_agent/static/styles.css").read_text()
+
+    assert "isMarkdownTableStart(lines, index)" in source
+    assert "<table><thead><tr>" in source
+    assert "markdown-table-wrap" in source
+    assert ".assistant-markdown table" in styles
+
+
+def test_web_markdown_long_factcheck_lines_wrap_inside_bubble():
+    styles = Path("personal_news_agent/static/styles.css").read_text()
+    markdown_rule = styles.split(".assistant-markdown {", 1)[1].split("}", 1)[0]
+    text_rule = styles.split(".assistant-markdown p,", 1)[1].split("}", 1)[0]
+    link_rule = styles.split(".assistant-markdown a {", 1)[1].split("}", 1)[0]
+
+    assert "max-width: 100%" in markdown_rule
+    assert "overflow-wrap: anywhere" in markdown_rule
+    assert "word-break: break-word" in text_rule
+    assert "overflow-wrap: anywhere" in link_rule
+
+
+def test_check_skill_is_not_registered_or_shown_in_command_menu():
+    registry = build_default_registry()
+    commands = [item.command for item in registry.list_skills()]
+    shared_source = Path("personal_news_agent/static/shared.js").read_text()
+    web_source = Path("personal_news_agent/static/web.js").read_text()
+    mobile_source = Path("personal_news_agent/static/mobile.js").read_text()
+    home_source = Path("personal_news_agent/static/home.js").read_text()
+    home_html = Path("personal_news_agent/static/home.html").read_text()
+    mobile_html = Path("personal_news_agent/static/mobile.html").read_text()
+
+    assert "/check" not in commands
+    assert 'name: "check"' not in shared_source
+    assert "可执行：/check" not in web_source
+    assert "可执行：/check" not in mobile_source
+    assert "20260721-no-check-1" in home_source
+    assert "20260721-no-check-1" in home_html
+    assert "shared.js?v=20260721-no-check-1" in mobile_html
 
 
 def test_time_filter_keeps_current_external_results_without_published_date():
@@ -526,6 +610,7 @@ def test_chat_new_question_answers_without_changing_topic_or_creating_card(servi
     assert response.topic == "用户与游戏公司起冲突的案例"
     assert response.focus_object is not None
     assert response.focus_object.text == "用户与游戏公司起冲突的案例"
+    assert "当前关注主题关联较弱" in response.answer
     assert search.calls
     assert "ai公司" in search.calls[0]["query"]
     assert "发展前景" in search.calls[0]["query"]
@@ -582,6 +667,7 @@ def test_chat_celebrity_privacy_followup_does_not_replace_current_topic(services
     assert response.topic == current_topic
     assert response.focus_object is not None
     assert response.focus_object.text == current_topic
+    assert "当前关注主题关联较弱" not in response.answer
     assert search.calls
     assert "明星" in search.calls[0]["query"]
     topics = [item for item in store.list_topics("privacy_user") if item["topic_type"] == "user"]
@@ -774,6 +860,39 @@ def test_article_fetch_service_parses_rss_links():
     assert links[0].published_at.isoformat() == "2026-07-17T01:30:00+00:00"
 
 
+def test_article_fetch_service_uses_chinanews_mobile_detail_json():
+    fetcher = ArticleFetchService()
+    urls = []
+
+    async def fake_get_text(url):
+        urls.append(url)
+        return json.dumps(
+            {
+                "msgcode": 0,
+                "data": {
+                    "title": "受紅曲保健品影響 日本小林製藥暫停銷售三款口腔護理產品",
+                    "contentNoTag": "中新網9月14日電 綜合日媒報道。",
+                    "pubtime": "2024-09-14 11:34:07",
+                    "source": "中國新聞網",
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    fetcher._get_text = fake_get_text
+    article = asyncio.run(
+        fetcher.fetch_article(
+            "chinanews",
+            "https://m.chinanews.com/wap/detail/cht/zwsp/10286135.shtml",
+        )
+    )
+
+    assert urls == ["https://dw.chinanews.com/cns/app/v1/wapDetail/content/ft10286135.json?language=cht"]
+    assert article.title == "受紅曲保健品影響 日本小林製藥暫停銷售三款口腔護理產品"
+    assert article.content == "中新網9月14日電 綜合日媒報道。"
+    assert article.published_at.isoformat() == "2024-09-14T03:34:07+00:00"
+
+
 def test_parse_published_datetime_assumes_china_timezone_for_naive_time():
     parsed = _parse_published_datetime("2026年05月18日 10:30")
     assert parsed.isoformat() == "2026-05-18T02:30:00+00:00"
@@ -799,6 +918,55 @@ def test_parse_published_datetime_handles_embedded_markdown_time():
 def test_parse_published_datetime_handles_dotted_date():
     parsed = _parse_published_datetime("发布时间：2026.07.14 08:53")
     assert parsed.isoformat() == "2026-07-14T00:53:00+00:00"
+
+
+def test_extract_published_at_handles_visible_policy_page_date():
+    soup = BeautifulSoup(
+        """
+        <html><body>
+          <h1>证监会发布18条政策举措！</h1>
+          <div class="article-info">2025‑02‑08 09:10 <span>370</span></div>
+        </body></html>
+        """,
+        "html.parser",
+    )
+
+    parsed = _extract_published_at(soup)
+
+    assert parsed.isoformat() == "2025-02-08T01:10:00+00:00"
+
+
+def test_extract_published_at_handles_publish_time_meta():
+    soup = BeautifulSoup(
+        '<html><head><meta name="publishTime" content="2025-02-08 09:10"></head></html>',
+        "html.parser",
+    )
+
+    parsed = _extract_published_at(soup)
+
+    assert parsed.isoformat() == "2025-02-08T01:10:00+00:00"
+
+
+def test_extract_published_at_prefers_xinhua_visible_full_time_over_date_meta():
+    soup = BeautifulSoup(
+        """
+        <html>
+          <head>
+            <meta name="source" content="新华网">
+            <meta name="publishdate" content="2025-03-26">
+          </head>
+          <body>
+            <div>2025-03-26 22:39:41 来源：新华网</div>
+            <h1>粤港澳大湾区应急救援联合演练在港举行</h1>
+          </body>
+        </html>
+        """,
+        "html.parser",
+    )
+
+    parsed = _extract_published_at(soup)
+
+    assert parsed.isoformat() == "2025-03-26T14:39:41+00:00"
 
 
 def test_native_search_ingestion_fetches_and_indexes_articles(services):
@@ -991,6 +1159,84 @@ def test_brief_fallback_uses_human_importance_not_source_noise(services):
     assert "本次简报汇总了" in response.answer
 
 
+def test_brief_story_summaries_drop_unrelated_recommendation_text(services):
+    registry, store, search = services
+    store.save_article(
+        NormalizedArticle(
+            id="sports_noise_brief",
+            source_id="chinanews",
+            section_key="sports",
+            url="https://example.com/sports-noise",
+            title="覃予萱/蒯曼夺得2026年乒乓球全锦赛女双冠军-中新网",
+            summary=(
+                "7月19日晚，2026年乒乓球全国锦标赛女双决赛中，覃予萱/蒯曼以3比0获胜，首次夺得全锦赛女双冠军。"
+                "当AI拥有“终身学习”能力，人类如何划定“不可逾越之界”？ "
+                "APP借钱套路调查：收个红包、付笔账单、点个优惠，贷款就背上了"
+            ),
+            content="",
+            category="sports",
+            published_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+            fetched_at=datetime.now(timezone.utc),
+            source_priority=1,
+            keywords=[],
+            entities=[],
+            content_hash=content_hash("sports_noise_brief"),
+        )
+    )
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    response = asyncio.run(chat.chat("brief_noise_conv", "/brief --category sports", user_id="default"))
+
+    assert response.context_relation == "skill:/brief"
+    assert "覃予萱/蒯曼以3比0获胜，首次夺得全锦赛女双冠军" in response.answer
+    assert "当AI拥有" not in response.answer
+    assert "APP借钱套路调查" not in response.answer
+
+
+def test_brief_story_summary_keeps_complete_sentences_without_hard_cutoff():
+    long_summary = (
+        "基本框架是：库明加去湖人，老鹰得到贾里德·范德比尔特，加上湖人2032年首轮签互换权。"
+        "2023年9月，范德比尔特与湖人签下一份多年合同，因此他的合同处理、健康状况和第三方球队接手意愿都会影响交易可行性。"
+        "后续需要观察老鹰、湖人和潜在第三方球队是否出现更明确报价。"
+    )
+
+    summary = _brief_story_summary("库明加先签后换传闻", long_summary, "")
+
+    assert summary.endswith("后续需要观察老鹰、湖人和潜在第三方球队是否出现更明确报价。")
+    assert "2023年9月，范 " not in summary
+    assert "交易可行性。" in summary
+
+
+def test_brief_overview_summary_uses_complete_sentence_summaries():
+    evidence = [
+        {
+            "index": 1,
+            "title": "20相关热点：普京签署总统令延长对中国公民免签政策-中新网",
+            "summary": "中新社莫斯科12月1日电俄罗斯总统普京12月1日签署命令，在2026年9月14日前，中国公民可免签入境俄罗斯并最长停留30日。俄总统网站当天发布的相关法令称，政策适用于探亲、商务、旅游、过境等目的。",
+            "content_excerpt": "",
+        },
+        {
+            "index": 2,
+            "title": "俄罗斯将延长对中国公民的免签制度*中国机电产品进出口商会",
+            "summary": "信息资讯。来源：央视新闻 时间：2026-05-21。据俄罗斯总统普京去年12月1日签署的命令，中国公民可免办签证进入俄罗斯并停留不超过30天。",
+            "content_excerpt": "",
+        },
+    ]
+
+    sections = _fallback_brief_sections("普京签署总统令延长对中国公民免签政策", ["politics"], {}, evidence)
+
+    assert sections["summary"].endswith("中国公民可免办签证进入俄罗斯并停留不超过30天。")
+    assert "202..." not in sections["summary"]
+    assert "### 信息资讯" not in sections["summary"]
+    assert sections["summary"].count("。") <= 3
+
+
 def test_brief_without_inline_topic_uses_latest_conversation_topic(services):
     registry, store, _ = services
     search = RecordingSearchService()
@@ -1018,9 +1264,59 @@ def test_brief_without_inline_topic_uses_latest_conversation_topic(services):
     assert response.context_relation == "skill:/brief"
     assert response.skill_result["data"]["topic"] == "追踪汽车之家是否出现后续回应"
     assert response.skill_result["data"]["category_scope"] == ["auto"]
-    assert search.calls[0]["query"] == "追踪汽车之家是否出现后续回应"
-    assert search.calls[0]["category_scope"] == ["auto"]
+    assert search.calls == []
+    assert response.skill_result["data"]["sources"][0]["title"] == "追踪汽车之家是否出现后续回应 报道"
     assert "今日简报：追踪汽车之家是否出现后续回应" in response.answer
+
+
+def test_brief_uses_existing_conversation_content_without_new_search(services):
+    registry, store, _ = services
+    class TopicUrlSearchService(RecordingSearchService):
+        async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
+            self.calls.append(
+                {
+                    "query": query,
+                    "category_scope": category_scope,
+                    "source_scope": source_scope,
+                    "time_range": time_range,
+                    "include_remote": include_remote,
+                }
+            )
+            return [
+                SearchResult(
+                    source_id="test",
+                    title=f"{query} 报道",
+                    url=f"https://example.com/{stable_id('brief', query)}",
+                    summary=f"{query} 的摘要",
+                    category=(category_scope or ["all"])[0],
+                    published_at=datetime.now(timezone.utc),
+                    score=1.0,
+                    origin="local",
+                )
+            ]
+
+    search = TopicUrlSearchService()
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    asyncio.run(chat.chat("conversation_brief_conv", "重男轻女相关政策争议", category_scope=["politics"], user_id="default"))
+    asyncio.run(chat.chat("conversation_brief_conv", "男女比例和历史事件有什么关系", category_scope=["politics"], user_id="default"))
+    search.calls.clear()
+    response = asyncio.run(chat.chat("conversation_brief_conv", "/brief", topic="重男轻女", user_id="default"))
+
+    assert search.calls == []
+    assert response.context_relation == "skill:/brief"
+    assert response.skill_result["data"]["topic"] == "重男轻女"
+    assert response.skill_result["data"]["sections"]["generation_source"] == "conversation_fallback"
+    titles = [item["title"] for item in response.skill_result["data"]["sources"]]
+    assert any("重男轻女相关政策争议" in title for title in titles)
+    assert any("男女比例和历史事件" in title for title in titles)
+    assert "简报阶段未新增检索" in response.answer
 
 
 def _assert_fixed_report_modules(answer: str):
@@ -1165,6 +1461,42 @@ def test_report_export_keeps_full_text_while_web_bubble_truncates():
     assert "（已截断" not in document_xml
     assert "末尾保留完整结论" in document_xml
     assert "来源正文末尾也必须保留" in document_xml
+
+
+def test_conversation_report_export_lists_all_scoped_sources():
+    sources = [
+        {
+            "article_id": f"art_{index}",
+            "source_id": "kr36",
+            "title": f"WAIC 2026 相关证据 {index}",
+            "url": f"https://example.com/{index}",
+            "summary": f"第 {index} 条完整证据摘要。",
+            "full_text": f"第 {index} 条完整证据正文。",
+        }
+        for index in range(1, 29)
+    ]
+    payload = {
+        "report_id": "rpt_all_sources",
+        "topic": "在WAIC现场，我们见到了Richard Sutton-36氪",
+        "report_type": "conversation_summary",
+        "conversation_id": "conv_report_all_sources",
+        "category_scope": ["tech"],
+        "sections": {
+            "一、结论摘要": "围绕 Richard Sutton 的 WAIC 现场报道整理。",
+            "二、事件背景": "共覆盖 28 条已展示证据。",
+            "六、不同来源的主要说法": sources[:1],
+        },
+        "timeline": [{"date": "2026-07-20", "event": item["title"]} for item in sources],
+        "sources": sources,
+    }
+
+    exported = export_report(payload, "docx")
+    with zipfile.ZipFile(BytesIO(exported.content)) as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+
+    assert "[28]" in document_xml
+    assert "WAIC 2026 相关证据 28" in document_xml
+    assert "第 28 条完整证据正文" in document_xml
 
 
 def test_report_topic_filter_ignores_source_name_only_matches():
@@ -1393,77 +1725,32 @@ def test_chat_executes_factcheck_skill_with_local_agent(services):
     assert response.skill_result["data"]["verdict"] == "supported"
     assert "结论：supported" in response.answer
     assert "支持证据" in response.answer
+    assert "下一步核查" not in response.answer
 
 
-def test_check_skill_continues_last_factcheck_with_remote_search(services):
+def test_factcheck_skill_uses_remote_search_when_enabled(services):
     _, store, _ = services
     search = RecordingSearchService()
-    local_agent = FakeFailingLocalAgent()
-    factcheck = FactCheckService(store, search, local_agent=local_agent)
+    factcheck = FactCheckService(store, search, local_agent=FakeFailingLocalAgent())
     chat = NewsChatService(
         store,
         search,
-        local_agent=local_agent,
         skill_registry=build_default_registry(),
-        services={"factcheck": factcheck, "store": store},
+        services={"factcheck": factcheck},
     )
 
-    first = asyncio.run(
+    response = asyncio.run(
         chat.chat(
-            "check_followup_conv",
+            "factcheck_remote_conv",
             "/factcheck AI Agent 产品更新带动开发工具竞争 --category tech",
             user_id="default",
-        )
-    )
-    second = asyncio.run(
-        chat.chat(
-            "check_followup_conv",
-            "/check 确认时间、地点、主体是否明确",
-            user_id="default",
+            allow_web_search=True,
         )
     )
 
-    assert first.context_relation == "skill:/factcheck"
-    assert second.context_relation == "skill:/check"
-    assert second.skill_result["data"]["claim"] == "AI Agent 产品更新带动开发工具竞争"
-    assert second.skill_result["data"]["check_query"] == "确认时间、地点、主体是否明确"
-    assert search.calls[0]["include_remote"] is False
-    assert search.calls[1]["include_remote"] is True
-    assert "AI Agent 产品更新带动开发工具竞争" in search.calls[1]["query"]
-    assert "确认时间、地点、主体是否明确" in search.calls[1]["query"]
-    assert "联网补证据" in second.skill_result["message"]
-    assert second.skill_result["data"]["verdict"] == "insufficient"
-    assert "为什么仍是证据不足" in second.answer
-    assert "检索到的全部证据" in second.answer
-    assert "本轮已按「确认时间、地点、主体是否明确」补充搜索" in second.answer
-
-
-def test_report_after_check_uses_original_claim_not_skill_title(services):
-    registry, store, search = services
-    local_agent = FakeFailingLocalAgent()
-    reports = ReportGenerationService(store, search)
-    factcheck = FactCheckService(store, search, local_agent=local_agent)
-    chat = NewsChatService(
-        store,
-        search,
-        local_agent=local_agent,
-        skill_registry=build_default_registry(),
-        services={"factcheck": factcheck, "reports": reports, "store": store, "registry": registry},
-    )
-
-    asyncio.run(chat.chat("report_after_check_conv", "/factcheck 国际粮食安全议题引发多方关注 --category politics", user_id="default"))
-    check_response = asyncio.run(chat.chat("report_after_check_conv", "/check 查找原始发布方或权威媒体全文", user_id="default"))
-    report_response = asyncio.run(chat.chat("report_after_check_conv", "/report", user_id="default"))
-
-    assert check_response.topic == "国际粮食安全议题引发多方关注"
-    assert check_response.focus_object is not None
-    assert check_response.focus_object.text == "国际粮食安全议题引发多方关注"
-    assert report_response.context_relation == "skill:/report"
-    assert report_response.skill_result["data"]["topic"] == "国际粮食安全议题引发多方关注"
-    assert "专题报告：国际粮食安全议题引发多方关注" in report_response.answer
-    assert "事实核查：继续核查" not in report_response.answer
-    assert "相关证据：0 条" not in report_response.answer
-    assert report_response.skill_result["data"]["sources"]
+    assert response.context_relation == "skill:/factcheck"
+    assert search.calls[0]["include_remote"] is True
+    assert "已启用外部实时搜索" in response.skill_result["data"]["source_notes"][0]
 
 
 def test_report_cleans_polluted_factcheck_title(services):
@@ -1655,6 +1942,50 @@ class EmptySearchService:
 
     async def search_external(self, query, category_scope, source_scope, max_results=8):
         return []
+
+
+class EnoughLocalWithExternalSearchService:
+    external_configured = True
+
+    def __init__(self):
+        self.external_calls = []
+
+    async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
+        return [
+            SearchResult(
+                source_id="local",
+                title=f"{query} 本地报道 {index}",
+                url=f"https://example.com/local-{index}",
+                summary=f"{query} 本地摘要 {index}",
+                category=(category_scope or ["tech"])[0],
+                published_at=datetime.now(timezone.utc),
+                score=1.0,
+                origin="local",
+            )
+            for index in range(7)
+        ]
+
+    async def search_external(self, query, category_scope, source_scope, max_results=8):
+        self.external_calls.append(
+            {
+                "query": query,
+                "category_scope": category_scope,
+                "source_scope": source_scope,
+                "max_results": max_results,
+            }
+        )
+        return [
+            SearchResult(
+                source_id="external",
+                title=f"{query} 联网报道",
+                url="https://example.com/external",
+                summary=f"{query} 联网摘要",
+                category=(category_scope or ["tech"])[0],
+                published_at=datetime.now(timezone.utc),
+                score=1.0,
+                origin="external",
+            )
+        ]
 
 
 class FakeRelatedMessage:

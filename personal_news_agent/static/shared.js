@@ -1001,11 +1001,19 @@ function renderMarkdown(markdown) {
       inList = false;
     }
   };
-  lines.forEach((line) => {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const trimmed = line.trim();
     if (!trimmed) {
       closeList();
-      return;
+      continue;
+    }
+    if (isMarkdownTableStart(lines, index)) {
+      closeList();
+      const table = renderMarkdownTable(lines, index);
+      html += table.html;
+      index = table.endIndex;
+      continue;
     }
     if (trimmed.startsWith("### ")) {
       closeList();
@@ -1029,9 +1037,44 @@ function renderMarkdown(markdown) {
       closeList();
       html += `<p>${renderInlineMarkdown(trimmed)}</p>`;
     }
-  });
+  }
   closeList();
   return html;
+}
+
+function isMarkdownTableStart(lines, index) {
+  return splitMarkdownTableRow(lines[index]).length > 1 && isMarkdownTableSeparator(lines[index + 1]);
+}
+
+function isMarkdownTableSeparator(line) {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function splitMarkdownTableRow(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed.includes("|")) return [];
+  return trimmed.replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+}
+
+function renderMarkdownTable(lines, startIndex) {
+  const headers = splitMarkdownTableRow(lines[startIndex]);
+  const rows = [];
+  let index = startIndex + 2;
+  while (index < lines.length) {
+    const cells = splitMarkdownTableRow(lines[index]);
+    if (!cells.length) break;
+    rows.push(cells);
+    index += 1;
+  }
+  const headerHtml = headers.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("");
+  const bodyHtml = rows
+    .map((row) => `<tr>${headers.map((_, columnIndex) => `<td>${renderInlineMarkdown(row[columnIndex] || "")}</td>`).join("")}</tr>`)
+    .join("");
+  return {
+    html: `<div class="markdown-table-wrap"><table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`,
+    endIndex: index - 1,
+  };
 }
 
 function renderInlineMarkdown(value) {
@@ -1083,12 +1126,6 @@ function bindAskButtons() {
 }
 
 const assistantSlashCommands = [
-  {
-    name: "check",
-    label: "继续核查",
-    description: "沿用上一条事实核查，联网补证据并重新判断",
-    icon: "↻",
-  },
   {
     name: "factcheck",
     label: "事实核查",
