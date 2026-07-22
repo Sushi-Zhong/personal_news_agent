@@ -100,9 +100,9 @@ python3 scripts/audit_sources.py --limit-due 20 --output source_audit_results.js
 python3 scripts/run_due_crawl.py --category tech --limit 5 --plan-only --output due_crawl_plan.json
 python3 scripts/run_due_crawl.py --category tech --limit 5 --fetch-articles 1 --output due_crawl_results.json
 python3 scripts/reindex_elasticsearch.py --limit 500
-python3 scripts/audit_source_search.py --query 张雪机车 --category sports --output source_search_audit_zhangxue_sports.json
-python3 scripts/ingest_native_search.py --query 张雪机车 --category sports --max-results 10 --fetch-articles 8 --output native_search_ingest_zhangxue_sports.json
-python3 scripts/deep_dive.py '俄乌战争 农作物' --category politics --output deep_dive_results.json
+python3 scripts/audit_source_search.py --query 机车赛事 --category sports --output source_search_audit_sports.json
+python3 scripts/ingest_native_search.py --query 机车赛事 --category sports --max-results 10 --fetch-articles 8 --output native_search_ingest_sports.json
+python3 scripts/deep_dive.py '国际局势 大宗商品' --category politics --output deep_dive_results.json
 python3 scripts/preview_feed.py \
   --user-id sports_preview \
   --preferred-category sports \
@@ -353,6 +353,18 @@ MVP 默认使用 SQLite FTS5 作为本地全文索引，已覆盖本地新闻库
 export EXTERNAL_SEARCH_PROVIDER=bing
 export BING_SEARCH_KEY=...
 ```
+
+Tavily 可作为当前推荐的实时全网搜索 provider：
+
+```bash
+export EXTERNAL_SEARCH_PROVIDER=tavily
+export TAVILY_API_KEY=tvly-...
+export TAVILY_SEARCH_DEPTH=basic
+export TAVILY_TRUST_ENV=0
+```
+
+聊天研究链路会在问题包含“今天、最新、实时、天气”等时效意图，或本地候选少于 3 条时调用一次外部搜索；普通且本地证据充足的问题不会消耗外部搜索额度。
+`TAVILY_TRUST_ENV=0` 默认忽略系统代理；只有确认本机 HTTP/SOCKS 代理可供 `httpx` 使用时才改为 `1`。
 
 检查后端：
 

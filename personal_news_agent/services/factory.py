@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from claude_code_backend import LocalAgentService
+
 from personal_news_agent.config import Settings
 from personal_news_agent.services.auth import AuthService
 from personal_news_agent.services.chat import NewsChatService
@@ -9,6 +11,7 @@ from personal_news_agent.services.content_moderation import TextModerationPlusSe
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
+from personal_news_agent.services.factcheck import FactCheckService
 from personal_news_agent.services.model_config import public_model_options
 from personal_news_agent.services.native_ingestion import NativeSearchIngestionService
 from personal_news_agent.services.onboarding import OnboardingService
@@ -23,6 +26,7 @@ from personal_news_agent.services.topic_agent import TopicAgentService
 from personal_news_agent.services.topic_extraction import TopicExtractionService
 from personal_news_agent.services.topic_views import TopicViewService
 from personal_news_agent.services.url_store import CrawlUrlStore, MySQLCrawlUrlStore
+from personal_news_agent.skills.registry import build_default_registry
 
 
 def build_services(settings: Settings) -> dict[str, Any]:
@@ -35,22 +39,16 @@ def build_services(settings: Settings) -> dict[str, Any]:
     native_ingestion = NativeSearchIngestionService(registry, store, url_store, search_index)
     topic_views = TopicViewService(store, search_service)
     deep_dive = DeepDiveService(search_service)
-    reports = ReportGenerationService(store, search_service)
+    local_agent = LocalAgentService()
+    reports = ReportGenerationService(store, search_service, local_agent=local_agent)
+    factcheck = FactCheckService(store, search_service, local_agent=local_agent)
     tasks = ScheduledTaskService(store, reports)
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
     content_moderation = TextModerationPlusService()
-    topic_extraction = TopicExtractionService(store)
-    chat = NewsChatService(
-        store,
-        search_service,
-        native_ingestion=native_ingestion,
-        deep_dive=deep_dive,
-        topic_views=topic_views,
-        topic_agent=topic_agent,
-        content_moderation=content_moderation,
-    )
 
-    return {
+    skill_registry = build_default_registry()
+    services: dict[str, Any] = {
+
         "registry": registry,
         "store": store,
         "url_store": url_store,
@@ -65,10 +63,27 @@ def build_services(settings: Settings) -> dict[str, Any]:
         "feed": PersonalizationService(store, registry),
         "model_options": public_model_options,
         "reports": reports,
+        "factcheck": factcheck,
         "tasks": tasks,
         "topic_agent": topic_agent,
         "topic_extraction": topic_extraction,
         "content_moderation": content_moderation,
-        "chat": chat,
+        "local_agent": local_agent,
+        "skill_registry": skill_registry,
         "crawl": CrawlScheduler(registry, store, url_store, search_index),
     }
+    topic_extraction = TopicExtractionService(store)
+    chat = NewsChatService(
+        store,
+        search_service,
+        native_ingestion=native_ingestion,
+        deep_dive=deep_dive,
+        topic_views=topic_views,
+        topic_agent=topic_agent,
+        content_moderation=content_moderation,
+        local_agent=local_agent,
+        skill_registry=skill_registry,
+        services=services,
+    )
+    services["chat"] = chat
+    return services

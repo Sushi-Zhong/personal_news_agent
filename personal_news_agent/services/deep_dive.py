@@ -25,7 +25,7 @@ class DeepDiveService:
         source_scope: list[str] | None = None,
         rounds: int = 2,
         breadth: int = 4,
-        include_remote: bool = True,
+        include_remote: bool = False,
     ) -> dict[str, Any]:
         seed_results = await self.search_service.search(query, category_scope, source_scope, None, max_results=max(6, breadth * 2), include_remote=include_remote)
         seed_payload = [item.model_dump(mode="json") for item in seed_results]
@@ -110,10 +110,9 @@ def _query_terms(query: str) -> list[str]:
 
 def _cold_start_expansions(query: str, breadth: int, had_seed_results: bool, category_scope: list[str] | None = None) -> list[ExpansionQuery]:
     scope = set(category_scope or [])
-    compact_query = query.replace(" ", "")
-    if "politics" in scope or any(token in compact_query for token in ("俄乌", "乌克兰", "俄罗斯", "战争", "冲突")):
-        vertical_terms = ["乌克兰", "俄罗斯", "前线战况", "和平谈判", "无人机袭击", "军事援助", "制裁", "停火"]
-        horizontal_terms = ["能源价格", "粮食出口", "黑海航运", "北约", "欧盟援助", "美国援助", "战俘交换", "安全保障"]
+    if "politics" in scope:
+        vertical_terms = ["时间线", "关键主体", "官方回应", "政策变化", "谈判进展", "地区局势", "争议点", "后续安排"]
+        horizontal_terms = ["经济影响", "供应链", "能源", "贸易", "国际关系", "安全风险", "市场反应", "民生影响"]
     elif "economy" in scope:
         vertical_terms = ["价格", "供应链", "政策", "出口", "进口", "库存", "企业", "市场"]
         horizontal_terms = ["能源", "粮食", "汇率", "通胀", "航运", "产业链", "消费", "投资"]

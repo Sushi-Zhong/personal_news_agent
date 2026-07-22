@@ -38,6 +38,12 @@ def model_options() -> list[ModelOption]:
             provider_model="qwen3.5-plus",
             description="通用增强模型，适合更完整的分析和报告。",
         ),
+        ModelOption(
+            key="deepseek-v4-flash",
+            name="DeepSeek V4 Flash",
+            provider_model="deepseek-v4-flash",
+            description="DeepSeek 快速非推理模型，适合新闻摘要、简报和日常问答。",
+        ),
     ]
 
 

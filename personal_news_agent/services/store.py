@@ -244,6 +244,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 CREATE TABLE IF NOT EXISTS pna_topics (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
+  conversation_id TEXT DEFAULT '',
   title TEXT NOT NULL,
   topic_type TEXT NOT NULL DEFAULT 'user',
   category_scope_json TEXT,
@@ -255,7 +256,7 @@ CREATE TABLE IF NOT EXISTS pna_topics (
   last_refresh_at TEXT,
   created_at TEXT,
   updated_at TEXT,
-  UNIQUE(user_id, title, topic_type)
+  UNIQUE(user_id, conversation_id, title, topic_type)
 );
 CREATE TABLE IF NOT EXISTS reports (
   id TEXT PRIMARY KEY,
@@ -268,10 +269,14 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE TABLE IF NOT EXISTS conversation_turns (
   id TEXT PRIMARY KEY,
   conversation_id TEXT NOT NULL,
+  user_id TEXT DEFAULT 'default',
   user_message TEXT NOT NULL,
   assistant_answer TEXT NOT NULL,
   recommendations_json TEXT,
   focus_object_json TEXT,
+  response_json TEXT,
+  topic TEXT,
+  category_scope_json TEXT,
   created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS operation_logs (
@@ -306,6 +311,8 @@ class NewsStore:
             self._ensure_news_source_columns(conn)
             self._ensure_pna_user_columns(conn)
             self._ensure_pna_profile_columns(conn)
+            self._ensure_conversation_turn_columns(conn)
+            self._ensure_topic_columns(conn)
             self._ensure_news_topic_article_columns(conn)
 
     def _ensure_news_topic_article_columns(self, conn: sqlite3.Connection) -> None:
@@ -351,6 +358,63 @@ class NewsStore:
         for name, definition in columns.items():
             if name not in existing:
                 conn.execute(f"ALTER TABLE pna_user_profiles ADD COLUMN {name} {definition}")
+
+    def _ensure_conversation_turn_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(conversation_turns)").fetchall()}
+        columns = {
+            "user_id": "TEXT DEFAULT 'default'",
+            "response_json": "TEXT",
+            "topic": "TEXT",
+            "category_scope_json": "TEXT",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE conversation_turns ADD COLUMN {name} {definition}")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_turns_lookup ON conversation_turns(conversation_id, user_id, created_at)"
+        )
+
+    def _ensure_topic_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(pna_topics)").fetchall()}
+        if "conversation_id" in existing:
+            return
+        conn.execute("ALTER TABLE pna_topics RENAME TO pna_topics_legacy")
+        conn.execute(
+            """
+            CREATE TABLE pna_topics (
+              id TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              conversation_id TEXT DEFAULT '',
+              title TEXT NOT NULL,
+              topic_type TEXT NOT NULL DEFAULT 'user',
+              category_scope_json TEXT,
+              source_scope_json TEXT,
+              watch_keywords_json TEXT,
+              refresh_schedule TEXT NOT NULL DEFAULT '*/20 * * * *',
+              task_id TEXT,
+              status TEXT DEFAULT 'active',
+              last_refresh_at TEXT,
+              created_at TEXT,
+              updated_at TEXT,
+              UNIQUE(user_id, conversation_id, title, topic_type)
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO pna_topics(
+              id, user_id, conversation_id, title, topic_type, category_scope_json,
+              source_scope_json, watch_keywords_json, refresh_schedule, task_id,
+              status, last_refresh_at, created_at, updated_at
+            )
+            SELECT
+              id, user_id, '', title, topic_type, category_scope_json,
+              source_scope_json, watch_keywords_json, refresh_schedule, task_id,
+              status, last_refresh_at, created_at, updated_at
+            FROM pna_topics_legacy
+            """
+        )
+        conn.execute("DROP TABLE pna_topics_legacy")
 
     def upsert_sources(self, sources: list[SourceConfig]) -> None:
         now = _now()
@@ -974,38 +1038,179 @@ class NewsStore:
             ).fetchall()
         return [_cluster_row(row) for row in rows]
 
-    def save_turn(self, conversation_id: str, user_message: str, assistant_answer: str, recommendations: list[dict[str, Any]], focus_object: dict[str, Any] | None) -> str:
+    def save_turn(
+        self,
+        conversation_id: str,
+        user_message: str,
+        assistant_answer: str,
+        recommendations: list[dict[str, Any]],
+        focus_object: dict[str, Any] | None,
+        *,
+        user_id: str = "default",
+        response: dict[str, Any] | None = None,
+        topic: str | None = None,
+        category_scope: list[str] | None = None,
+    ) -> str:
         turn_id = stable_id("turn", f"{conversation_id}:{user_message}:{_now()}")
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO conversation_turns(id, conversation_id, user_message, assistant_answer, recommendations_json, focus_object_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO conversation_turns(
+                    id, conversation_id, user_id, user_message, assistant_answer,
+                    recommendations_json, focus_object_json, response_json, topic,
+                    category_scope_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn_id,
                     conversation_id,
+                    user_id,
                     user_message,
                     assistant_answer,
                     json.dumps(recommendations, ensure_ascii=False, default=str),
                     json.dumps(focus_object, ensure_ascii=False, default=str) if focus_object else None,
+                    json.dumps(response, ensure_ascii=False, default=str) if response else None,
+                    topic,
+                    json.dumps(category_scope or [], ensure_ascii=False),
                     _now(),
                 ),
             )
         return turn_id
 
-    def last_turn(self, conversation_id: str) -> dict[str, Any] | None:
+    def last_turn(self, conversation_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        clause = "conversation_id = ?"
+        params: list[Any] = [conversation_id]
+        if user_id is not None:
+            clause += " AND user_id = ?"
+            params.append(user_id)
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT * FROM conversation_turns WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1",
-                (conversation_id,),
+                f"SELECT * FROM conversation_turns WHERE {clause} ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                params,
             ).fetchone()
+            if not row and user_id and user_id != "default":
+                row = conn.execute(
+                    """
+                    SELECT * FROM conversation_turns
+                    WHERE conversation_id = ? AND user_id = 'default'
+                    ORDER BY created_at DESC, rowid DESC LIMIT 1
+                    """,
+                    (conversation_id,),
+                ).fetchone()
         if not row:
             return None
-        data = _row(row)
-        data["recommendations"] = json.loads(data.get("recommendations_json") or "[]")
-        data["focus_object"] = json.loads(data.get("focus_object_json") or "null")
-        return data
+        return _conversation_turn_row(row)
+
+    def list_turns(self, conversation_id: str, user_id: str, limit: int = 40) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM conversation_turns
+                WHERE conversation_id = ? AND user_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (conversation_id, user_id, limit),
+            ).fetchall()
+            if not rows and user_id != "default":
+                rows = conn.execute(
+                    """
+                    SELECT * FROM conversation_turns
+                    WHERE conversation_id = ? AND user_id = 'default'
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT ?
+                    """,
+                    (conversation_id, limit),
+                ).fetchall()
+        return [_conversation_turn_row(row) for row in reversed(rows)]
+
+    def list_recent_turns(
+        self,
+        user_id: str,
+        limit: int = 20,
+        exclude_conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clause = "user_id = ?"
+        params: list[Any] = [user_id]
+        if exclude_conversation_id:
+            clause += " AND conversation_id != ?"
+            params.append(exclude_conversation_id)
+        params.append(limit)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM conversation_turns
+                WHERE {clause}
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            if not rows and user_id != "default":
+                fallback_clause = "user_id = 'default'"
+                fallback_params: list[Any] = []
+                if exclude_conversation_id:
+                    fallback_clause += " AND conversation_id != ?"
+                    fallback_params.append(exclude_conversation_id)
+                fallback_params.append(limit)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM conversation_turns
+                    WHERE {fallback_clause}
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT ?
+                    """,
+                    fallback_params,
+                ).fetchall()
+        return [_conversation_turn_row(row) for row in reversed(rows)]
+
+    def list_conversations(self, user_id: str, limit: int = 30) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        conversation_id,
+                        user_message,
+                        assistant_answer,
+                        topic,
+                        category_scope_json,
+                        created_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY conversation_id
+                            ORDER BY created_at ASC, rowid ASC
+                        ) AS first_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY conversation_id
+                            ORDER BY created_at DESC, rowid DESC
+                        ) AS last_rank,
+                        COUNT(*) OVER (PARTITION BY conversation_id) AS turn_count
+                    FROM conversation_turns
+                    WHERE user_id = ?
+                )
+                SELECT
+                    conversation_id,
+                    MAX(CASE WHEN first_rank = 1 THEN user_message END) AS first_message,
+                    MAX(CASE WHEN last_rank = 1 THEN user_message END) AS last_message,
+                    MAX(CASE WHEN last_rank = 1 THEN assistant_answer END) AS last_answer,
+                    MAX(CASE WHEN last_rank = 1 THEN topic END) AS topic,
+                    MAX(CASE WHEN last_rank = 1 THEN category_scope_json END) AS category_scope_json,
+                    MAX(created_at) AS updated_at,
+                    MAX(turn_count) AS turn_count
+                FROM ranked
+                GROUP BY conversation_id
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["category_scope"] = json.loads(item.pop("category_scope_json", None) or "[]")
+            items.append(item)
+        return items
 
     def save_report(self, user_id: str, topic: str, category_scope: list[str], report: dict[str, Any]) -> str:
         report_id = stable_id("rpt", f"{user_id}:{topic}:{_now()}")
@@ -1015,6 +1220,34 @@ class NewsStore:
                 (report_id, user_id, topic, json.dumps(category_scope, ensure_ascii=False), json.dumps(report, ensure_ascii=False, default=str), _now()),
             )
         return report_id
+
+    def get_report(self, report_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+        clause = "id = ?"
+        params: list[Any] = [report_id]
+        if user_id is not None:
+            clause += " AND user_id = ?"
+            params.append(user_id)
+        with self.connect() as conn:
+            row = conn.execute(f"SELECT * FROM reports WHERE {clause}", params).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        report = json.loads(data.pop("report_json") or "{}")
+        if isinstance(report, dict):
+            report.setdefault("report_id", data["id"])
+            report.setdefault("topic", data.get("topic") or "")
+            report.setdefault("category_scope", json.loads(data.get("category_scope_json") or "[]"))
+            report.setdefault("created_at", data.get("created_at"))
+            return report
+        return {
+            "report_id": data["id"],
+            "topic": data.get("topic") or "",
+            "category_scope": json.loads(data.get("category_scope_json") or "[]"),
+            "created_at": data.get("created_at"),
+            "sections": {},
+            "timeline": [],
+            "sources": [],
+        }
 
     def create_task(self, task: dict[str, Any]) -> dict[str, Any]:
         task_id = stable_id("task", f"{task.get('user_id')}:{task.get('task_type')}:{_now()}")
@@ -1152,17 +1385,21 @@ class NewsStore:
 
     def upsert_topic(self, topic: dict[str, Any]) -> dict[str, Any]:
         now = _now()
-        topic_id = topic.get("id") or stable_id("topic", f"{topic.get('user_id')}:{topic.get('topic_type', 'user')}:{topic['title']}")
+        conversation_id = topic.get("conversation_id") or ""
+        topic_id = topic.get("id") or stable_id(
+            "topic",
+            f"{topic.get('user_id')}:{conversation_id}:{topic.get('topic_type', 'user')}:{topic['title']}",
+        )
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO pna_topics(
-                  id, user_id, title, topic_type, category_scope_json, source_scope_json,
+                  id, user_id, conversation_id, title, topic_type, category_scope_json, source_scope_json,
                   watch_keywords_json, refresh_schedule, task_id, status, last_refresh_at,
                   created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, title, topic_type) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, conversation_id, title, topic_type) DO UPDATE SET
                   category_scope_json=excluded.category_scope_json,
                   source_scope_json=excluded.source_scope_json,
                   watch_keywords_json=excluded.watch_keywords_json,
@@ -1175,6 +1412,7 @@ class NewsStore:
                 (
                     topic_id,
                     topic.get("user_id", "default"),
+                    conversation_id,
                     topic["title"],
                     topic.get("topic_type", "user"),
                     json.dumps(topic.get("category_scope", []), ensure_ascii=False),
@@ -1189,8 +1427,8 @@ class NewsStore:
                 ),
             )
             row = conn.execute(
-                "SELECT * FROM pna_topics WHERE user_id = ? AND title = ? AND topic_type = ?",
-                (topic.get("user_id", "default"), topic["title"], topic.get("topic_type", "user")),
+                "SELECT * FROM pna_topics WHERE user_id = ? AND conversation_id = ? AND title = ? AND topic_type = ?",
+                (topic.get("user_id", "default"), conversation_id, topic["title"], topic.get("topic_type", "user")),
             ).fetchone()
         return _topic_row(row)
 
@@ -1207,10 +1445,19 @@ class NewsStore:
             row = conn.execute("SELECT * FROM pna_topics WHERE id = ?", (topic_id,)).fetchone()
         return _topic_row(row) if row else None
 
-    def list_topics(self, user_id: str | None = None, topic_type: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    def list_topics(
+        self,
+        user_id: str | None = None,
+        topic_type: str | None = None,
+        limit: int = 50,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         clauses = ["status = 'active'"]
         params: list[Any] = []
-        if user_id:
+        if user_id and conversation_id is not None:
+            clauses.append("((user_id = ? AND conversation_id = ?) OR topic_type = 'system')")
+            params.extend([user_id, conversation_id])
+        elif user_id:
             clauses.append("(user_id = ? OR topic_type = 'system')")
             params.append(user_id)
         if topic_type:
@@ -1321,6 +1568,28 @@ def _cluster_row(row: sqlite3.Row) -> dict[str, Any]:
     data["keywords"] = json.loads(data.pop("keywords_json") or "[]")
     data["entities"] = json.loads(data.pop("entities_json") or "[]")
     data["article_ids"] = json.loads(data.pop("article_ids_json") or "[]")
+    return data
+
+
+def _conversation_turn_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["recommendations"] = json.loads(data.pop("recommendations_json", None) or "[]")
+    data["focus_object"] = json.loads(data.pop("focus_object_json", None) or "null")
+    data["response"] = json.loads(data.pop("response_json", None) or "null")
+    data["category_scope"] = json.loads(data.pop("category_scope_json", None) or "[]")
+    if not data["response"]:
+        data["response"] = {
+            "conversation_id": data["conversation_id"],
+            "answer": data["assistant_answer"],
+            "markdown": data["assistant_answer"],
+            "context_relation": "restored_history",
+            "focus_object": data["focus_object"],
+            "recommendations": data["recommendations"],
+            "research_trace": [],
+            "evidence": [],
+            "expanded_queries": [],
+            "event_line": None,
+        }
     return data
 
 
