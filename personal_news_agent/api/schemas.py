@@ -38,6 +38,17 @@ class TopicViewRequest(BaseModel):
     max_articles: int = Field(default=16, ge=1, le=50)
 
 
+class TopicSummaryRequest(BaseModel):
+    user_id: str = "default"
+    topic: str
+    category_scope: list[str] | None = None
+    source_scope: list[str] | None = None
+    max_articles: int = Field(default=12, ge=1, le=30)
+    use_llm: bool = True
+    output_style: str = "结构化专题摘要"
+    save_report: bool = True
+
+
 class TopicCreateRequest(BaseModel):
     user_id: str = "default"
     text: str | None = None
@@ -89,7 +100,14 @@ class TaskRequest(BaseModel):
     source_scope: list[str] = []
     topics: list[str] = []
     output_style: str | None = None
+    raw_task_description: str | None = None
+    parsed_workflow: dict = Field(default_factory=dict)
     delivery_channel: str = "in_app"
+
+
+class ScheduleCommandRequest(BaseModel):
+    user_id: str = "default"
+    message: str
 
 
 class DueTasksRequest(BaseModel):

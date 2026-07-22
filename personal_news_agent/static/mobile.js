@@ -295,6 +295,9 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已保存跟踪：${mobileState.topic}`);
       return result;
     }
+    if (["schedule"].includes(command.name)) {
+      return sendChatIntoTurn(message, assistantNode);
+    }
     if (["feed"].includes(command.name)) {
       mobileCategory = commandArg(command, "cat", "category") || commandText(command) || "";
       mobileState.categoryScope = mobileCategory ? [mobileCategory] : [];
@@ -304,7 +307,7 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/search、/topic、/task、/deep、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/search、/topic、/task、/schedule、/deep、/feed。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);

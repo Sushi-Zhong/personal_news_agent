@@ -223,12 +223,15 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
   category_scope_json TEXT,
   source_scope_json TEXT,
   output_style TEXT,
+  raw_task_description TEXT,
+  parsed_workflow_json TEXT,
   delivery_channel TEXT DEFAULT 'in_app',
   enabled INTEGER DEFAULT 1,
   last_run_at TEXT,
   next_run_at TEXT,
   created_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user_next ON scheduled_tasks(user_id, enabled, next_run_at);
 CREATE TABLE IF NOT EXISTS notifications (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -241,6 +244,16 @@ CREATE TABLE IF NOT EXISTS notifications (
   read_at TEXT,
   created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS conversations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'chat',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at);
 CREATE TABLE IF NOT EXISTS pna_topics (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
@@ -272,8 +285,10 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
   assistant_answer TEXT NOT NULL,
   recommendations_json TEXT,
   focus_object_json TEXT,
+  payload_json TEXT,
   created_at TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_conversation_turns_conversation ON conversation_turns(conversation_id, created_at);
 CREATE TABLE IF NOT EXISTS operation_logs (
   id TEXT PRIMARY KEY,
   operation TEXT NOT NULL,
@@ -307,6 +322,23 @@ class NewsStore:
             self._ensure_pna_user_columns(conn)
             self._ensure_pna_profile_columns(conn)
             self._ensure_news_topic_article_columns(conn)
+            self._ensure_conversation_turn_columns(conn)
+            self._ensure_scheduled_task_columns(conn)
+
+    def _ensure_scheduled_task_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(scheduled_tasks)").fetchall()}
+        columns = {
+            "raw_task_description": "TEXT",
+            "parsed_workflow_json": "TEXT",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE scheduled_tasks ADD COLUMN {name} {definition}")
+
+    def _ensure_conversation_turn_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(conversation_turns)").fetchall()}
+        if "payload_json" not in existing:
+            conn.execute("ALTER TABLE conversation_turns ADD COLUMN payload_json TEXT")
 
     def _ensure_news_topic_article_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(news_topic_articles)").fetchall()}
@@ -974,13 +1006,65 @@ class NewsStore:
             ).fetchall()
         return [_cluster_row(row) for row in rows]
 
-    def save_turn(self, conversation_id: str, user_message: str, assistant_answer: str, recommendations: list[dict[str, Any]], focus_object: dict[str, Any] | None) -> str:
-        turn_id = stable_id("turn", f"{conversation_id}:{user_message}:{_now()}")
+    def get_or_create_conversation(self, user_id: str, kind: str = "chat", title: str = "对话") -> dict[str, Any]:
+        now = _now()
+        conversation_id = stable_id("conv", f"{user_id}:{kind}")
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO conversation_turns(id, conversation_id, user_message, assistant_answer, recommendations_json, focus_object_json, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO conversations(id, user_id, title, kind, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, kind) DO UPDATE SET
+                  title=excluded.title,
+                  updated_at=conversations.updated_at
+                """,
+                (conversation_id, user_id, title, kind, now, now),
+            )
+            row = conn.execute("SELECT * FROM conversations WHERE user_id = ? AND kind = ?", (user_id, kind)).fetchone()
+        return _conversation_row(row)
+
+    def list_conversations(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM conversations
+                WHERE user_id = ?
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (user_id, limit),
+            ).fetchall()
+        return [_conversation_row(row) for row in rows]
+
+    def list_turns(self, conversation_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM conversation_turns
+                WHERE conversation_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (conversation_id, limit),
+            ).fetchall()
+        return list(reversed([_turn_row(row) for row in rows]))
+
+    def save_turn(
+        self,
+        conversation_id: str,
+        user_message: str,
+        assistant_answer: str,
+        recommendations: list[dict[str, Any]],
+        focus_object: dict[str, Any] | None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        turn_id = stable_id("turn", f"{conversation_id}:{user_message}:{_now()}")
+        now = _now()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO conversation_turns(id, conversation_id, user_message, assistant_answer, recommendations_json, focus_object_json, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn_id,
@@ -989,9 +1073,11 @@ class NewsStore:
                     assistant_answer,
                     json.dumps(recommendations, ensure_ascii=False, default=str),
                     json.dumps(focus_object, ensure_ascii=False, default=str) if focus_object else None,
-                    _now(),
+                    json.dumps(payload or {}, ensure_ascii=False, default=str),
+                    now,
                 ),
             )
+            conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
         return turn_id
 
     def last_turn(self, conversation_id: str) -> dict[str, Any] | None:
@@ -1005,6 +1091,7 @@ class NewsStore:
         data = _row(row)
         data["recommendations"] = json.loads(data.get("recommendations_json") or "[]")
         data["focus_object"] = json.loads(data.get("focus_object_json") or "null")
+        data["payload"] = json.loads(data.get("payload_json") or "{}")
         return data
 
     def save_report(self, user_id: str, topic: str, category_scope: list[str], report: dict[str, Any]) -> str:
@@ -1022,8 +1109,12 @@ class NewsStore:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO scheduled_tasks(id, user_id, task_type, schedule_cron, topics_json, category_scope_json, source_scope_json, output_style, delivery_channel, enabled, next_run_at, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO scheduled_tasks(
+                  id, user_id, task_type, schedule_cron, topics_json, category_scope_json,
+                  source_scope_json, output_style, raw_task_description, parsed_workflow_json,
+                  delivery_channel, enabled, next_run_at, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -1034,6 +1125,8 @@ class NewsStore:
                     json.dumps(task.get("category_scope", []), ensure_ascii=False),
                     json.dumps(task.get("source_scope", []), ensure_ascii=False),
                     task.get("output_style"),
+                    task.get("raw_task_description"),
+                    json.dumps(task.get("parsed_workflow") or {}, ensure_ascii=False, default=str),
                     task.get("delivery_channel", "in_app"),
                     1,
                     task.get("next_run_at"),
@@ -1329,7 +1422,20 @@ def _task_row(row: sqlite3.Row) -> dict[str, Any]:
     data["topics"] = json.loads(data.pop("topics_json") or "[]")
     data["category_scope"] = json.loads(data.pop("category_scope_json") or "[]")
     data["source_scope"] = json.loads(data.pop("source_scope_json") or "[]")
+    data["parsed_workflow"] = json.loads(data.pop("parsed_workflow_json") or "{}")
     data["enabled"] = bool(data["enabled"])
+    return data
+
+
+def _conversation_row(row: sqlite3.Row) -> dict[str, Any]:
+    return dict(row)
+
+
+def _turn_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["recommendations"] = json.loads(data.pop("recommendations_json") or "[]")
+    data["focus_object"] = json.loads(data.pop("focus_object_json") or "null")
+    data["payload"] = json.loads(data.pop("payload_json") or "{}")
     return data
 
 

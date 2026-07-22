@@ -20,9 +20,11 @@ from personal_news_agent.api.schemas import (
     ProfileRequest,
     RegisterRequest,
     ReportRequest,
+    ScheduleCommandRequest,
     SearchRequest,
     TaskRequest,
     TopicCreateRequest,
+    TopicSummaryRequest,
     TopicViewRequest,
     mask_mobile,
     parse_range,
@@ -239,6 +241,19 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             max_articles=payload.max_articles,
         )
 
+    @app.post("/api/topics/summary")
+    async def topic_summary(payload: TopicSummaryRequest) -> dict[str, Any]:
+        return await services["topic_summary"].generate(
+            user_id=payload.user_id,
+            topic=payload.topic,
+            category_scope=payload.category_scope,
+            source_scope=payload.source_scope,
+            max_articles=payload.max_articles,
+            use_llm=payload.use_llm,
+            output_style=payload.output_style,
+            save_report=payload.save_report,
+        )
+
     @app.get("/api/topics")
     async def list_topics(user_id: str = "default", topic_type: str | None = None, limit: int = Query(default=50, ge=1, le=100)) -> dict[str, Any]:
         return {"items": services["topic_agent"].list_topics(user_id=user_id, topic_type=topic_type, limit=limit)}
@@ -311,9 +326,24 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/tasks/schedule")
+    async def create_schedule_task(payload: ScheduleCommandRequest) -> dict[str, Any]:
+        try:
+            return await services["tasks"].create_from_schedule_message(payload.user_id, payload.message)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/tasks")
     async def list_tasks(user_id: str = "default", limit: int = Query(default=50, ge=1, le=100)) -> dict[str, Any]:
         return {"items": services["tasks"].list_tasks(user_id=user_id, limit=limit)}
+
+    @app.get("/api/conversations")
+    async def list_conversations(user_id: str = "default", limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+        return {"items": store.list_conversations(user_id=user_id, limit=limit)}
+
+    @app.get("/api/conversations/{conversation_id}/turns")
+    async def list_conversation_turns(conversation_id: str, limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+        return {"items": store.list_turns(conversation_id=conversation_id, limit=limit)}
 
     @app.post("/api/tasks/due/run")
     async def run_due_tasks(payload: DueTasksRequest) -> dict[str, Any]:

@@ -21,6 +21,7 @@ from personal_news_agent.services.store import NewsStore
 from personal_news_agent.services.tasks import ScheduledTaskService
 from personal_news_agent.services.topic_agent import TopicAgentService
 from personal_news_agent.services.topic_extraction import TopicExtractionService
+from personal_news_agent.services.topic_summary import TopicSummaryService
 from personal_news_agent.services.topic_views import TopicViewService
 from personal_news_agent.services.url_store import CrawlUrlStore, MySQLCrawlUrlStore
 
@@ -36,7 +37,8 @@ def build_services(settings: Settings) -> dict[str, Any]:
     topic_views = TopicViewService(store, search_service)
     deep_dive = DeepDiveService(search_service)
     reports = ReportGenerationService(store, search_service)
-    tasks = ScheduledTaskService(store, reports)
+    topic_summary = TopicSummaryService(store, search_service)
+    tasks = ScheduledTaskService(store, reports, search_service=search_service, native_ingestion=native_ingestion)
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
     content_moderation = TextModerationPlusService()
     topic_extraction = TopicExtractionService(store)
@@ -47,6 +49,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
         deep_dive=deep_dive,
         topic_views=topic_views,
         topic_agent=topic_agent,
+        scheduled_tasks=tasks,
         content_moderation=content_moderation,
     )
 
@@ -65,6 +68,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
         "feed": PersonalizationService(store, registry),
         "model_options": public_model_options,
         "reports": reports,
+        "topic_summary": topic_summary,
         "tasks": tasks,
         "topic_agent": topic_agent,
         "topic_extraction": topic_extraction,

@@ -28,6 +28,7 @@ class NewsChatService:
         deep_dive: Any | None = None,
         topic_views: Any | None = None,
         topic_agent: Any | None = None,
+        scheduled_tasks: Any | None = None,
         content_moderation: Any | None = None,
     ):
         self.store = store
@@ -37,6 +38,7 @@ class NewsChatService:
         self.deep_dive = deep_dive
         self.topic_views = topic_views
         self.topic_agent = topic_agent
+        self.scheduled_tasks = scheduled_tasks
         self.content_moderation = content_moderation
 
     async def chat(
@@ -53,6 +55,10 @@ class NewsChatService:
         if moderation_response:
             self._save_response_turn(moderation_response, message)
             return moderation_response
+        schedule_response = await self._schedule_command_response(conv_id, user_id, message)
+        if schedule_response:
+            self._save_response_turn(schedule_response, message)
+            return schedule_response
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         ordinal = extract_ordinal(message) if not topic_response else None
         if topic_response:
@@ -81,6 +87,11 @@ class NewsChatService:
         if moderation_response:
             self._save_response_turn(moderation_response, message)
             yield {"type": "final", "response": moderation_response.model_dump(mode="json")}
+            return
+        schedule_response = await self._schedule_command_response(conv_id, user_id, message)
+        if schedule_response:
+            self._save_response_turn(schedule_response, message)
+            yield {"type": "final", "response": schedule_response.model_dump(mode="json")}
             return
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         if topic_response:
@@ -163,6 +174,39 @@ class NewsChatService:
             required_context_items=["topic_definition", "scheduled_task", "topic_refresh"],
             research_trace=trace,
             event_line=view.get("event_line"),
+        )
+
+    async def _schedule_command_response(self, conversation_id: str, user_id: str, message: str) -> ChatResponse | None:
+        if not self.scheduled_tasks or not str(message or "").strip().startswith("/schedule"):
+            return None
+        try:
+            result = await self.scheduled_tasks.create_from_schedule_message(user_id=user_id, message=message)
+        except ValueError as exc:
+            answer = f"定时任务没有创建成功：{exc}"
+            return ChatResponse(
+                conversation_id=conversation_id,
+                answer=answer,
+                markdown=answer,
+                context_relation="scheduled_push_invalid",
+                focus_object=FocusObject(type="scheduled_task", text="/schedule"),
+                required_context_items=["schedule_command"],
+                research_trace=[{"stage": "定时任务解析", "status": "error", "message": str(exc)}],
+            )
+        task = result["task"]
+        scheduled_conversation = result["conversation"]
+        answer = result["answer"]
+        return ChatResponse(
+            conversation_id=conversation_id,
+            answer=answer,
+            markdown=answer,
+            context_relation="scheduled_push_created",
+            focus_object=FocusObject(type="scheduled_task", target_id=task["id"], text=(task.get("topics") or [""])[0]),
+            required_context_items=["scheduled_task", "scheduled_push_conversation"],
+            research_trace=[
+                {"stage": "定时任务解析", "status": "completed", "message": f"已解析为 cron：{task['schedule']}"},
+                {"stage": "任务落库", "status": "completed", "message": f"任务 {task['id']} 已保存。"},
+                {"stage": "推送对话", "status": "completed", "message": f"将推送到 {scheduled_conversation['title']}。"},
+            ],
         )
 
     async def _moderate_query(self, conversation_id: str, message: str) -> ChatResponse | None:

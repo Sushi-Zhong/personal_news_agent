@@ -17,8 +17,9 @@ from personal_news_agent.services.search import UnifiedSearchService
 from personal_news_agent.services.source_adapter import ListPageAdapter
 from personal_news_agent.services.source_registry import SourceRegistryService
 from personal_news_agent.services.store import NewsStore
-from personal_news_agent.services.tasks import ScheduledTaskService
+from personal_news_agent.services.tasks import ScheduledTaskService, parse_schedule_command
 from personal_news_agent.services.topic_views import TopicViewService
+from personal_news_agent.services.topic_summary import TopicSummaryOutput, TopicSummaryService
 
 
 @pytest.fixture()
@@ -217,6 +218,51 @@ def test_topic_view_builds_event_line_and_relation_graph(services):
     assert payload["relation_graph"]["nodes"][0]["type"] == "topic"
 
 
+def test_topic_summary_skill_generates_structured_markdown(services):
+    _, store, search = services
+    service = TopicSummaryService(store, search, llm=type("FakeLLM", (), {"configured": False})())
+    payload = asyncio.run(
+        service.generate(
+            user_id="default",
+            topic="新能源汽车价格战",
+            category_scope=["auto", "economy"],
+            max_articles=8,
+            use_llm=False,
+        )
+    )
+
+    assert payload["report_id"].startswith("rpt_")
+    assert payload["summary"]["sections"]
+    assert payload["summary"]["timeline"]
+    assert payload["summary"]["graph"]["nodes"]
+    assert "## 时间线" in payload["markdown"]
+    assert "## 人物/事件图谱" in payload["markdown"]
+
+
+def test_topic_summary_skill_accepts_llm_structured_output(services):
+    _, store, search = services
+    service = TopicSummaryService(store, search, llm=FakeTopicSummaryLLM())
+    payload = asyncio.run(
+        service.generate(
+            user_id="default",
+            topic="新能源汽车价格战",
+            category_scope=["auto"],
+            max_articles=4,
+            use_llm=True,
+        )
+    )
+
+    assert payload["summary"]["title"] == "新能源汽车价格战专题"
+    assert payload["summary"]["graph"]["edges"][0]["label"] == "影响"
+    assert payload["summary"]["sections"][0]["evidence_indices"] == [1]
+
+
+def test_topic_summary_schema_requires_every_output_field():
+    schema = TopicSummaryOutput.model_json_schema()
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["additionalProperties"] is False
+
+
 def test_scheduled_task_runs_and_generates_report(services):
     _, store, search = services
     reports = ReportGenerationService(store, search)
@@ -263,6 +309,135 @@ def test_due_tasks_create_notifications(services):
     assert result["ran_count"] == 1
     assert result["notifications"][0]["delivery_channel"] == "browser"
     assert store.get_task(task["id"])["next_run_at"] > past
+
+
+def test_schedule_command_creates_push_and_appends_conversation(services):
+    _, store, search = services
+    reports = ReportGenerationService(store, search)
+    fake_llm = type("FakeLLM", (), {"configured": False})()
+    tasks = ScheduledTaskService(store, reports, llm_client=fake_llm)
+
+    created = asyncio.run(
+        tasks.create_from_schedule_message(
+            "schedule_user",
+            "/schedule 帮我定时每天早晨9点收集关于AI Agent的新闻，并总结成一个专题发给我",
+        )
+    )
+
+    assert created["task"]["task_type"] == "scheduled_push"
+    assert created["task"]["schedule"] == "0 9 * * *"
+    assert created["task"]["topics"] == ["AI Agent"]
+    assert created["task"]["raw_task_description"].startswith("/schedule")
+    assert created["task"]["parsed_workflow"]["report_style"]["sections"]
+    assert created["conversation"]["kind"] == "scheduled_push"
+    turns = store.list_turns(created["conversation"]["id"])
+    assert turns[-1]["payload"]["type"] == "scheduled_task_created"
+    assert turns[-1]["payload"]["api_params"]["parsed_workflow"]["fetch_strategy"]["max_sources"] == 3
+
+    result = asyncio.run(tasks.run_task(created["task"]["id"]))
+    assert result["status"] == "ok"
+    assert result["conversation_id"] == created["conversation"]["id"]
+    assert result["notification"]["target_type"] == "conversation"
+    assert result["evidence_count"] >= 1
+    push_turns = store.list_turns(created["conversation"]["id"])
+    assert any(turn["payload"].get("type") == "scheduled_push_result" for turn in push_turns)
+
+
+def test_parse_weekly_schedule_command():
+    parsed = parse_schedule_command("/schedule 每周一上午8点给我关于世界杯的新闻专题")
+    assert parsed["schedule"] == "0 8 * * 1"
+    assert parsed["topic"] == "世界杯"
+
+
+def test_schedule_command_uses_llm_standard_api_params(services):
+    _, store, search = services
+    reports = ReportGenerationService(store, search)
+    tasks = ScheduledTaskService(store, reports, llm_client=FakeScheduleLLM())
+
+    created = asyncio.run(
+        tasks.create_from_schedule_message(
+            "llm_schedule_user",
+            "/schedule 每天上午9点收集关于俄乌冲突的新闻，并总结成一个简短军事早报发给我",
+        )
+    )
+
+    task = store.get_task(created["task"]["id"])
+    assert task["user_id"] == "llm_schedule_user"
+    assert task["task_type"] == "scheduled_push"
+    assert task["schedule_cron"] == "0 9 * * *"
+    assert task["topics"] == ["俄乌冲突"]
+    assert task["category_scope"] == ["military"]
+    assert task["raw_task_description"].startswith("/schedule 每天上午9点")
+    assert task["parsed_workflow"]["search_queries"] == ["俄乌冲突 最新", "俄乌冲突 军事动态"]
+    assert task["output_style"] == "简短军事早报"
+    assert task["parsed_workflow"]["report_style"]["name"] == "简短军事早报"
+
+
+class FakeScheduleLLM:
+    configured = True
+
+    async def structured(self, messages, schema_name, schema, model_key=None):
+        return {
+            "user_id": "wrong_user_should_be_ignored",
+            "task_type": "scheduled_push",
+            "schedule": "0 9 * * *",
+            "topics": ["俄乌冲突"],
+            "category_scope": "military",
+            "source_scope": "",
+            "output_style": "军事早报",
+            "delivery_channel": "in_app",
+            "raw_task_description": "/schedule 每天上午9点收集关于俄乌冲突的新闻，按军事早报发给我",
+            "parsed_workflow": {
+                "intent_summary": "每天收集俄乌冲突相关新闻并生成军事早报。",
+                "search_queries": ["俄乌冲突 最新", "俄乌冲突 军事动态"],
+                "category_scope": "military",
+                "source_scope": "",
+                "fetch_strategy": {"mode": "search_then_fetch", "max_results": 16, "fetch_articles": 8, "max_sources": 4, "time_range_days": 3},
+                "report_style": {"name": "军事早报", "tone": "简洁", "sections": ["导语", "核心事件", "影响", "来源"], "length": "600字"},
+                "delivery": {"target": "Scheduled Push", "channel": "in_app"},
+            },
+        }
+
+
+class FakeTopicSummaryLLM:
+    configured = True
+
+    async def structured(self, messages, schema_name, schema, model_key=None):
+        return {
+            "title": "新能源汽车价格战专题",
+            "lead": "多家车企调整价格与权益，市场关注库存、利润和消费者观望。",
+            "sections": [
+                {
+                    "title": "核心事件",
+                    "body": "价格和权益调整成为近期主线。",
+                    "bullets": ["车企调整主力车型价格", "经销商库存和利润承压"],
+                    "evidence_indices": [1],
+                }
+            ],
+            "timeline": [
+                {
+                    "date": "2026-07-14",
+                    "title": "价格战进入新阶段",
+                    "summary": "车企调整价格和权益。",
+                    "stage": "latest",
+                    "actors": ["车企"],
+                    "evidence_indices": [1],
+                }
+            ],
+            "graph": {
+                "nodes": [
+                    {"id": "topic", "label": "新能源汽车价格战", "type": "topic", "description": "专题中心", "evidence_indices": [1]},
+                    {"id": "car_companies", "label": "车企", "type": "organization", "description": "调价主体", "evidence_indices": [1]},
+                ],
+                "edges": [
+                    {"source": "topic", "target": "car_companies", "label": "影响", "description": "价格战影响车企利润。", "evidence_indices": [1]}
+                ],
+            },
+            "analysis": ["价格竞争短期利好消费者，但会压缩渠道利润。"],
+            "uncertainty": ["需要更多销量和库存数据验证。"],
+            "markdown": "",
+            "confidence": 0.72,
+        }
 
 
 class FakeArticleIndex:

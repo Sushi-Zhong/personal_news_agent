@@ -188,6 +188,17 @@ def test_api_chat_report_and_task_flow():
         assert topic_payload["event_line"]["items"]
         assert topic_payload["relation_graph"]["nodes"]
 
+        topic_summary = client.post(
+            "/api/topics/summary",
+            json={"topic": "新能源汽车价格战", "category_scope": ["auto", "economy"], "max_articles": 8, "use_llm": False},
+        )
+        assert topic_summary.status_code == 200
+        summary_payload = topic_summary.json()
+        assert summary_payload["report_id"].startswith("rpt_")
+        assert summary_payload["summary"]["sections"]
+        assert summary_payload["summary"]["graph"]["nodes"]
+        assert "## 时间线" in summary_payload["markdown"]
+
         task = client.post(
             "/api/tasks",
             json={
@@ -234,6 +245,38 @@ def test_api_chat_report_and_task_flow():
         due = client.post("/api/tasks/due/run", json={"user_id": due_user_id, "limit": 3})
         assert due.status_code == 200
         assert due.json()["ran_count"] == 1
+
+        schedule_user_id = f"api_schedule_user_{uuid4().hex[:8]}"
+        task_service = client.app.state.services["tasks"]
+        original_llm = task_service.llm_client
+        task_service.llm_client = type("FakeLLM", (), {"configured": False})()
+        try:
+            schedule_api = client.post(
+                "/api/tasks/schedule",
+                json={
+                    "user_id": schedule_user_id,
+                    "message": "/schedule 帮我定时每天早晨9点收集关于AI Agent的新闻，并总结成一个专题发给我",
+                },
+            )
+            assert schedule_api.status_code == 200
+            assert schedule_api.json()["api_params"]["parsed_workflow"]["report_style"]["sections"]
+
+            schedule_chat = client.post(
+                "/api/chat",
+                json={
+                    "conversation_id": "api_schedule_conv",
+                    "user_id": schedule_user_id,
+                    "message": "/schedule 帮我定时每天早晨9点收集关于AI Agent的新闻，并总结成一个专题发给我",
+                },
+            )
+        finally:
+            task_service.llm_client = original_llm
+        assert schedule_chat.status_code == 200
+        assert schedule_chat.json()["context_relation"] == "scheduled_push_created"
+        conversations = client.get(f"/api/conversations?user_id={schedule_user_id}")
+        assert conversations.status_code == 200
+        scheduled_push = [item for item in conversations.json()["items"] if item["kind"] == "scheduled_push"]
+        assert scheduled_push
 
 
 def test_topic_agent_creates_user_topic_and_chat_tracking():
