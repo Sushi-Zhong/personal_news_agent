@@ -1,0 +1,22 @@
+[Unit]
+Description=Personal News Agent web service
+After=network-online.target
+Wants=network-online.target
+PartOf=personal-news.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_GROUP__
+WorkingDirectory=__PROJECT_DIR__
+Environment=PYTHONUNBUFFERED=1
+UMask=0027
+ExecStart=__PROJECT_DIR__/scripts/run_web_service.sh
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+
+[Install]
+WantedBy=personal-news.target

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+from typing import Callable
+
+from personal_news_agent.services.article_fetch import canonicalize_url
 from personal_news_agent.core.models import NormalizedArticle, SectionConfig, SourceConfig
 from personal_news_agent.services.search_index import ArticleSearchIndex
 from personal_news_agent.services.source_adapter import ListPageAdapter
@@ -9,18 +14,27 @@ from personal_news_agent.services.url_store import CrawlUrlStore
 
 
 class CrawlScheduler:
-    def __init__(self, registry: SourceRegistryService, store: NewsStore, url_store: CrawlUrlStore | None = None, search_index: ArticleSearchIndex | None = None):
+    def __init__(
+        self,
+        registry: SourceRegistryService,
+        store: NewsStore,
+        url_store: CrawlUrlStore | None = None,
+        search_index: ArticleSearchIndex | None = None,
+        adapter_factory: Callable[[SourceConfig], ListPageAdapter] | None = None,
+    ):
         self.registry = registry
         self.store = store
         self.url_store = url_store or CrawlUrlStore()
         self.search_index = search_index or ArticleSearchIndex()
+        self.adapter_factory = adapter_factory or ListPageAdapter
+        self._round_lock = asyncio.Lock()
 
     async def crawl_category(self, category: str, per_section_limit: int = 10, fetch_articles: int = 1) -> dict:
         results: list[dict] = []
         for source in self.registry.get_sources_by_category(category):
             if not source.crawl_enabled:
                 continue
-            adapter = ListPageAdapter(source)
+            adapter = self.adapter_factory(source)
             for section in source.sections:
                 if section.category != category or not section.crawl_enabled:
                     continue
@@ -47,35 +61,81 @@ class CrawlScheduler:
             "mysql_ready": self.url_store.ready,
         }
 
-    async def crawl_due(self, category: str | None = None, limit: int = 20, per_section_limit: int = 10, fetch_articles: int = 1) -> dict:
+    async def crawl_due(
+        self,
+        category: str | None = None,
+        limit: int = 20,
+        per_section_limit: int = 10,
+        fetch_articles: int = 1,
+        workers: int = 2,
+    ) -> dict:
+        if self._round_lock.locked():
+            return {"status": "skipped", "reason": "crawl_round_in_progress", "planned_sections": 0, "results": [], "saved_articles": 0, "errors": 0}
+        async with self._round_lock:
+            return await self._crawl_due_round(category, limit, per_section_limit, fetch_articles, workers)
+
+    async def _crawl_due_round(self, category: str | None, limit: int, per_section_limit: int, fetch_articles: int, workers: int) -> dict:
         due_sections = [section for section in self._due_sections(category=category, limit=limit) if section["due"]]
-        results: list[dict] = []
+        queue: asyncio.Queue[dict | None] = asyncio.Queue()
         for due in due_sections:
-            source = self.registry.get_source(due["source_id"])
-            section = next((item for item in source.sections if item.key == due["section_key"]), None)
-            if not section:
-                continue
-            adapter = ListPageAdapter(source)
-            results.append(
-                await self._crawl_section(
-                    adapter=adapter,
-                    source=source,
-                    section=section,
-                    operation="crawl_due_section",
-                    per_section_limit=per_section_limit,
-                    fetch_articles=fetch_articles,
-                    include_category=True,
-                    include_error_tags=True,
-                )
-            )
+            queue.put_nowait(due)
+        worker_count = min(max(1, int(workers)), 4, max(1, len(due_sections)))
+        results: list[dict] = []
+
+        async def run_worker(worker_id: int) -> None:
+            while True:
+                due = await queue.get()
+                if due is None:
+                    queue.task_done()
+                    return
+                try:
+                    try:
+                        result = await self._crawl_due_section(due, per_section_limit, fetch_articles)
+                    except Exception as exc:
+                        result = {
+                            "source_id": due.get("source_id"),
+                            "section_key": due.get("section_key"),
+                            "error": str(exc),
+                        }
+                    result["worker_id"] = worker_id
+                    results.append(result)
+                finally:
+                    queue.task_done()
+
+        tasks = [asyncio.create_task(run_worker(index + 1)) for index in range(worker_count)]
+        for _ in tasks:
+            queue.put_nowait(None)
+        await queue.join()
+        await asyncio.gather(*tasks)
+        results.sort(key=lambda item: (item.get("source_id", ""), item.get("section_key", "")))
         return {
+            "status": "completed",
             "category": category,
+            "workers": worker_count,
             "planned_sections": len(due_sections),
             "results": results,
             "saved_articles": sum(item.get("saved", 0) for item in results),
+            "duplicate_articles": sum(item.get("duplicates", 0) for item in results),
+            "skipped_articles": sum(item.get("skipped", 0) for item in results),
             "errors": sum(1 for item in results if "error" in item),
             "mysql_ready": self.url_store.ready,
         }
+
+    async def _crawl_due_section(self, due: dict, per_section_limit: int, fetch_articles: int) -> dict:
+        source = self.registry.get_source(due["source_id"])
+        section = next((item for item in source.sections if item.key == due["section_key"]), None)
+        if not section:
+            return {"source_id": due["source_id"], "section_key": due["section_key"], "error": "section_not_found"}
+        return await self._crawl_section(
+            adapter=self.adapter_factory(source),
+            source=source,
+            section=section,
+            operation="crawl_due_section",
+            per_section_limit=per_section_limit,
+            fetch_articles=fetch_articles,
+            include_category=True,
+            include_error_tags=True,
+        )
 
     def _due_sections(self, category: str | None, limit: int) -> list[dict]:
         mysql_due = self.url_store.list_due(category=category, limit=limit, url_type="section")
@@ -83,13 +143,17 @@ class CrawlScheduler:
             return [_mysql_due_to_section(item) for item in mysql_due]
         return self.store.due_sections(category=category, limit=limit)
 
-    async def _save_article(self, article: NormalizedArticle, interval_minutes: int) -> None:
-        self.store.save_article(article)
-        self.url_store.mark_fetch_ok(article.url, article_id=article.id, content_hash=article.content_hash, interval_minutes=interval_minutes)
+    async def _save_article(self, article: NormalizedArticle, interval_minutes: int) -> dict:
+        saved = self.store.save_article(article)
+        article_id = saved["article_id"]
+        self.url_store.mark_fetch_ok(article.url, article_id=article_id, content_hash=article.content_hash, interval_minutes=interval_minutes)
+        if saved["duplicate"]:
+            return saved
         try:
             await self.search_index.index_article(article.__dict__)
         except Exception as exc:
             self.store.log("index_article", "error", article.id, {"error": str(exc), "url": article.url})
+        return saved
 
     async def _crawl_section(
         self,
@@ -106,23 +170,41 @@ class CrawlScheduler:
         if include_category:
             base["category"] = section.category
         try:
-            links = await adapter.crawl_section(section.key, per_section_limit)
+            discovered_links = await adapter.crawl_section(section.key, per_section_limit)
+            links = []
+            seen_urls: set[str] = set()
+            for link in discovered_links:
+                canonical_url = canonicalize_url(link.url)
+                if canonical_url in seen_urls:
+                    continue
+                seen_urls.add(canonical_url)
+                links.append(replace(link, url=canonical_url))
             self.url_store.upsert_links(source, section.key, section.category, links)
             saved = 0
+            duplicates = 0
+            skipped = 0
+            attempted = 0
             for link in links:
+                if attempted >= fetch_articles:
+                    break
+                if self.store.find_article_by_url(link.url):
+                    skipped += 1
+                    continue
+                attempted += 1
                 try:
                     raw = await adapter.fetch_article(link.url)
                     normalized = adapter.normalize_article(raw, section.key, section.category)
-                    await self._save_article(normalized, source.crawl_interval_minutes)
-                    saved += 1
-                    if saved >= fetch_articles:
-                        break
+                    result = await self._save_article(normalized, source.crawl_interval_minutes)
+                    if result["duplicate"]:
+                        duplicates += 1
+                    else:
+                        saved += 1
                 except Exception as exc:
                     self.url_store.mark_fetch_error(link.url, str(exc), source.crawl_interval_minutes)
                     self.store.log("fetch_article", "error", link.url, {"error": str(exc)})
             self.store.mark_section_crawled(source.source_id, section.key)
             self.url_store.mark_fetch_ok(section.url, interval_minutes=source.crawl_interval_minutes)
-            result = base | {"links": len(links), "saved": saved, "tags": list(source.tags)}
+            result = base | {"links": len(links), "attempted": attempted, "saved": saved, "duplicates": duplicates, "skipped": skipped, "tags": list(source.tags)}
             self.store.log(operation, "ok", f"{source.source_id}:{section.key}", result)
             return result
         except Exception as exc:

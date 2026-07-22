@@ -286,6 +286,18 @@ sources:
         category: economy
         url: https://finance.sina.com.cn/
         crawl_strategy: list_page
+      - key: stock
+        name: 新浪财经股票
+        category: economy
+        url: https://finance.sina.com.cn/stock/
+        crawl_strategy: list_page
+        tags: [stock, market]
+      - key: rolling
+        name: 新浪财经滚动资讯
+        category: economy
+        url: https://finance.sina.com.cn/roll/
+        crawl_strategy: list_page
+        tags: [breaking, rolling]
     search:
       strategy: external_first
       domain_filters: [finance.sina.com.cn, sina.com.cn]
@@ -304,6 +316,12 @@ sources:
         category: economy
         url: https://finance.ifeng.com/
         crawl_strategy: list_page
+      - key: stock
+        name: 凤凰财经股票
+        category: economy
+        url: https://finance.ifeng.com/stock/
+        crawl_strategy: list_page
+        tags: [stock, market]
     search:
       strategy: external_first
       domain_filters: [finance.ifeng.com, ifeng.com]
@@ -321,6 +339,12 @@ sources:
         category: economy
         url: https://business.sohu.com/
         crawl_strategy: list_page
+      - key: stock
+        name: 搜狐财经股票
+        category: economy
+        url: https://www.sohu.com/xchannel/tag?key=%E8%B4%A2%E7%BB%8F-%E8%82%A1%E7%A5%A8
+        crawl_strategy: list_page
+        tags: [stock, market]
     search:
       strategy: external_first
       domain_filters: [business.sohu.com, sohu.com]
@@ -355,6 +379,24 @@ sources:
         category: economy
         url: https://www.jiemian.com/
         crawl_strategy: list_page
+      - key: finance
+        name: 界面金融
+        category: economy
+        url: https://www.jiemian.com/lists/9.html
+        crawl_strategy: list_page
+        tags: [finance]
+      - key: stock
+        name: 界面证券
+        category: economy
+        url: https://www.jiemian.com/lists/112.html
+        crawl_strategy: list_page
+        tags: [stock, market]
+      - key: macro
+        name: 界面宏观
+        category: economy
+        url: https://www.jiemian.com/lists/174.html
+        crawl_strategy: list_page
+        tags: [macro, policy]
     search:
       strategy: external_first
       domain_filters: [jiemian.com, www.jiemian.com]
@@ -510,9 +552,156 @@ sources:
         category: game
         url: https://www.gamersky.com/news/
         crawl_strategy: list_page
+      - key: online_game
+        name: 游民星空网游资讯
+        category: game
+        url: https://ol.gamersky.com/news/
+        crawl_strategy: list_page
+        tags: [online_game]
     search:
       strategy: external_first
       domain_filters: [gamersky.com, www.gamersky.com, ol.gamersky.com, shouyou.gamersky.com]
+  - source_id: zol_digital
+    name: 中关村在线数码
+    root_domain: zol.com.cn
+    source_type: portal
+    priority: 2
+    crawl_enabled: true
+    search_enabled: true
+    categories: [digital]
+    tags: [digital, mobile, hardware, consumer_electronics]
+    crawl_interval_minutes: 15
+    sections:
+      - key: digital
+        name: 中关村在线数码新闻
+        category: digital
+        url: https://news.zol.com.cn/
+        crawl_strategy: list_page
+        tags: [mobile, hardware]
+      - key: mobile
+        name: 中关村在线手机
+        category: digital
+        url: https://mobile.zol.com.cn/
+        crawl_strategy: list_page
+        tags: [mobile]
+      - key: notebook
+        name: 中关村在线笔记本
+        category: digital
+        url: https://nb.zol.com.cn/
+        crawl_strategy: list_page
+        tags: [notebook, hardware]
+      - key: diy
+        name: 中关村在线DIY硬件
+        category: digital
+        url: https://diy.zol.com.cn/
+        crawl_strategy: list_page
+        tags: [diy, hardware]
+    search:
+      strategy: external_first
+      domain_filters: [zol.com.cn, news.zol.com.cn, mobile.zol.com.cn, nb.zol.com.cn, diy.zol.com.cn]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 20}
+  - source_id: pconline_digital
+    name: 太平洋科技数码
+    root_domain: pconline.com.cn
+    source_type: portal
+    priority: 3
+    crawl_enabled: true
+    search_enabled: true
+    categories: [digital]
+    tags: [digital, mobile, hardware, consumer_electronics]
+    crawl_interval_minutes: 15
+    sections:
+      - key: digital
+        name: 太平洋科技资讯
+        category: digital
+        url: https://news.pconline.com.cn/
+        crawl_strategy: list_page
+        tags: [mobile, hardware]
+      - key: mobile
+        name: 太平洋科技手机
+        category: digital
+        url: https://mobile.pconline.com.cn/
+        crawl_strategy: list_page
+        tags: [mobile]
+      - key: notebook
+        name: 太平洋科技笔记本
+        category: digital
+        url: https://notebook.pconline.com.cn/
+        crawl_strategy: list_page
+        tags: [notebook, hardware]
+      - key: diy
+        name: 太平洋科技DIY硬件
+        category: digital
+        url: https://diy.pconline.com.cn/
+        crawl_strategy: list_page
+        tags: [diy, hardware]
+    search:
+      strategy: external_first
+      domain_filters: [pconline.com.cn, news.pconline.com.cn, mobile.pconline.com.cn, notebook.pconline.com.cn, diy.pconline.com.cn]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 20}
+  - source_id: china_military
+    name: 中国军网
+    root_domain: 81.cn
+    source_type: portal
+    priority: 1
+    crawl_enabled: true
+    search_enabled: true
+    categories: [military]
+    tags: [military, defense, official, state_media]
+    crawl_interval_minutes: 15
+    sections:
+      - key: military
+        name: 中国军网要闻
+        category: military
+        url: https://www.81.cn/yw_208727/index.html
+        crawl_strategy: list_page
+        tags: [defense, official]
+    search:
+      strategy: external_first
+      domain_filters: [81.cn, www.81.cn]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 20}
+  - source_id: china_com_military
+    name: 中华网军事
+    root_domain: military.china.com
+    source_type: portal
+    priority: 2
+    crawl_enabled: true
+    search_enabled: true
+    categories: [military]
+    tags: [military, defense, international]
+    crawl_interval_minutes: 15
+    sections:
+      - key: military
+        name: 中华网军事新闻
+        category: military
+        url: https://military.china.com/news/
+        crawl_strategy: list_page
+        tags: [defense, international]
+    search:
+      strategy: external_first
+      domain_filters: [military.china.com, china.com]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 20}
+  - source_id: sohu_military
+    name: 搜狐军事
+    root_domain: mil.sohu.com
+    source_type: portal
+    priority: 3
+    crawl_enabled: true
+    search_enabled: true
+    categories: [military]
+    tags: [military, defense, international]
+    crawl_interval_minutes: 15
+    sections:
+      - key: military
+        name: 搜狐军事资讯
+        category: military
+        url: https://mil.sohu.com/
+        crawl_strategy: list_page
+        tags: [defense, international]
+    search:
+      strategy: external_first
+      domain_filters: [mil.sohu.com, sohu.com]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 20}
   - source_id: 3dm
     name: 3DM
     root_domain: 3dmgame.com
@@ -564,6 +753,26 @@ sources:
     search:
       strategy: external_first
       domain_filters: [ali213.net, www.ali213.net]
+  - source_id: sohu_game
+    name: 搜狐游戏
+    root_domain: game.sohu.com
+    source_type: portal
+    priority: 3
+    crawl_enabled: true
+    search_enabled: true
+    categories: [game]
+    tags: [game, pc_game, console_game]
+    crawl_interval_minutes: 15
+    sections:
+      - key: game
+        name: 搜狐游戏资讯
+        category: game
+        url: https://game.sohu.com/
+        crawl_strategy: list_page
+    search:
+      strategy: external_first
+      domain_filters: [game.sohu.com, sohu.com]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 20}
   - source_id: gamersky_acg
     name: 游民星空ACG
     root_domain: acg.gamersky.com
@@ -578,6 +787,12 @@ sources:
         category: anime
         url: https://acg.gamersky.com/
         crawl_strategy: list_page
+      - key: anime_news
+        name: 游民星空动漫资讯
+        category: anime
+        url: https://acg.gamersky.com/news/
+        crawl_strategy: list_page
+        tags: [anime_news]
     search:
       strategy: external_first
       domain_filters: [acg.gamersky.com, gamersky.com]
@@ -683,6 +898,30 @@ sources:
         category: entertainment
         url: https://ent.ifeng.com/
         crawl_strategy: list_page
+      - key: star
+        name: 凤凰娱乐明星
+        category: entertainment
+        url: https://ent.ifeng.com/star/
+        crawl_strategy: list_page
+        tags: [celebrity]
+      - key: movie
+        name: 凤凰娱乐电影
+        category: entertainment
+        url: https://ent.ifeng.com/movie/
+        crawl_strategy: list_page
+        tags: [movie]
+      - key: tv
+        name: 凤凰娱乐电视
+        category: entertainment
+        url: https://ent.ifeng.com/tv/
+        crawl_strategy: list_page
+        tags: [tv]
+      - key: music
+        name: 凤凰娱乐音乐
+        category: entertainment
+        url: https://ent.ifeng.com/music/
+        crawl_strategy: list_page
+        tags: [music]
     search:
       strategy: external_first
       domain_filters: [ent.ifeng.com, ifeng.com]
@@ -742,6 +981,24 @@ sources:
         category: sports
         url: https://sports.sina.com.cn/
         crawl_strategy: list_page
+      - key: nba
+        name: 新浪体育NBA
+        category: sports
+        url: https://sports.sina.com.cn/nba/
+        crawl_strategy: list_page
+        tags: [basketball, nba]
+      - key: global_football
+        name: 新浪体育国际足球
+        category: sports
+        url: https://sports.sina.com.cn/global/
+        crawl_strategy: list_page
+        tags: [football, international]
+      - key: china_football
+        name: 新浪体育国内足球
+        category: sports
+        url: https://sports.sina.com.cn/china/
+        crawl_strategy: list_page
+        tags: [football, domestic]
     search:
       strategy: native_first
       native_search_enabled: true
@@ -753,6 +1010,52 @@ sources:
           title_field: title
           url_field: url
           snippet_field: intro
+  - source_id: netease_sports
+    name: 网易体育
+    root_domain: sports.163.com
+    source_type: portal
+    priority: 3
+    crawl_enabled: true
+    search_enabled: true
+    categories: [sports]
+    tags: [sports, basketball, football]
+    crawl_interval_minutes: 15
+    sections:
+      - key: sports
+        name: 网易体育
+        category: sports
+        url: https://sports.163.com/
+        crawl_strategy: list_page
+      - key: nba
+        name: 网易体育NBA
+        category: sports
+        url: https://sports.163.com/nba/
+        crawl_strategy: list_page
+        tags: [basketball, nba]
+    search:
+      strategy: external_first
+      domain_filters: [sports.163.com, 163.com]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 20}
+  - source_id: ifeng_sports
+    name: 凤凰体育
+    root_domain: sports.ifeng.com
+    source_type: portal
+    priority: 3
+    crawl_enabled: true
+    search_enabled: true
+    categories: [sports]
+    tags: [sports, basketball, football]
+    crawl_interval_minutes: 15
+    sections:
+      - key: sports
+        name: 凤凰体育
+        category: sports
+        url: https://sports.ifeng.com/
+        crawl_strategy: list_page
+    search:
+      strategy: external_first
+      domain_filters: [sports.ifeng.com, ifeng.com]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 20}
   - source_id: qq_sports
     name: 腾讯体育
     root_domain: sports.qq.com
@@ -785,6 +1088,24 @@ sources:
         category: sports
         url: https://sports.sohu.com/
         crawl_strategy: list_page
+      - key: nba
+        name: 搜狐体育NBA
+        category: sports
+        url: https://sports.sohu.com/s/nba
+        crawl_strategy: list_page
+        tags: [basketball, nba]
+      - key: football
+        name: 搜狐体育足球
+        category: sports
+        url: https://sports.sohu.com/s/soccer
+        crawl_strategy: list_page
+        tags: [football]
+      - key: esports
+        name: 搜狐体育电竞
+        category: sports
+        url: https://sports.sohu.com/s/e_sport
+        crawl_strategy: list_page
+        tags: [esports]
     search:
       strategy: external_first
       domain_filters: [sports.sohu.com, sohu.com]

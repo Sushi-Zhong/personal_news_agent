@@ -115,6 +115,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             limit=payload.limit,
             per_section_limit=payload.per_section_limit,
             fetch_articles=payload.fetch_articles,
+            workers=payload.workers,
         )
 
     @app.get("/api/feed")

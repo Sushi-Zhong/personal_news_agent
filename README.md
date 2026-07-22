@@ -127,6 +127,92 @@ python3 scripts/stop_elasticsearch.py
 返回的 feed item 包含 `recommend_reason`、`source_tags`、`matched_profile_terms`，用于解释为什么推送。
 多分类用户画像会先按偏好分类补召回候选，再做排序与覆盖，避免同一类新闻占满整条信息流。
 
+### 低并发持续抓取
+
+第一阶段抓取以板块索引页为入口，只展开一层到文章详情页，不递归追踪文章中的链接。当前重点覆盖：
+
+- 体育：央视体育、新浪体育、搜狐体育、虎扑。
+- 娱乐：新浪娱乐、搜狐娱乐、凤凰娱乐。
+- 财经：新浪财经、凤凰财经、搜狐财经、第一财经、界面新闻。
+- 游戏/动漫：游民星空、3DM、17173、游侠网、游民 ACG。
+- 数码：中关村在线、太平洋科技。
+- 军事：中国军网、中华网军事。
+
+持续 worker 默认使用两个并发槽。每轮按到期时间和 source 优先级取索引页，完成后立即处理下一批；没有到期索引页时短暂等待。每个索引页本身按 10-20 分钟间隔重新到期，因此一轮运行十几分钟也不会重叠启动另一轮。
+
+```bash
+source .env.ext
+python3 scripts/run_crawl_loop.py \
+  --workers 2 \
+  --due-limit 20 \
+  --per-section-limit 20 \
+  --fetch-articles 5
+```
+
+生产环境不把爬虫放入 FastAPI 子线程，而是由 systemd 同时管理 Web 和唯一的 crawler 进程。在 Linux 服务器的项目目录执行：
+
+```bash
+./scripts/install_systemd_services.sh
+```
+
+安装脚本会渲染 `deploy/systemd/` 中的 unit 模板，启用 `personal-news.target`，并立即启动：
+
+```text
+personal-news-web.service
+personal-news-crawler.service
+```
+
+常用运维命令：
+
+```bash
+sudo systemctl restart personal-news.target
+sudo systemctl status personal-news-web personal-news-crawler
+sudo journalctl -u personal-news-crawler -f
+```
+
+systemd 默认使用当前登录用户；通过 `sudo` 运行安装脚本时使用 `SUDO_USER`。如需指定用户：
+
+```bash
+PNA_RUN_USER=pna PNA_RUN_GROUP=pna ./scripts/install_systemd_services.sh
+```
+
+Web 和 crawler 都会加载 `.env.ext`，然后使用 `PERSONAL_NEWS_VENV` 指向的 Python；该解释器不存在时回退到 `python3`。crawler 只应运行一个 systemd 实例。可在 `.env.ext` 中调整：
+
+```bash
+export PNA_CRAWL_WORKERS=2
+export PNA_CRAWL_DUE_LIMIT=20
+export PNA_CRAWL_PER_SECTION_LIMIT=20
+export PNA_CRAWL_FETCH_ARTICLES=5
+export PNA_CRAWL_IDLE_SECONDS=30
+export PNA_TOPIC_EXTRACTION_LIMIT=20
+```
+
+单轮调试仍可使用：
+
+```bash
+python3 scripts/run_due_crawl.py --workers 2 --limit 10 --per-section-limit 20 --fetch-articles 5
+```
+
+发现的 URL 会先去除 fragment 和常见追踪参数，再按 canonical URL 去重。正文入库时还会按内容 hash 做第二层去重。抓取结果会返回 `saved_articles`、`duplicate_articles`、`skipped_articles` 和各 worker 的执行记录。
+
+### LLM 主题抽取与合并
+
+持续抓取进程会在每轮抓取后处理尚未分析的文章。板块来自 `sources.yaml` 中索引页的固定绑定；LLM 只读取文章 `title + content`，抽取核心 subject、主题名称、核心事件摘要、关键词和置信度。
+
+每次调用会附带最近 5 天同板块的已有主题。模型判断属于已有主题时必须返回候选列表中的 `topic_id`，程序会校验该 ID 并合并文章；否则创建新主题。文章与主题的关联是幂等的，同一文章不会重复增加计数。
+
+业务提示词位于：
+
+```text
+personal_news_agent/prompts/topic_extraction.md
+```
+
+提示词可以独立修改；JSON Schema、索引页板块约束、主题 ID 白名单和数据库合并由程序控制。也可以单独执行待处理文章：
+
+```bash
+python3 scripts/run_topic_extraction.py --limit 20
+```
+
 Web 主界面原型：
 
 - `兴趣对话`

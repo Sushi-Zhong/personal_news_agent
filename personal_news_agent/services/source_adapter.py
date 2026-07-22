@@ -10,7 +10,9 @@ from bs4 import BeautifulSoup
 from personal_news_agent.config import settings
 from personal_news_agent.core.models import NormalizedArticle, RawArticle, RawArticleLink, RawSearchResult, SectionConfig, SourceConfig
 from personal_news_agent.core.text import content_hash, extract_entities, extract_keywords, stable_id, summarize
-from personal_news_agent.services.article_fetch import ArticleFetchService, _host_allowed, _parse_published_datetime
+
+from personal_news_agent.services.article_fetch import ArticleFetchService, _host_allowed, _parse_published_datetime, canonicalize_url
+
 
 
 class ListPageAdapter:
@@ -56,16 +58,21 @@ class ListPageAdapter:
         return results[:limit]
 
     async def fetch_article(self, url: str) -> RawArticle:
-        return await self.fetcher.fetch_article(self.source.source_id, url)
+        allowed_domains = list(self.source.search.domain_filters or (self.source.root_domain,))
+        canonical_url = canonicalize_url(url)
+        if isinstance(self.fetcher, ArticleFetchService):
+            return await self.fetcher.fetch_article(self.source.source_id, canonical_url, allowed_domains)
+        return await self.fetcher.fetch_article(self.source.source_id, canonical_url)
 
     def normalize_article(self, raw: RawArticle, section_key: str | None = None, category: str | None = None) -> NormalizedArticle:
+        canonical_url = canonicalize_url(raw.url)
         text = f"{raw.title}\n{raw.summary}\n{raw.content}"
         category_value = category or (self.source.sections[0].category if self.source.sections else self.source.categories[0])
         return NormalizedArticle(
-            id=stable_id("art", raw.url),
+            id=stable_id("art", canonical_url),
             source_id=self.source.source_id,
             section_key=section_key,
-            url=raw.url,
+            url=canonical_url,
             title=raw.title,
             summary=raw.summary or summarize(raw.content),
             content=raw.content,

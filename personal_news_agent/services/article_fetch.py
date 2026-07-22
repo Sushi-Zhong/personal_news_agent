@@ -4,8 +4,10 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
+
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse,unquote, urlunparse
 import xml.etree.ElementTree as ET
+
 
 import httpx
 from bs4 import BeautifulSoup
@@ -20,7 +22,7 @@ class ArticleFetchService:
         self.verify_ssl = settings.http_verify_ssl if verify_ssl is None else verify_ssl
 
     async def list_links(self, source_id: str, section_key: str, url: str, limit: int = 30, allowed_domains: list[str] | None = None) -> list[RawArticleLink]:
-        html = await self._get_text(url)
+        html = await self._get_text(url, allowed_domains)
         soup = BeautifulSoup(html, "html.parser")
         links: list[RawArticleLink] = []
         seen: set[str] = set()
@@ -28,7 +30,7 @@ class ArticleFetchService:
         domains = allowed_domains or [root_domain]
         for anchor in soup.find_all("a", href=True):
             title = " ".join(anchor.get_text(" ", strip=True).split())
-            href = _unwrap_search_link(urljoin(url, anchor["href"]))
+            href = canonicalize_url(_unwrap_search_link(urljoin(url, anchor["href"])))
             parsed = urlparse(href)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 continue
@@ -36,7 +38,7 @@ class ArticleFetchService:
                 continue
             if not _looks_like_article_url(href):
                 continue
-            if len(title) < 6 or href in seen:
+            if len(title) < 8 or href in seen:
                 continue
             seen.add(href)
             links.append(RawArticleLink(source_id=source_id, section_key=section_key, url=href, title=title))
@@ -78,6 +80,9 @@ class ArticleFetchService:
                 pass
 
         html = await self._get_text(url)
+        
+    async def fetch_article(self, source_id: str, url: str, allowed_domains: list[str] | None = None) -> RawArticle:
+        html = await self._get_text(url, allowed_domains)
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "noscript", "template"]):
             tag.decompose()
@@ -97,7 +102,10 @@ class ArticleFetchService:
             summary = str(desc["content"]).strip()
         return RawArticle(source_id=source_id, url=url, title=title or url, content=content, summary=summary, published_at=_extract_published_at(soup))
 
-    async def _get_text(self, url: str) -> str:
+    async def _get_text(self, url: str, allowed_domains: list[str] | None = None) -> str:
+        parsed = urlparse(url)
+        if allowed_domains and not any(_host_allowed(parsed.netloc, domain) for domain in allowed_domains):
+            raise ValueError(f"URL host is outside configured source domains: {parsed.netloc}")
         headers = {
             "User-Agent": "Mozilla/5.0 personal-news-agent/0.1",
             "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
@@ -105,7 +113,12 @@ class ArticleFetchService:
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, headers=headers, verify=self.verify_ssl) as client:
             response = await client.get(url)
             response.raise_for_status()
-            response.encoding = response.encoding or "utf-8"
+            final_host = response.url.host or ""
+            if allowed_domains and not any(_host_allowed(final_host, domain) for domain in allowed_domains):
+                raise ValueError(f"Redirected URL host is outside configured source domains: {final_host}")
+            detected_encoding = BeautifulSoup(response.content, "html.parser").original_encoding
+            if detected_encoding:
+                response.encoding = detected_encoding
             return response.text
 
 
@@ -120,7 +133,7 @@ def _looks_like_article_url(url: str) -> bool:
     path = parsed.path.lower()
     if not path or path in {"/", "/index.html", "/index.shtml"}:
         return False
-    if any(marker in path for marker in ["/search", "/tag", "/tags", "/video", "/photo", "/special", "/zt/", "/column"]):
+    if any(marker in path for marker in ["/search", "/tag", "/tags", "/video", "/photo", "/special", "/zt/", "/column", "/feedback"]):
         return False
     article_markers = [".html", ".shtml", ".htm", "/a/", "/n1/", "/c/", "/article/", "/news/", "/20"]
     return any(marker in path for marker in article_markers)
@@ -238,6 +251,36 @@ def _first_tag_text(item, *names: str) -> str:
     if tag and tag.get_text(" ", strip=True):
         return tag.get_text(" ", strip=True)
     return ""
+  
+_TRACKING_QUERY_KEYS = {
+    "from",
+    "spm",
+    "source",
+    "src",
+    "utm_campaign",
+    "utm_content",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+}
+
+
+def canonicalize_url(url: str) -> str:
+    """Normalize discovered article URLs before deduplication and persistence."""
+    parsed = urlparse(url.strip())
+    host = parsed.netloc.lower()
+    if host.endswith(":80") and parsed.scheme == "http":
+        host = host[:-3]
+    elif host.endswith(":443") and parsed.scheme == "https":
+        host = host[:-4]
+    query = [
+        (key, value)
+        for key, values in parse_qs(parsed.query, keep_blank_values=True).items()
+        if key.lower() not in _TRACKING_QUERY_KEYS and not key.lower().startswith("utm_")
+        for value in values
+    ]
+    path = parsed.path or "/"
+    return urlunparse((parsed.scheme.lower(), host, path, "", urlencode(sorted(query)), ""))
 
 
 def _extract_published_at(soup: BeautifulSoup) -> datetime | None:
