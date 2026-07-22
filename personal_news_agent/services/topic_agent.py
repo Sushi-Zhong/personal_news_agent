@@ -4,20 +4,21 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from personal_news_agent.core.tag_classifier import classify_category_tags
 from personal_news_agent.services.store import NewsStore
 from personal_news_agent.services.tasks import ScheduledTaskService
 
 
 SYSTEM_TOPIC_SEEDS = [
     {
-        "title": "SpaceX IPO 传闻",
+        "title": "科技公司上市观察",
         "category_scope": ["tech", "economy"],
-        "watch_keywords": ["SpaceX", "IPO", "Starlink", "上市"],
+        "watch_keywords": ["科技公司", "IPO", "上市", "融资"],
     },
     {
-        "title": "2026 世界杯开幕",
+        "title": "大型体育赛事运营",
         "category_scope": ["sports"],
-        "watch_keywords": ["世界杯", "2026", "FIFA", "开幕"],
+        "watch_keywords": ["体育赛事", "赛程", "转播", "商业合作"],
     },
 ]
 
@@ -52,8 +53,42 @@ class TopicAgentService:
             )
         return items
 
-    def list_topics(self, user_id: str = "default", topic_type: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        return self.store.list_topics(user_id=user_id, topic_type=topic_type, limit=limit)
+    def list_topics(
+        self,
+        user_id: str = "default",
+        topic_type: str | None = None,
+        limit: int = 50,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.store.list_topics(
+            user_id=user_id,
+            topic_type=topic_type,
+            limit=limit,
+            conversation_id=conversation_id,
+        )
+
+    def remember_detected_topic(
+        self,
+        user_id: str,
+        title: str,
+        category_scope: list[str] | None = None,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        clean_title = _clean_title(title)
+        if not clean_title:
+            raise ValueError("topic title is required")
+        categories = category_scope or _infer_categories(clean_title)
+        return self.store.upsert_topic(
+            {
+                "user_id": user_id,
+                "conversation_id": conversation_id or "",
+                "topic_type": "user",
+                "title": clean_title,
+                "category_scope": categories,
+                "watch_keywords": _keywords(clean_title),
+                "status": "active",
+            }
+        )
 
     async def create_topic(
         self,
@@ -63,6 +98,7 @@ class TopicAgentService:
         schedule: str = "*/20 * * * *",
         topic_type: str = "user",
         refresh_now: bool = True,
+        conversation_id: str | None = None,
     ) -> dict[str, Any]:
         clean_title = _clean_title(title)
         if not clean_title:
@@ -75,6 +111,7 @@ class TopicAgentService:
         topic = self.store.upsert_topic(
             {
                 "user_id": user_id if topic_type == "user" else "system",
+                "conversation_id": conversation_id if topic_type == "user" else "",
                 "topic_type": topic_type,
                 "title": clean_title,
                 "category_scope": categories,
@@ -111,6 +148,7 @@ class TopicAgentService:
         category_scope: list[str] | None = None,
         schedule: str = "*/20 * * * *",
         refresh_now: bool = True,
+        conversation_id: str | None = None,
     ) -> dict[str, Any]:
         title = _extract_title(text)
         return await self.create_topic(
@@ -120,12 +158,11 @@ class TopicAgentService:
             schedule=schedule,
             topic_type="user",
             refresh_now=refresh_now,
+            conversation_id=conversation_id,
         )
 
     async def maybe_create_topic_from_chat(self, user_id: str, message: str) -> dict[str, Any] | None:
-        if not _looks_like_topic_request(message):
-            return None
-        return await self.create_topic_from_text(user_id=user_id, text=message, refresh_now=True)
+        return None
 
     async def refresh_topic(self, topic: dict[str, Any], refresh_now: bool = True) -> dict[str, Any]:
         if not refresh_now:
@@ -173,13 +210,6 @@ class TopicAgentService:
         }
 
 
-def _looks_like_topic_request(message: str) -> bool:
-    compact = message.replace(" ", "")
-    if "主题" not in compact:
-        return False
-    return any(token in compact for token in ("持续更新", "持续跟踪", "跟踪", "关注", "创建", "建立", "做一个", "整理"))
-
-
 def _extract_title(text: str) -> str:
     patterns = [
         r"关于(.+?)的主题",
@@ -193,7 +223,19 @@ def _extract_title(text: str) -> str:
         if match:
             return _clean_title(match.group(1))
     cleaned = text
-    for token in ("我想", "帮我", "请你", "创建", "建立", "做一个", "整理", "主题", "并帮我", "持续更新", "持续跟踪", "持续关注"):
+    for token in (
+        "我想",
+        "帮我",
+        "请你",
+        "创建",
+        "建立",
+        "做一个",
+        "整理",
+        "主题",
+        "专题",
+        "并帮我",
+        "持续更新",
+    ):
         cleaned = cleaned.replace(token, " ")
     return _clean_title(cleaned)
 
@@ -202,35 +244,15 @@ def _clean_title(value: str) -> str:
     cleaned = re.sub(r"[，。！？?！、]+", " ", value or "")
     cleaned = " ".join(cleaned.split())
     cleaned = re.sub(r"^(关于|一个|新的|长期)\s*", "", cleaned)
+    cleaned = re.sub(r"\s*(有什么|有哪些|最近|最新|值得关注|变化|消息|新闻|对比|比较).*$", "", cleaned)
+    cleaned = re.sub(r"^(和)?其他(.+?)做对比$", r"\2", cleaned)
     if cleaned in {"主题", "专题", "专题任务"}:
         return ""
     return cleaned[:80].strip()
 
 
 def _infer_categories(text: str) -> list[str]:
-    hints = {
-        "世界杯": "sports",
-        "阿根廷": "sports",
-        "FIFA": "sports",
-        "NBA": "sports",
-        "球队": "sports",
-        "SpaceX": "tech",
-        "IPO": "economy",
-        "上市": "economy",
-        "AI": "tech",
-        "芯片": "tech",
-        "俄乌": "politics",
-        "战争": "politics",
-        "农作物": "economy",
-        "能源": "economy",
-        "汽车": "auto",
-        "新能源": "auto",
-        "游戏": "game",
-        "动漫": "anime",
-    }
-    lowered = text.lower()
-    categories = [category for word, category in hints.items() if word.lower() in lowered]
-    return sorted(set(categories))
+    return classify_category_tags(text)
 
 
 def _keywords(title: str) -> list[str]:

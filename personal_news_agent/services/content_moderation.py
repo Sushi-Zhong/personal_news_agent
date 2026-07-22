@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import importlib.util
+import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
 LLM_QUERY_MODERATION_SERVICE = "llm_query_moderation"
+DEFAULT_DISCRIMINATIVE_MODEL_DIR = Path(__file__).resolve().parents[2] / "判别式ai" / "artifacts"
 
 
 class ContentModerationError(RuntimeError):
@@ -36,6 +40,8 @@ class TextModerationPlusService:
         access_key_secret: str | None = None,
         endpoint: str | None = None,
         query_service: str = LLM_QUERY_MODERATION_SERVICE,
+        discriminative_model_dir: str | Path | None = None,
+        discriminative_threshold: float | None = None,
     ):
         # 优先使用显式传参；没有传参时，读取本地环境变量，兼容项目里已有的阿里云密钥命名。
         self.access_key_id = (
@@ -54,33 +60,182 @@ class TextModerationPlusService:
         self.endpoint = endpoint or os.getenv("ALIYUN_CONTENT_MODERATION_ENDPOINT", "green-cip.cn-shanghai.aliyuncs.com")
         # 用户输入和模型输出分别使用不同审核服务类型，必要时可以用环境变量分别覆盖。
         self.query_service = os.getenv("ALIYUN_CONTENT_MODERATION_QUERY_SERVICE", query_service)
+        self.discriminative_model_dir = Path(
+            discriminative_model_dir
+            or os.getenv("PNA_DISCRIMINATIVE_MODEL_DIR")
+            or DEFAULT_DISCRIMINATIVE_MODEL_DIR
+        )
+        self.discriminative_threshold = (
+            float(os.getenv("PNA_DISCRIMINATIVE_MODEL_THRESHOLD", "0.5"))
+            if discriminative_threshold is None
+            else discriminative_threshold
+        )
+        if not 0 <= self.discriminative_threshold <= 1:
+            raise ValueError("PNA_DISCRIMINATIVE_MODEL_THRESHOLD must be between 0 and 1")
+        self._discriminative_runtime: tuple[Any, Any, dict[str, Any], Any] | None = None
+        self._discriminative_lock = threading.Lock()
 
     @property
     def configured(self) -> bool:
+        return bool(self.access_key_id and self.access_key_secret) or self._discriminative_model_available
+
+    @property
+    def _aliyun_configured(self) -> bool:
         return bool(self.access_key_id and self.access_key_secret)
 
+    @property
+    def _discriminative_model_available(self) -> bool:
+        required_files = ("model.pt", "config.json", "vocab.json")
+        return all((self.discriminative_model_dir / name).is_file() for name in required_files)
+
     def check_query_text(self, text: str) -> ContentModerationResult:
-        # 用户发给大模型之前的输入检测，Service=llm_query_moderation。
-        return self._check_text_with_service(text, self.query_service)
+        """同时执行阿里云 query 审核和本地判别模型审核。"""
+        if not self.configured:
+            raise ContentModerationError("No content moderation service or local model is configured")
+        if not text.strip():
+            return self._empty_result()
+
+        aliyun_result: ContentModerationResult | None = None
+        local_result: ContentModerationResult | None = None
+        errors: dict[str, str] = {}
+
+        if self._aliyun_configured:
+            try:
+                aliyun_result = self._check_text_with_service(text, self.query_service)
+            except ContentModerationError as exc:
+                errors["aliyun"] = str(exc)
+
+        if self._discriminative_model_available:
+            try:
+                local_result = self._check_with_discriminative_model(text)
+            except ContentModerationError as exc:
+                errors["discriminative_model"] = str(exc)
+
+        completed = [result for result in (aliyun_result, local_result) if result is not None]
+        if not completed:
+            details = "; ".join(f"{name}: {error}" for name, error in errors.items())
+            raise ContentModerationError(details or "All content moderation checks are unavailable")
+
+        blocked = next((result for result in completed if not result.allowed), None)
+        representative = blocked or completed[0]
+        return ContentModerationResult(
+            allowed=all(result.allowed for result in completed),
+            code=representative.code,
+            message=representative.message,
+            risk_level=representative.risk_level,
+            label=representative.label,
+            description=representative.description,
+            request_id=representative.request_id,
+            raw={
+                "aliyun": aliyun_result.raw if aliyun_result else None,
+                "discriminative_model": local_result.raw if local_result else None,
+                "errors": errors,
+            },
+        )
 
     def _check_text_with_service(self, text: str, service: str) -> ContentModerationResult:
-        if not self.configured:
+        if not self._aliyun_configured:
             raise ContentModerationError("Aliyun content moderation access key is not configured")
         if not text.strip():
-            # 空输入没有必要调用远端 API，直接视为通过。
-            return ContentModerationResult(
-                allowed=True,
-                code=200,
-                message="empty input",
-                risk_level="none",
-                label="nonLabel",
-                description="empty input skipped",
-                request_id=None,
-                raw={},
-            )
+            return self._empty_result()
 
         payload = self._call_text_moderation_plus(text, service)
         return self._parse_result(payload)
+
+    @staticmethod
+    def _empty_result() -> ContentModerationResult:
+        # 空输入没有必要调用远端 API 或本地模型，直接视为通过。
+        return ContentModerationResult(
+            allowed=True,
+            code=200,
+            message="empty input",
+            risk_level="none",
+            label="nonLabel",
+            description="empty input skipped",
+            request_id=None,
+            raw={},
+        )
+
+    def _check_with_discriminative_model(self, text: str) -> ContentModerationResult:
+        torch, tokenizer, config, model = self._load_discriminative_runtime()
+        token_ids, attention_mask = tokenizer.encode(text, int(config["max_length"]))
+        with torch.no_grad():
+            violation_logits, tag_logits = model(
+                torch.tensor([token_ids]),
+                torch.tensor([attention_mask], dtype=torch.bool),
+            )
+            probability = float(torch.sigmoid(violation_logits).item())
+            tag = int(tag_logits.argmax(dim=1).item()) + 1
+
+        allowed = probability < self.discriminative_threshold
+        return ContentModerationResult(
+            allowed=allowed,
+            code=200,
+            message="local discriminative model completed",
+            risk_level="none" if allowed else "high",
+            label="nonLabel" if allowed else f"discriminative_tag_{tag}",
+            description=(
+                f"本地判别模型通过，风险概率 {probability:.2%}"
+                if allowed
+                else f"本地判别模型判定为不安全，风险概率 {probability:.2%}，tag={tag}"
+            ),
+            request_id=None,
+            raw={
+                "allowed": allowed,
+                "probability": probability,
+                "threshold": self.discriminative_threshold,
+                "tag": tag,
+                "model_dir": str(self.discriminative_model_dir),
+            },
+        )
+
+    def _load_discriminative_runtime(self) -> tuple[Any, Any, dict[str, Any], Any]:
+        if self._discriminative_runtime is not None:
+            return self._discriminative_runtime
+        with self._discriminative_lock:
+            if self._discriminative_runtime is not None:
+                return self._discriminative_runtime
+            try:
+                import torch
+
+                project_dir = self.discriminative_model_dir.parent
+                model_module = self._load_python_module(
+                    "pna_discriminative_model", project_dir / "model.py"
+                )
+                tokenizer_module = self._load_python_module(
+                    "pna_discriminative_tokenizer", project_dir / "tokenizer.py"
+                )
+                config = json.loads(
+                    (self.discriminative_model_dir / "config.json").read_text(encoding="utf-8")
+                )
+                tokenizer = tokenizer_module.CharTokenizer.load(
+                    self.discriminative_model_dir / "vocab.json"
+                )
+                model = model_module.MiniBertClassifier(**config)
+                state_dict = torch.load(
+                    self.discriminative_model_dir / "model.pt",
+                    map_location="cpu",
+                    weights_only=True,
+                )
+                model.load_state_dict(state_dict)
+                model.eval()
+            except Exception as exc:
+                raise ContentModerationError(
+                    f"Failed to load local discriminative model: {exc}"
+                ) from exc
+            self._discriminative_runtime = (torch, tokenizer, config, model)
+            return self._discriminative_runtime
+
+    @staticmethod
+    def _load_python_module(module_name: str, path: Path) -> Any:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot import module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
     def _parse_result(self, payload: dict[str, Any]) -> ContentModerationResult:
         data = payload.get("Data") or {}

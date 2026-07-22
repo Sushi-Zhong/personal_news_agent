@@ -109,6 +109,7 @@ class ScheduledTaskService:
             answer,
             [],
             {"type": "scheduled_task", "target_id": task["id"], "text": topic},
+            user_id=user_id,
             payload={"type": "scheduled_task_created", "task": task, "api_params": payload},
         )
         return {"status": "ok", "task": task, "conversation": conversation, "turn_id": turn_id, "answer": answer, "api_params": payload}
@@ -225,6 +226,7 @@ class ScheduledTaskService:
             markdown,
             [item.model_dump(mode="json") for item in results[:8]],
             FocusObject(type="scheduled_push", target_id=task_id, text=topic).model_dump(mode="json"),
+            user_id=task["user_id"],
             payload={
                 "type": "scheduled_push_result",
                 "task_id": task_id,

@@ -19,7 +19,7 @@ def test_registry_loads_focused_categories_and_sources():
     ithome = registry.get_source("ithome")
     assert "tech" in ithome.tags
     assert ithome.crawl_interval_minutes > 0
-    assert registry.get_source("people_politics").crawl_interval_minutes == 20
+    assert registry.get_source("people_politics").crawl_interval_minutes == 10
     assert len(registry.get_sources_by_category("digital")) >= 2
     assert len(registry.get_sources_by_category("military")) >= 3
     assert len(registry.get_sources_by_category("sports")) >= 7

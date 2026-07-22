@@ -4,6 +4,7 @@ import re
 
 from personal_news_agent.core.categories import CATEGORIES
 from personal_news_agent.core.models import TimeRange
+from personal_news_agent.core.tag_classifier import classify_category_tags
 
 
 ORDINALS = {
@@ -19,7 +20,6 @@ ORDINALS = {
     "第5": 5,
 }
 
-
 def extract_ordinal(message: str) -> int | None:
     for token, value in ORDINALS.items():
         if token in message:
@@ -29,56 +29,34 @@ def extract_ordinal(message: str) -> int | None:
 
 
 def infer_categories(message: str) -> list[str] | None:
-    hints = {
-        "时政": "politics",
-        "政治": "politics",
-        "国际": "politics",
-        "乌克兰": "politics",
-        "俄罗斯": "politics",
-        "俄乌": "politics",
-        "战争": "politics",
-        "冲突": "politics",
-        "经济": "economy",
-        "财经": "economy",
-        "粮食": "economy",
-        "农作物": "economy",
-        "能源": "economy",
-        "制裁": "economy",
-        "科技": "tech",
-        "AI": "tech",
-        "汽车": "auto",
-        "车企": "auto",
-        "车型": "auto",
-        "新能源车": "auto",
-        "智能驾驶": "auto",
-        "游戏": "game",
-        "电竞": "game",
-        "动漫": "anime",
-        "番剧": "anime",
-        "娱乐": "entertainment",
-        "明星": "entertainment",
-        "体育": "sports",
-        "NBA": "sports",
-        "球队": "sports",
-        "WSBK": "sports",
-        "机车赛事": "sports",
-    }
-    categories = [category for word, category in hints.items() if word.lower() in message.lower()]
-    return sorted(set(categories)) or None
+    return classify_category_tags(message) or None
 
 
 def query_from_message(message: str, topic: str | None = None) -> str:
     original = message
-    for zh, key in CATEGORIES.items():
-        message = message.replace(zh, " ")
+    message = message.replace("别的", "其他")
+    for key in CATEGORIES.keys():
         message = message.replace(key, " ")
     cleanup = [
+        "早上好",
+        "告诉我",
+        "给我一些",
+        "给我",
+        "在帮我",
         "帮我看看",
         "帮我",
         "看看",
         "了解一下",
         "请你",
         "请",
+        "我想知道",
+        "我也想知道",
+        "还有别的",
+        "还有什么",
+        "关于这方面",
+        "这方面",
+        "他们的",
+        "它们的",
         "今天",
         "近一个月",
         "过去一个月",
@@ -103,9 +81,37 @@ def query_from_message(message: str, topic: str | None = None) -> str:
         message = message.replace(token, " ")
     message = message.replace("圈", " ")
     cleaned = " ".join(message.split())
-    if topic and topic.strip() and (_is_generic_chat_query(cleaned) or topic.strip() in original):
+    if topic and topic.strip() and _is_generic_chat_query(cleaned):
         return topic.strip()
+    if topic and topic.strip() and is_contextual_followup(original):
+        suffix = cleaned.replace("他们", " ").replace("它们", " ")
+        suffix = " ".join(suffix.split())
+        if topic.strip() in suffix:
+            return suffix
+        return f"{topic.strip()} {suffix}".strip()
     return cleaned if len(cleaned) > 1 else "热点 新闻"
+
+
+def is_contextual_followup(message: str) -> bool:
+    compact = re.sub(r"\s+", "", message)
+    markers = (
+        "还有", "继续", "再说", "进一步", "展开", "深挖", "他们", "它们", "这些公司", "该公司", "该赛事", "这方面",
+        "上面", "刚才", "刚刚", "上次", "之前", "前面", "刚问",
+    )
+    return any(marker in compact for marker in markers)
+
+
+def categories_for_message(
+    message: str,
+    topic: str | None = None,
+    category_scope: list[str] | None = None,
+) -> list[str] | None:
+    inferred = infer_categories(message)
+    if inferred:
+        return inferred
+    if topic and (topic.strip() in message or is_contextual_followup(message)):
+        return category_scope or None
+    return None
 
 
 def time_range_from_message(message: str) -> TimeRange | None:

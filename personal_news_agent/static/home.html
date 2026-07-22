@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260714-01" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260721-no-check-1" />
   </head>
   <body>
     <template id="webTemplate" data-body-class="web-shell console-shell">
@@ -28,46 +28,59 @@
       
           <main class="news-console">
             <aside class="console-rail">
-              <section class="rail-panel topic-nav">
-                <div class="panel-head compact-head">
-                  <h2>关注</h2>
-                  <button class="secondary-button mini-button" data-ask="创建一个新的长期专题任务">新增</button>
-                </div>
-                <div data-topic-list>
-                  <button class="topic-card active" data-topic-title="张雪机车" data-category-scope="sports">张雪机车</button>
-                  <button class="topic-card" data-topic-title="NBA 总决赛" data-category-scope="sports">NBA 总决赛</button>
-                  <button class="topic-card system-topic" data-topic-title="SpaceX IPO 传闻" data-category-scope="tech,economy">SpaceX IPO</button>
-                  <button class="topic-card system-topic" data-topic-title="2026 世界杯开幕" data-category-scope="sports">世界杯开幕</button>
-                  <button class="topic-card" data-topic-title="俄乌战争对农作物的影响" data-category-scope="politics,economy">俄乌战争 × 农作物</button>
-                  <button class="topic-card" data-topic-title="AI 终端设备" data-category-scope="tech">AI 终端设备</button>
-                </div>
-              </section>
-      
-              <section class="rail-panel events-panel">
-                <h2>热点事件</h2>
-                <div id="events" class="list compact title-only-list"></div>
-              </section>
+              <div class="rail-sticky-stack">
+                <section class="rail-panel topic-nav">
+                  <div class="panel-head compact-head">
+                    <h2>关注</h2>
+                    <button id="newTopicConversation" class="secondary-button mini-button" type="button">新增</button>
+                  </div>
+                  <div data-topic-list>
+                    <button class="topic-card active" data-topic-title="新能源汽车产业链" data-category-scope="auto" data-tooltip="新能源汽车产业链"><span>新能源汽车产业链</span><small>auto</small></button>
+                    <button class="topic-card" data-topic-title="体育赛事商业化" data-category-scope="sports" data-tooltip="体育赛事商业化"><span>体育赛事商业化</span><small>sports</small></button>
+                    <button class="topic-card system-topic" data-topic-title="科技公司上市观察" data-category-scope="tech,economy" data-tooltip="科技公司上市观察"><span>科技公司上市</span><small>tech / economy</small></button>
+                    <button class="topic-card system-topic" data-topic-title="大型体育赛事运营" data-category-scope="sports" data-tooltip="大型体育赛事运营"><span>赛事运营</span><small>sports</small></button>
+                    <button class="topic-card" data-topic-title="国际局势与大宗商品" data-category-scope="politics,economy" data-tooltip="国际局势与大宗商品"><span>国际局势 × 大宗商品</span><small>politics / economy</small></button>
+                    <button class="topic-card" data-topic-title="AI 终端设备" data-category-scope="tech" data-tooltip="AI 终端设备"><span>AI 终端设备</span><small>tech</small></button>
+                  </div>
+                </section>
+                <section class="rail-panel events-panel">
+                  <h2>热点事件</h2>
+                  <div id="events" class="list compact title-only-list"></div>
+                </section>
+              </div>
             </aside>
       
             <section class="console-main">
               <section class="conversation-panel main-dialog">
                 <div class="dialog-header">
                   <span class="assistant-label">当前</span>
-                  <h2 data-agent-topic>张雪机车</h2>
+                  <h2 data-agent-topic>新能源汽车产业链</h2>
                   <p data-dialog-context>18 条证据 · 18 个事件</p>
                 </div>
                 <div class="prompt-suggestions">
-                  <button data-ask="张雪机车今天有哪些值得关注的新变化？">变化</button>
-                  <button data-action="deep-dive-chat">深挖</button>
-                  <button data-action="make-task">跟踪</button>
+                  <button type="button" data-action="changes">变化</button>
+                  <button type="button" data-action="deep-dive-chat">深挖</button>
+                  <button type="button" data-action="make-task">跟踪</button>
                 </div>
                 <div class="context-dock">
-                  <span data-current-topic-chip>张雪机车</span>
-                  <span data-current-category-chip>sports</span>
+                  <span data-current-topic-chip>新能源汽车产业链</span>
+                  <span data-current-category-chip>auto</span>
                   <span data-current-view-chip>事件线</span>
                 </div>
                 <div class="messages hero-messages chat-stream" id="messages">
-                  <article class="chat-turn chat-assistant"><div class="chat-bubble">已就绪。</div></article>
+                  <article class="chat-turn chat-assistant">
+                    <div class="chat-bubble">已就绪。</div>
+                    <div class="turn-actions" aria-label="消息操作">
+                      <button type="button" data-turn-action="copy" title="复制" aria-label="复制">⧉</button>
+                    </div>
+                  </article>
+                </div>
+                <div class="web-search-control">
+                  <label class="web-search-toggle">
+                    <input type="checkbox" role="switch" data-web-search-toggle />
+                    <span>联网回答</span>
+                    <small>开启后使用搜索额度</small>
+                  </label>
                 </div>
                 <form id="chatForm" class="command-bar dialog-command">
                   <input id="message" placeholder="继续问..." />
@@ -79,11 +92,12 @@
                 <summary>高级操作与偏好</summary>
                 <section class="command-panel">
                   <form id="topicForm" class="topic-command">
-                    <input id="topicInput" value="张雪机车" placeholder="输入专题或定向搜索词" />
+                    <input id="topicInput" value="新能源汽车产业链" placeholder="输入专题或定向搜索词" />
                     <select id="categoryScope">
                       <option value="sports">体育</option>
                       <option value="politics,economy">时政 + 经济</option>
                       <option value="tech">科技</option>
+                      <option value="game">游戏</option>
                       <option value="auto">汽车</option>
                       <option value="">全部</option>
                     </select>
@@ -101,12 +115,13 @@
                 <section class="rail-panel task-panel">
                   <h2>定时跟踪</h2>
                   <form id="taskForm" class="task-mini-form">
-                    <input name="topic" value="张雪机车" placeholder="专题" />
+                    <input name="topic" value="新能源汽车产业链" placeholder="专题" />
                     <select name="category">
                       <option value="sports">体育</option>
                       <option value="politics">时政</option>
                       <option value="economy">经济</option>
                       <option value="tech">科技</option>
+                      <option value="game">游戏</option>
                       <option value="auto">汽车</option>
                     </select>
                     <select name="task_type">
@@ -169,7 +184,7 @@
                   <div class="topic-head">
                     <div>
                       <span class="assistant-label">专题更新</span>
-                      <h2 data-topic-heading>张雪机车</h2>
+                      <h2 data-topic-heading>新能源汽车产业链</h2>
                       <p data-topic-summary>正在加载专题证据。</p>
                     </div>
                     <div class="topic-metrics">
@@ -192,16 +207,31 @@
               <section class="rail-panel feed-panel">
                 <div class="panel-head compact-head">
                   <h2>相关资讯</h2>
-                  <select id="feedCategory">
+                  <select id="feedCategory" aria-label="筛选相关资讯分类">
                     <option value="">全部</option>
                     <option value="politics">时政</option>
                     <option value="economy">经济</option>
                     <option value="tech">科技</option>
                     <option value="auto">汽车</option>
+                    <option value="game">游戏</option>
+                    <option value="anime">动漫</option>
+                    <option value="entertainment">娱乐</option>
                     <option value="sports">体育</option>
                   </select>
+                  <span data-related-article-count>--</span>
                 </div>
                 <div id="feed" class="list feed-list title-only-list"></div>
+              </section>
+              <section class="rail-panel follow-panel">
+                <h2>后续观察</h2>
+                <div class="follow-up-list" data-follow-up-list></div>
+              </section>
+              <section class="rail-panel entity-panel">
+                <h2>相关主体 / 来源网站</h2>
+                <div class="entity-source-grid">
+                  <div data-entity-list></div>
+                  <div data-source-list></div>
+                </div>
               </section>
             </aside>
           </main>
@@ -230,7 +260,7 @@
                 </select>
               </div>
               <div class="choice-grid wide" data-category-options></div>
-              <input name="watch_keywords" placeholder="关注词：时政, NBA, 俄乌战争, 农作物" />
+              <input name="watch_keywords" placeholder="关注词：时政, 体育赛事, 大宗商品, 智能驾驶" />
               <input name="negative_keywords" placeholder="不想看：低质八卦, 重复转载" />
               <div class="split-fields two">
                 <select name="model_key"></select>
@@ -256,7 +286,7 @@
             <section class="mobile-card mobile-today-card" hidden>
               <div class="mobile-brief-title">
                 <span>今日</span>
-                <strong data-mobile-brief-topic>张雪机车</strong>
+                <strong data-mobile-brief-topic>新能源汽车产业链</strong>
               </div>
               <div class="mobile-brief-metrics" aria-label="今日简报指标">
                 <article><strong data-mobile-feed-count>--</strong><span>推荐</span></article>
@@ -283,12 +313,24 @@
             <section class="mobile-card mobile-agent-card">
               <div class="mobile-card-head">
                 <h2>Agent</h2>
-                <button type="button" class="secondary-button" data-command="/search 张雪机车 --cat sports">抓取</button>
+                <button type="button" class="secondary-button" data-command="/search 新能源汽车产业链 --cat auto">抓取</button>
               </div>
               <div class="mobile-chat-panel">
                 <div id="messages" class="messages mobile-messages chat-stream">
-                  <article class="chat-turn chat-assistant"><div class="chat-bubble">今日内容已准备，可以点一条资讯继续深挖，或把当前专题加入跟踪。</div></article>
+                  <article class="chat-turn chat-assistant">
+                    <div class="chat-bubble">今日内容已准备，可以点一条资讯继续深挖，或把当前专题加入跟踪。</div>
+                    <div class="turn-actions" aria-label="消息操作">
+                      <button type="button" data-turn-action="copy" title="复制" aria-label="复制">⧉</button>
+                    </div>
+                  </article>
                 </div>
+              </div>
+              <div class="web-search-control mobile-web-search-control">
+                <label class="web-search-toggle">
+                  <input type="checkbox" role="switch" data-web-search-toggle />
+                  <span>联网回答</span>
+                  <small>使用搜索额度</small>
+                </label>
               </div>
               <form id="chatForm" class="mobile-chat">
                 <input id="message" placeholder="继续问：影响谁？后续看什么？" />
@@ -364,6 +406,8 @@
           </main>
     </template>
 
-    <script src="/static/home.js?v=20260714-01"></script>
+    <script src="/static/vendor/react.production.min.js?v=18.3.1"></script>
+    <script src="/static/vendor/react-dom.production.min.js?v=18.3.1"></script>
+    <script src="/static/home.js?v=20260721-no-check-1"></script>
   </body>
 </html>

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from personal_news_agent.api.schemas import (
     ChatRequest,
@@ -18,6 +19,7 @@ from personal_news_agent.api.schemas import (
     NotificationReadRequest,
     OnboardingRequest,
     ProfileRequest,
+    RelatedSearchRequest,
     RegisterRequest,
     ReportRequest,
     ScheduleCommandRequest,
@@ -32,6 +34,7 @@ from personal_news_agent.api.schemas import (
 from personal_news_agent.config import Settings
 from personal_news_agent.core.categories import CATEGORIES
 from personal_news_agent.services.auth import AuthError
+from personal_news_agent.services.report_export import export_report
 
 
 def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, settings: Settings) -> None:
@@ -207,7 +210,14 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     @app.post("/api/news/search")
     async def search(payload: SearchRequest) -> dict[str, Any]:
         time_range = parse_range(payload.time_range)
-        results = await search_service.search(payload.query, payload.category_scope, payload.source_scope, time_range, payload.max_results)
+        results = await search_service.search(
+            payload.query,
+            payload.category_scope,
+            payload.source_scope,
+            time_range,
+            payload.max_results,
+            include_remote=payload.allow_web_search,
+        )
         return {"items": results}
 
     @app.post("/api/news/deep-dive")
@@ -218,6 +228,19 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             source_scope=payload.source_scope,
             rounds=payload.rounds,
             breadth=payload.breadth,
+            include_remote=payload.allow_web_search,
+        )
+
+    @app.post("/api/news/related")
+    async def related_search(payload: RelatedSearchRequest) -> Any:
+        return await services["chat"].related_search(
+            payload.conversation_id,
+            payload.query,
+            topic=payload.topic,
+            category_scope=payload.category_scope,
+            user_id=payload.user_id,
+            max_queries=payload.max_queries,
+            allow_web_search=payload.allow_web_search,
         )
 
     @app.post("/api/news/search/ingest")
@@ -255,8 +278,20 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
         )
 
     @app.get("/api/topics")
-    async def list_topics(user_id: str = "default", topic_type: str | None = None, limit: int = Query(default=50, ge=1, le=100)) -> dict[str, Any]:
-        return {"items": services["topic_agent"].list_topics(user_id=user_id, topic_type=topic_type, limit=limit)}
+    async def list_topics(
+        user_id: str = "default",
+        topic_type: str | None = None,
+        conversation_id: str | None = None,
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return {
+            "items": services["topic_agent"].list_topics(
+                user_id=user_id,
+                topic_type=topic_type,
+                limit=limit,
+                conversation_id=conversation_id,
+            )
+        }
 
     @app.post("/api/topics")
     async def create_topic(payload: TopicCreateRequest) -> dict[str, Any]:
@@ -268,6 +303,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
                     category_scope=payload.category_scope,
                     schedule=payload.schedule,
                     refresh_now=payload.refresh_now,
+                    conversation_id=payload.conversation_id,
                 )
             return await services["topic_agent"].create_topic(
                 user_id=payload.user_id,
@@ -276,6 +312,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
                 schedule=payload.schedule,
                 topic_type=payload.topic_type,
                 refresh_now=payload.refresh_now,
+                conversation_id=payload.conversation_id,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -287,7 +324,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             "local_backend": "sqlite_fts",
             "primary_recall_backend": "elasticsearch" if search_index.configured else "sqlite_fts",
             "external_provider": settings.external_search_provider,
-            "external_configured": bool(settings.bing_search_key) if settings.external_search_provider == "bing" else False,
+            "external_configured": search_service.external_configured,
             "elasticsearch": await search_index.health(),
             "crawl_url_store": {
                 "backend": settings.crawl_url_backend,
@@ -296,19 +333,71 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             },
         }
 
+    def _event_payload(item: Any) -> dict[str, Any]:
+        data = item.model_dump() if hasattr(item, "model_dump") else dict(item)
+        article_ids = data.get("article_ids") or []
+        article = store.get_article(article_ids[0]) if article_ids else None
+        if article:
+            data["source_url"] = article.get("url")
+            data["source_title"] = article.get("title")
+            data["source_id"] = article.get("source_id")
+            data["source_published_at"] = article.get("published_at")
+        return data
+
     @app.get("/api/events")
     async def list_events(category: str | None = None, limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
         clusters = events.discover(category=category, limit=limit)
-        return {"items": clusters}
+        return {"items": [_event_payload(item) for item in clusters]}
 
     @app.post("/api/chat")
     async def chat(payload: ChatRequest) -> Any:
-        return await services["chat"].chat(payload.conversation_id, payload.message, payload.topic, payload.category_scope, payload.use_llm, user_id=payload.user_id)
+        return await services["chat"].chat(
+            payload.conversation_id,
+            payload.message,
+            payload.topic,
+            payload.category_scope,
+            payload.use_llm,
+            user_id=payload.user_id,
+            allow_web_search=payload.allow_web_search,
+        )
+
+    @app.get("/api/chat/conversations")
+    async def chat_conversations(
+        user_id: str = "default",
+        limit: int = Query(default=30, ge=1, le=100),
+    ) -> dict[str, Any]:
+        return {"items": store.list_conversations(user_id=user_id, limit=limit)}
+
+    @app.get("/api/chat/conversations/{conversation_id}")
+    async def chat_history(
+        conversation_id: str,
+        user_id: str = "default",
+        limit: int = Query(default=40, ge=1, le=100),
+    ) -> dict[str, Any]:
+        turns = store.list_turns(conversation_id, user_id=user_id, limit=limit)
+        last = turns[-1] if turns else None
+        return {
+            "conversation_id": conversation_id,
+            "user_id": user_id,
+            "turns": turns,
+            "context": {
+                "topic": (last or {}).get("topic"),
+                "category_scope": (last or {}).get("category_scope") or [],
+            },
+        }
 
     @app.post("/api/chat/stream")
     async def chat_stream(payload: ChatRequest) -> StreamingResponse:
         async def event_stream():
-            async for event in services["chat"].chat_events(payload.conversation_id, payload.message, payload.topic, payload.category_scope, payload.use_llm, user_id=payload.user_id):
+            async for event in services["chat"].chat_events(
+                payload.conversation_id,
+                payload.message,
+                payload.topic,
+                payload.category_scope,
+                payload.use_llm,
+                user_id=payload.user_id,
+                allow_web_search=payload.allow_web_search,
+            ):
                 event_type = event.get("type", "message")
                 data = json.dumps(event, ensure_ascii=False, default=str)
                 yield f"event: {event_type}\ndata: {data}\n\n"
@@ -318,6 +407,21 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     @app.post("/api/reports")
     async def reports(payload: ReportRequest) -> Any:
         return await services["reports"].generate(payload.user_id, payload.topic, payload.category_scope, payload.time_range, payload.report_type)
+
+    @app.get("/api/reports/{report_id}/download")
+    async def download_report(report_id: str, format: str = Query(default="pdf", pattern="^(pdf|docx)$"), user_id: str = "default") -> Response:
+        report = store.get_report(report_id, user_id=user_id) or store.get_report(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="report not found")
+        try:
+            exported = export_report(_hydrate_report_for_export(report, store), format)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return Response(
+            content=exported.content,
+            media_type=exported.media_type,
+            headers={"Content-Disposition": f'attachment; filename="{exported.filename}"'},
+        )
 
     @app.post("/api/tasks")
     async def create_task(payload: TaskRequest) -> dict[str, Any]:
@@ -373,3 +477,44 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             return await services["crawl"].crawl_category(category)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _hydrate_report_for_export(report: dict[str, Any], store: Any) -> dict[str, Any]:
+    hydrated = deepcopy(report)
+    article_cache: dict[str, dict[str, Any]] = {}
+
+    def article_for(item: dict[str, Any]) -> dict[str, Any]:
+        article_id = item.get("article_id")
+        if not article_id:
+            return {}
+        if article_id not in article_cache:
+            article_cache[article_id] = store.get_article(article_id) or {}
+        return article_cache[article_id]
+
+    def hydrate_item(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+        article = article_for(item)
+        if not article:
+            return item
+        if not item.get("summary"):
+            item["summary"] = article.get("summary") or ""
+        if not item.get("content"):
+            item["content"] = article.get("content") or ""
+        if not item.get("full_text"):
+            item["full_text"] = article.get("content") or article.get("summary") or item.get("summary") or ""
+        if not item.get("published_at"):
+            item["published_at"] = article.get("published_at")
+        return item
+
+    for item in hydrated.get("sources") or []:
+        hydrate_item(item)
+    for item in hydrated.get("timeline") or []:
+        hydrate_item(item)
+    sections = hydrated.get("sections") or {}
+    if isinstance(sections, dict):
+        for value in sections.values():
+            if isinstance(value, list):
+                for item in value:
+                    hydrate_item(item)
+    return hydrated

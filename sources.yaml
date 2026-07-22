@@ -8,7 +8,7 @@ sources:
     search_enabled: true
     categories: [politics]
     tags: [politics, domestic, official, state_media]
-    crawl_interval_minutes: 45
+    crawl_interval_minutes: 10
     sections:
       - key: politics
         name: 人民网时政
@@ -16,6 +16,30 @@ sources:
         url: https://politics.people.com.cn/index1.html
         crawl_strategy: list_page
         tags: [domestic, policy]
+      - key: rss_all
+        name: 人民网全部新闻RSS
+        category: politics
+        url: http://www.people.com.cn/rss/ywkx.xml
+        crawl_strategy: rss_feed
+        tags: [rss, breaking, domestic]
+      - key: rss_politics
+        name: 人民网时政RSS
+        category: politics
+        url: http://www.people.com.cn/rss/politics.xml
+        crawl_strategy: rss_feed
+        tags: [rss, politics, policy]
+      - key: rss_society
+        name: 人民网社会RSS
+        category: politics
+        url: http://www.people.com.cn/rss/society.xml
+        crawl_strategy: rss_feed
+        tags: [rss, society]
+      - key: rss_legal
+        name: 人民网法治RSS
+        category: politics
+        url: http://www.people.com.cn/rss/legal.xml
+        crawl_strategy: rss_feed
+        tags: [rss, legal]
     search:
       strategy: external_first
       domain_filters: [politics.people.com.cn, people.com.cn]
@@ -28,6 +52,183 @@ sources:
           title_field: title
           url_field: url
           snippet_field: content
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 30}
+  - source_id: chinanews
+    name: 中国新闻网
+    root_domain: chinanews.com.cn
+    source_type: rss
+    priority: 1
+    crawl_enabled: true
+    search_enabled: true
+    categories: [politics, economy, tech, sports, entertainment]
+    tags: [rss, breaking, domestic, state_media]
+    crawl_interval_minutes: 10
+    sections:
+      - key: scroll
+        name: 中国新闻网即时RSS
+        category: politics
+        url: https://www.chinanews.com.cn/rss/scroll-news.xml
+        crawl_strategy: rss_feed
+        tags: [breaking, domestic]
+      - key: importnews
+        name: 中国新闻网要闻RSS
+        category: politics
+        url: https://www.chinanews.com.cn/rss/importnews.xml
+        crawl_strategy: rss_feed
+        tags: [important, domestic]
+      - key: china
+        name: 中国新闻网时政RSS
+        category: politics
+        url: https://www.chinanews.com.cn/rss/china.xml
+        crawl_strategy: rss_feed
+        tags: [politics]
+      - key: society
+        name: 中国新闻网社会RSS
+        category: politics
+        url: https://www.chinanews.com.cn/rss/society.xml
+        crawl_strategy: rss_feed
+        tags: [society]
+      - key: finance
+        name: 中国新闻网财经RSS
+        category: economy
+        url: https://www.chinanews.com.cn/rss/finance.xml
+        crawl_strategy: rss_feed
+        tags: [finance, economy]
+      - key: it
+        name: 中国新闻网IT RSS
+        category: tech
+        url: https://www.chinanews.com.cn/rss/it.xml
+        crawl_strategy: rss_feed
+        tags: [tech]
+      - key: sports
+        name: 中国新闻网体育RSS
+        category: sports
+        url: https://www.chinanews.com.cn/rss/sports.xml
+        crawl_strategy: rss_feed
+        tags: [sports]
+      - key: culture
+        name: 中国新闻网文娱RSS
+        category: entertainment
+        url: https://www.chinanews.com.cn/rss/culture.xml
+        crawl_strategy: rss_feed
+        tags: [culture, entertainment]
+    search:
+      strategy: native_first
+      domain_filters: [chinanews.com.cn, www.chinanews.com.cn]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 30}
+  - source_id: kr36
+    name: 36氪
+    root_domain: 36kr.com
+    source_type: rss
+    priority: 2
+    crawl_enabled: true
+    search_enabled: true
+    categories: [tech, economy]
+    tags: [rss, tech, startup, business]
+    crawl_interval_minutes: 10
+    sections:
+      - key: newsflash
+        name: 36氪快讯RSS
+        category: tech
+        url: https://36kr.com/feed-newsflash
+        crawl_strategy: rss_feed
+        tags: [breaking, tech, business]
+      - key: article
+        name: 36氪文章RSS
+        category: tech
+        url: https://36kr.com/feed-article
+        crawl_strategy: rss_feed
+        tags: [tech, startup]
+      - key: feed
+        name: 36氪综合RSS
+        category: economy
+        url: https://36kr.com/feed
+        crawl_strategy: rss_feed
+        tags: [business, economy]
+    search:
+      strategy: external_first
+      domain_filters: [36kr.com, www.36kr.com]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 30}
+  - source_id: stats_gov
+    name: 国家统计局
+    root_domain: stats.gov.cn
+    source_type: official
+    priority: 1
+    crawl_enabled: true
+    search_enabled: true
+    categories: [economy]
+    tags: [official, economy, data, statistics]
+    crawl_interval_minutes: 10
+    sections:
+      - key: data_release
+        name: 国家统计局数据发布
+        category: economy
+        url: https://www.stats.gov.cn/sj/zxfb/
+        crawl_strategy: list_page
+        tags: [data, macro]
+      - key: press_conference
+        name: 国家统计局新闻发布会
+        category: economy
+        url: https://www.stats.gov.cn/sj/xwfbh/
+        crawl_strategy: list_page
+        tags: [press, macro]
+    search:
+      strategy: external_first
+      domain_filters: [stats.gov.cn, www.stats.gov.cn]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 30}
+  - source_id: gov_cn
+    name: 中国政府网
+    root_domain: gov.cn
+    source_type: official
+    priority: 1
+    crawl_enabled: true
+    search_enabled: true
+    categories: [politics, economy]
+    tags: [official, policy, government]
+    crawl_interval_minutes: 10
+    sections:
+      - key: policy_latest
+        name: 中国政府网最新政策
+        category: politics
+        url: https://www.gov.cn/zhengce/zuixin/
+        crawl_strategy: list_page
+        tags: [policy, official]
+      - key: policy_index
+        name: 中国政府网政策
+        category: economy
+        url: https://www.gov.cn/zhengce/
+        crawl_strategy: list_page
+        tags: [policy, economy]
+    search:
+      strategy: external_first
+      domain_filters: [gov.cn, www.gov.cn]
+    rate_limit: {min_interval_seconds: 5, max_pages_per_run: 30}
+  - source_id: mofcom
+    name: 商务部
+    root_domain: mofcom.gov.cn
+    source_type: official
+    priority: 1
+    crawl_enabled: true
+    search_enabled: true
+    categories: [economy, politics]
+    tags: [official, commerce, trade, policy]
+    crawl_interval_minutes: 10
+    sections:
+      - key: news
+        name: 商务部新闻发布
+        category: economy
+        url: https://www.mofcom.gov.cn/xwfb/index.html
+        crawl_strategy: list_page
+        tags: [commerce, trade]
+      - key: announcements
+        name: 商务部公告
+        category: economy
+        url: https://www.mofcom.gov.cn/zcfb/blgg/gg/2026/index.html
+        crawl_strategy: list_page
+        tags: [announcement, trade_policy]
+    search:
+      strategy: external_first
+      domain_filters: [mofcom.gov.cn, www.mofcom.gov.cn]
     rate_limit: {min_interval_seconds: 5, max_pages_per_run: 30}
   - source_id: cctv_news_china
     name: 央视新闻国内

@@ -3,19 +3,23 @@ let mobileViewMode = "chat";
 let mobileSnapTimer = null;
 let mobileTypingScrollY = 0;
 const mobileState = {
-  topic: "张雪机车",
+  topic: "新能源汽车产业链",
   categoryScope: [],
 };
 const mobileBootstrapTopics = [
-  { title: "张雪机车", category_scope: ["sports"], topic_type: "user" },
-  { title: "SpaceX IPO 传闻", category_scope: ["tech", "economy"], topic_type: "system" },
-  { title: "2026 世界杯开幕", category_scope: ["sports"], topic_type: "system" },
+  { title: "新能源汽车产业链", category_scope: ["auto"], topic_type: "user" },
+  { title: "科技公司上市观察", category_scope: ["tech", "economy"], topic_type: "system" },
+  { title: "大型体育赛事运营", category_scope: ["sports"], topic_type: "system" },
   { title: "AI 终端设备", category_scope: ["tech"], topic_type: "user" },
 ];
 syncMobileChatContext();
 syncMobileSessionState();
 syncMobileBriefToggle();
 syncMobileViewModeFromScroll();
+bindSlashCommandMenu();
+window.applyChatConversationContext = applyMobileChatConversationContext;
+window.refreshTopics = loadMobileTopics;
+restoreChatMemory("#messages");
 
 document.querySelectorAll("[data-auth-mode-target]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -298,6 +302,39 @@ async function handleMobileAssistantInput(message) {
     if (["schedule"].includes(command.name)) {
       return sendChatIntoTurn(message, assistantNode);
     }
+    if (["report", "r"].includes(command.name)) {
+      applyMobileTopicCommand(command);
+      const reportTopic = cleanMobileSkillTopicTitle(commandText(command) || "");
+      const category = commandArg(command, "category", "cat");
+      const timeRange = commandArg(command, "time-range", "time", "range") || "30d";
+      const reportCommand = [
+        "/report",
+        reportTopic,
+        category ? `--category ${category}` : "",
+        timeRange ? `--time-range ${timeRange}` : "",
+      ].filter(Boolean).join(" ");
+      return sendChatIntoTurn(reportCommand, assistantNode);
+    }
+    if (["brief"].includes(command.name)) {
+      applyMobileTopicCommand(command);
+      const briefTopic = commandText(command) || "";
+      const briefCategory = commandArg(command, "category", "cat");
+      const briefCommand = ["/brief", briefTopic, briefCategory ? `--category ${briefCategory}` : ""].filter(Boolean).join(" ");
+      return sendChatIntoTurn(briefCommand, assistantNode);
+    }
+    if (["related"].includes(command.name)) {
+      const relatedTopic = commandText(command) || commandArg(command, "topic", "q", "query");
+      if (relatedTopic) mobileState.topic = relatedTopic;
+      applyMobileTopicCommand({ ...command, args: { ...command.args, _: relatedTopic ? [relatedTopic] : [] } });
+      return runMobileRelatedSearchIntoTurn(assistantNode, relatedTopic);
+    }
+    if (["factcheck", "verify"].includes(command.name)) {
+      applyMobileTopicCommand(command);
+      const claim = commandText(command) || mobileState.topic || "";
+      const category = commandArg(command, "category", "cat") || (mobileState.categoryScope || []).join(",");
+      const factCommand = ["/factcheck", claim, category ? `--category ${category}` : ""].filter(Boolean).join(" ");
+      return sendChatIntoTurn(factCommand, assistantNode);
+    }
     if (["feed"].includes(command.name)) {
       mobileCategory = commandArg(command, "cat", "category") || commandText(command) || "";
       mobileState.categoryScope = mobileCategory ? [mobileCategory] : [];
@@ -307,7 +344,7 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/search、/topic、/task、/schedule、/deep、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related、/search、/topic、/task、/schedule、/deep、/feed。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);
@@ -315,13 +352,37 @@ async function handleMobileAssistantInput(message) {
   }
 }
 
+async function runMobileRelatedSearchIntoTurn(assistantNode, explicitTopic = "") {
+  const topic = explicitTopic || mobileState.topic || "当前关注";
+  const data = await request("/api/news/related", {
+    method: "POST",
+    body: JSON.stringify({
+      conversation_id: conversationId,
+      user_id: activeUserId || "default",
+      query: topic,
+      topic,
+      category_scope: mobileState.categoryScope,
+      max_queries: 8,
+      allow_web_search: isWebSearchEnabled(),
+    }),
+  });
+  conversationId = data.conversation_id;
+  localStorage.setItem("pna_conversation_id", conversationId);
+  setAssistantResponseHtml(assistantNode, chatResponseHtml(data));
+  syncChatResponseContext(data);
+  await notifyConversationHistoryChanged();
+  return data;
+}
+
 async function loadMobileTopics() {
   const target = document.querySelector("[data-mobile-topic-list]");
   if (!target) return;
   try {
-    const remote = activeUserId && activeUserId !== "default"
-      ? await request(`/api/topics?user_id=${encodeURIComponent(activeUserId)}&limit=10`)
-      : { items: [] };
+    const userId = activeUserId || "default";
+    const topicConversationId = conversationId || "__new__";
+    const remote = await request(
+      `/api/topics?user_id=${encodeURIComponent(userId)}&conversation_id=${encodeURIComponent(topicConversationId)}&limit=10`,
+    );
     const items = mergeMobileTopics([...(remote.items || []), ...mobileBootstrapTopics]).slice(0, 8);
     target.innerHTML = items
       .map((item) => `<button type="button" class="${item.topic_type === "system" ? "system-topic" : "user-topic"}" data-mobile-topic="${escapeHtml(item.title)}" data-category-scope="${escapeHtml((item.category_scope || []).join(","))}">${escapeHtml(shortMobileTopic(item.title))}</button>`)
@@ -379,8 +440,33 @@ function syncMobileChatContext() {
     topic: mobileState.topic,
     category_scope: mobileState.categoryScope,
     use_llm: true,
+    allow_web_search: isWebSearchEnabled(),
   };
   updateMobileBrief();
+}
+
+function applyMobileChatConversationContext(context = {}) {
+  if (context.topic) mobileState.topic = cleanMobileSkillTopicTitle(context.topic);
+  if (Array.isArray(context.category_scope)) mobileState.categoryScope = context.category_scope;
+  mobileCategory = mobileState.categoryScope[0] || "";
+  syncMobileTabs();
+  syncMobileChatContext();
+}
+
+function cleanMobileSkillTopicTitle(value) {
+  let topic = String(value || "").replace(/\s+/g, " ").trim();
+  const prefixes = ["专题报告：", "专题报告:", "事实核查：", "事实核查:", "继续核查：", "继续核查:"];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const prefix of prefixes) {
+      if (topic.startsWith(prefix)) {
+        topic = topic.slice(prefix.length).trim();
+        changed = true;
+      }
+    }
+  }
+  return topic;
 }
 
 function syncMobileTabs() {
