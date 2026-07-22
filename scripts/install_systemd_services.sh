@@ -34,7 +34,7 @@ group_replacement="$(escape_sed "${RUN_GROUP}")"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
-for unit in personal-news-web.service personal-news-crawler.service personal-news.target; do
+for unit in personal-news-web.service personal-news-crawler.service personal-news-tasks.service personal-news.target; do
   sed \
     -e "s|__PROJECT_DIR__|${project_replacement}|g" \
     -e "s|__RUN_USER__|${user_replacement}|g" \
@@ -45,4 +45,4 @@ done
 
 "${sudo_cmd[@]}" systemctl daemon-reload
 "${sudo_cmd[@]}" systemctl enable --now personal-news.target
-"${sudo_cmd[@]}" systemctl --no-pager --full status personal-news-web.service personal-news-crawler.service
+"${sudo_cmd[@]}" systemctl --no-pager --full status personal-news-web.service personal-news-crawler.service personal-news-tasks.service

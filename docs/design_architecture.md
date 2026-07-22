@@ -68,7 +68,7 @@ source 配置
 → search/feed/chat/report 使用
 ```
 
-持续抓取由独立的 `scripts/run_crawl_loop.py` worker 进程承载，不跟随每个 Web 进程创建子线程。生产环境通过 `personal-news.target` 同时启动 Web 和唯一 crawler 进程，两者可独立重启。worker 使用固定小并发处理到期 section，且同一进程内抓取轮次互斥。索引页只 follow 到文章详情页一层；URL 规范化和 URL/content hash 去重发生在入库前。
+持续抓取由独立的 `scripts/run_crawl_loop.py` worker 进程承载，不跟随每个 Web 进程创建子线程。生产环境通过 `personal-news.target` 同时启动 Web、唯一 crawler 和唯一 task runner，三者可独立重启。worker 使用固定小并发处理到期 section，且同一进程内抓取轮次互斥。索引页只 follow 到文章详情页一层；URL 规范化和 URL/content hash 去重发生在入库前。
 
 文章入库后的主题抽取由 `topic_extraction.py` 完成。板块沿用 section 的固定 category；模型输入包含文章内容和最近几天同板块主题，结构化输出只能引用候选主题 ID。程序负责校验和幂等归并，业务提示词独立放在 `prompts/topic_extraction.md`。
 
@@ -114,16 +114,18 @@ source 配置
 ```text
 创建任务
 → 计算 next_run_at
-→ due 任务扫描
-→ 执行报告或主题跟踪
+→ scripts/run_task_loop.py 扫描 due 任务
+→ 执行报告、主题跟踪或 scheduled_push
 → 写入通知
+→ scheduled_push 追加到用户固定 Scheduled Push 对话
 ```
 
 关键模块：
 
-- `tasks.py`：任务创建、cron 解析、运行。
+- `tasks.py`：任务创建、cron 解析、运行和 `/schedule` 自然语言入口。
 - `reports.py`：报告生成。
-- `store.py`：任务、报告、通知持久化。
+- `topic_summary.py`：默认专题摘要 skill 执行器，输出章节、时间线、人物/事件图谱、分析和 Markdown。
+- `store.py`：任务、报告、通知、对话目录和对话 turn 持久化。
 
 ## 新功能开发约束
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=Personal News Agent web and background services
-Wants=personal-news-web.service personal-news-crawler.service
+Wants=personal-news-web.service personal-news-crawler.service personal-news-tasks.service
 After=network-online.target
 
 [Install]

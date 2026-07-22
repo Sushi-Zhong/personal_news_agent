@@ -149,7 +149,7 @@ python3 scripts/run_crawl_loop.py \
   --fetch-articles 5
 ```
 
-生产环境不把爬虫放入 FastAPI 子线程，而是由 systemd 同时管理 Web 和唯一的 crawler 进程。在 Linux 服务器的项目目录执行：
+生产环境不把爬虫或用户定时任务放入 FastAPI 子线程，而是由 systemd 同时管理 Web、唯一 crawler 和用户级 task runner。在 Linux 服务器的项目目录执行：
 
 ```bash
 ./scripts/install_systemd_services.sh
@@ -160,14 +160,16 @@ python3 scripts/run_crawl_loop.py \
 ```text
 personal-news-web.service
 personal-news-crawler.service
+personal-news-tasks.service
 ```
 
 常用运维命令：
 
 ```bash
 sudo systemctl restart personal-news.target
-sudo systemctl status personal-news-web personal-news-crawler
+sudo systemctl status personal-news-web personal-news-crawler personal-news-tasks
 sudo journalctl -u personal-news-crawler -f
+sudo journalctl -u personal-news-tasks -f
 ```
 
 systemd 默认使用当前登录用户；通过 `sudo` 运行安装脚本时使用 `SUDO_USER`。如需指定用户：
@@ -176,7 +178,7 @@ systemd 默认使用当前登录用户；通过 `sudo` 运行安装脚本时使�
 PNA_RUN_USER=pna PNA_RUN_GROUP=pna ./scripts/install_systemd_services.sh
 ```
 
-Web 和 crawler 都会加载 `.env.ext`，然后使用 `PERSONAL_NEWS_VENV` 指向的 Python；该解释器不存在时回退到 `python3`。crawler 只应运行一个 systemd 实例。可在 `.env.ext` 中调整：
+Web、crawler 和 task runner 都会加载 `.env.ext`，然后使用 `PERSONAL_NEWS_VENV` 指向的 Python；该解释器不存在时回退到 `python3`。crawler 和 task runner 都只应各运行一个 systemd 实例。可在 `.env.ext` 中调整：
 
 ```bash
 export PNA_CRAWL_WORKERS=2
@@ -185,6 +187,8 @@ export PNA_CRAWL_PER_SECTION_LIMIT=20
 export PNA_CRAWL_FETCH_ARTICLES=5
 export PNA_CRAWL_IDLE_SECONDS=30
 export PNA_TOPIC_EXTRACTION_LIMIT=20
+export PNA_TASK_DUE_LIMIT=10
+export PNA_TASK_IDLE_SECONDS=30
 ```
 
 单轮调试仍可使用：
@@ -192,6 +196,15 @@ export PNA_TOPIC_EXTRACTION_LIMIT=20
 ```bash
 python3 scripts/run_due_crawl.py --workers 2 --limit 10 --per-section-limit 20 --fetch-articles 5
 ```
+
+用户定时推送的常驻 runner 可本地单独启动：
+
+```bash
+source .env.ext
+python3 scripts/run_task_loop.py --limit 10 --idle-seconds 30
+```
+
+聊天里输入 `/schedule 帮我定时每天早晨9点收集关于AI Agent的新闻，并总结成一个专题发给我` 会创建 `scheduled_push` 任务。主线流程是：LLM 先把自然语言抽取成标准任务参数（`schedule`、`topics`、`category_scope`、`output_style`、`parsed_workflow` 等），服务端规范化后调用 `create_task` 入库。`scheduled_tasks` 会保存 owner/user、cron、创建时间、原始任务描述和解析后的任务流程。到期后 runner 会抓取/召回相关新闻，生成专题摘要，并追加到该用户固定的 `Scheduled Push` 对话。
 
 发现的 URL 会先去除 fragment 和常见追踪参数，再按 canonical URL 去重。正文入库时还会按内容 hash 做第二层去重。抓取结果会返回 `saved_articles`、`duplicate_articles`、`skipped_articles` 和各 worker 的执行记录。
 
@@ -385,6 +398,16 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 curl -X POST http://127.0.0.1:8000/api/reports \
   -H 'content-type: application/json' \
   -d '{"topic":"新能源汽车价格战","category_scope":["auto","economy"],"time_range":"30d"}'
+
+curl -X POST http://127.0.0.1:8000/api/topics/summary \
+  -H 'content-type: application/json' \
+  -d '{"topic":"新能源汽车价格战","category_scope":["auto","economy"],"max_articles":8,"use_llm":true}'
+```
+
+默认专题摘要 skill 会输出章节、时间线、人物/事件图谱、分析、Markdown 和来源证据。可用 demo 脚本从头到尾跑一遍：
+
+```bash
+python3 scripts/demo_topic_summary.py --topic 新能源汽车价格战 --category auto --category economy --no-llm
 ```
 
 ## 测试
