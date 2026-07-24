@@ -13,17 +13,25 @@ if (activeUserId === "default") {
     .catch(() => {});
 }
 
+const topicStorageKey = () => `pna_current_topic:${activeUserId || "default"}`;
+const TOPIC_CONTEXT_VERSION = 1;
+const savedTopicContext = readSavedTopicContext();
+if (!savedTopicContext.topic) {
+  conversationId = null;
+  localStorage.removeItem("pna_conversation_id");
+}
+
 const consoleState = {
-  topic: "张雪机车",
-  categoryScope: ["sports"],
+  topic: savedTopicContext.topic,
+  categoryScope: savedTopicContext.categoryScope,
   view: "event-line",
   topicPayload: null,
 };
 let pendingTopicFromNextMessage = false;
+let topicLocked = Boolean(consoleState.topic);
 let activeEventActionPopover = null;
 let activeEventActionCleanup = null;
 const bootstrapTopics = [
-  { title: "张雪机车", category_scope: ["sports"], topic_type: "user" },
   { title: "NBA 总决赛", category_scope: ["sports"], topic_type: "user" },
   { title: "俄乌战争对农作物的影响", category_scope: ["politics", "economy"], topic_type: "user" },
   { title: "AI 终端设备", category_scope: ["tech"], topic_type: "user" },
@@ -55,7 +63,9 @@ document.querySelector("#onboardingForm")?.addEventListener("submit", async (eve
 document.querySelector("#topicForm")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   consoleState.topic = document.querySelector("#topicInput").value.trim() || consoleState.topic;
+  topicLocked = Boolean(consoleState.topic);
   consoleState.categoryScope = parseScope(document.querySelector("#categoryScope").value);
+  saveTopicContext();
   syncChatContext();
   syncContextDock();
   syncTaskTopic();
@@ -140,7 +150,9 @@ document.querySelector("#taskForm")?.addEventListener("submit", async (event) =>
 });
 
 bindAskButtons();
+bindSlashCommandMenu();
 bindNotificationReads();
+bindTaskActions();
 bindRailTooltips();
 window.handleAssistantInput = handleAssistantInput;
 window.applyChatConversationContext = applyChatConversationContext;
@@ -174,6 +186,7 @@ async function handleAssistantInput(message) {
 
   if (!command) {
     const response = await sendChat(message);
+    await createTopicFromFirstMessage(message, response);
     return response;
   }
 
@@ -224,8 +237,6 @@ async function handleAssistantInput(message) {
     }
     if (["related"].includes(command.name)) {
       const relatedTopic = commandText(command) || commandArg(command, "topic", "q", "query");
-      if (relatedTopic) consoleState.topic = relatedTopic;
-      await applyTopicCommand({ ...command, args: { ...command.args, _: relatedTopic ? [relatedTopic] : [] } }, { reload: false });
       return runRelatedSearchIntoTurn(assistantNode, relatedTopic);
     }
     if (["factcheck", "verify"].includes(command.name)) {
@@ -253,7 +264,7 @@ async function handleAssistantInput(message) {
       return null;
     }
 
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related、/search、/topic、/task、/deep、/ingest、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related。");
 
     return null;
   } catch (error) {
@@ -263,14 +274,15 @@ async function handleAssistantInput(message) {
 }
 
 async function runRelatedSearchIntoTurn(assistantNode, explicitTopic = "") {
-  const topic = explicitTopic || consoleState.topic || document.querySelector("#topicInput")?.value?.trim() || "";
+  const currentTopic = consoleState.topic || document.querySelector("#topicInput")?.value?.trim() || "";
+  const query = explicitTopic || currentTopic;
   const data = await request("/api/news/related", {
     method: "POST",
     body: JSON.stringify({
       conversation_id: conversationId,
       user_id: activeUserId || "default",
-      query: topic || "当前关注",
-      topic,
+      query: query || "当前关注",
+      topic: currentTopic,
       category_scope: consoleState.categoryScope,
       max_queries: 8,
       allow_web_search: isWebSearchEnabled(),
@@ -285,6 +297,7 @@ async function runRelatedSearchIntoTurn(assistantNode, explicitTopic = "") {
 }
 
 async function createTopicFromFirstMessage(message, response, options = {}) {
+  if (topicLocked && !pendingTopicFromNextMessage && options.force !== true) return null;
   if (!pendingTopicFromNextMessage && options.force !== true) return null;
   const createdConversationId = response?.conversation_id || conversationId;
   if (!createdConversationId) return null;
@@ -310,7 +323,9 @@ async function createTopicFromFirstMessage(message, response, options = {}) {
     conversationId = createdConversationId;
     localStorage.setItem("pna_conversation_id", conversationId);
     consoleState.topic = topic.title || title;
+    topicLocked = Boolean(consoleState.topic);
     consoleState.categoryScope = topic.category_scope || categoryScope;
+    saveTopicContext();
     syncChatContext();
     syncContextDock();
     syncTaskTopic();
@@ -333,8 +348,16 @@ async function applyTopicCommand(command, options = {}) {
   const reload = options.reload !== false;
   const topic = commandText(command) || commandArg(command, "topic", "q", "query");
   const scope = commandScope(command, consoleState.categoryScope);
-  if (topic) consoleState.topic = topic;
+  if (topic && topicLocked && topic !== consoleState.topic) {
+    setStatus(`当前对话主题已确定：${consoleState.topic}`);
+    return null;
+  }
+  if (topic) {
+    consoleState.topic = topic;
+    topicLocked = true;
+  }
   consoleState.categoryScope = scope;
+  saveTopicContext();
   const topicInput = document.querySelector("#topicInput");
   const categorySelect = document.querySelector("#categoryScope");
   if (topicInput) topicInput.value = consoleState.topic;
@@ -482,8 +505,10 @@ function bindRailTooltips() {
 
 function startNewTopicConversation() {
   pendingTopicFromNextMessage = true;
+  topicLocked = false;
   conversationId = null;
   localStorage.removeItem("pna_conversation_id");
+  clearSavedTopicContext();
   consoleState.topic = "";
   consoleState.categoryScope = [];
   consoleState.topicPayload = null;
@@ -518,6 +543,24 @@ async function loadTasks() {
 
 async function loadTopicView() {
   syncChatContext();
+  if (!consoleState.topic) {
+    consoleState.topicPayload = null;
+    const heading = document.querySelector("[data-topic-heading]");
+    const summary = document.querySelector("[data-topic-summary]");
+    const visual = document.querySelector("[data-topic-visual]");
+    const dialogContext = document.querySelector("[data-dialog-context]");
+    if (heading) heading.textContent = "新对话";
+    if (summary) summary.textContent = "发送第一句话后确定关注主题。";
+    if (visual) visual.innerHTML = `<div class="empty-state">暂无主题</div>`;
+    if (dialogContext) dialogContext.textContent = "新对话";
+    document.querySelector("[data-topic-article-count]").textContent = "0";
+    document.querySelector("[data-topic-event-count]").textContent = "0";
+    document.querySelector("[data-topic-node-count]").textContent = "0";
+    renderEvidence([]);
+    renderInsightRail(null);
+    syncContextDock();
+    return;
+  }
   try {
     const payload = await request("/api/topics/view", {
       method: "POST",
@@ -625,12 +668,118 @@ function renderTasks(items) {
   }
   target.innerHTML = items
     .map(
-      (item) => `<article>
-        <strong>${escapeHtml((item.topics || []).join("、") || taskTypeLabel(item.task_type))}</strong>
-        <span>${escapeHtml(taskTypeLabel(item.task_type))} · ${escapeHtml(item.schedule_cron)} · ${escapeHtml(nextRunLabel(item.next_run_at))}</span>
+      (item) => {
+        const title = (item.topics || []).join("、") || taskTypeLabel(item.task_type);
+        const enabled = item.enabled !== false;
+        const meta = enabled ? `${taskTypeLabel(item.task_type)} · ${item.schedule_cron} · ${nextRunLabel(item.next_run_at)}` : "已禁用";
+        return `<article class="${enabled ? "" : "disabled"}" role="button" tabindex="0" data-task-id="${escapeAttr(item.id)}" data-task-enabled="${enabled ? "true" : "false"}" data-task-title="${escapeAttr(title)}" data-task-meta="${escapeAttr(meta)}">
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(meta)}</span>
       </article>`
+      }
     )
     .join("");
+}
+
+function bindTaskActions() {
+  document.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-task-id]");
+    if (!item) return;
+    showTaskActionPopover(item);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const item = event.target.closest("[data-task-id]");
+    if (!item) return;
+    event.preventDefault();
+    showTaskActionPopover(item);
+  });
+}
+
+function showTaskActionPopover(item) {
+  closeEventActionPopover();
+  const taskId = item.dataset.taskId || "";
+  const enabled = item.dataset.taskEnabled !== "false";
+  const title = item.dataset.taskTitle || "定时跟踪任务";
+  const meta = item.dataset.taskMeta || "选择接下来要做的动作。";
+  const actionLabel = enabled ? "禁用" : "启用";
+  const rect = item.getBoundingClientRect();
+  const popover = document.createElement("div");
+  popover.className = "event-action-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", `定时跟踪操作：${title}`);
+  popover.innerHTML = `
+    <strong>${escapeHtml(title)}</strong>
+    <p>${escapeHtml(meta)}</p>
+    <div>
+      <button type="button" data-task-popover-toggle>${actionLabel}</button>
+      <button type="button" data-task-popover-delete>删除</button>
+      <button type="button" data-task-popover-cancel>关闭</button>
+    </div>
+  `;
+  document.body.appendChild(popover);
+  const left = Math.min(window.innerWidth - popover.offsetWidth - 12, Math.max(12, rect.right + 8));
+  const top = Math.min(window.innerHeight - popover.offsetHeight - 12, Math.max(12, rect.top));
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+
+  popover.querySelector("[data-task-popover-toggle]")?.addEventListener("click", async () => {
+    if (!taskId) return;
+    await setTrackingTaskEnabled(taskId, !enabled);
+    closeEventActionPopover();
+  });
+  popover.querySelector("[data-task-popover-delete]")?.addEventListener("click", async () => {
+    if (!taskId) return;
+    await deleteTrackingTask(taskId);
+    closeEventActionPopover();
+  });
+  popover.querySelector("[data-task-popover-cancel]")?.addEventListener("click", closeEventActionPopover);
+
+  const onPointerDown = (event) => {
+    if (popover.contains(event.target) || item.contains(event.target)) return;
+    closeEventActionPopover();
+  };
+  const onKeyDown = (event) => {
+    if (event.key === "Escape") closeEventActionPopover();
+  };
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+  }, 0);
+  activeEventActionPopover = popover;
+  activeEventActionCleanup = () => {
+    document.removeEventListener("pointerdown", onPointerDown);
+    document.removeEventListener("keydown", onKeyDown);
+  };
+}
+
+async function setTrackingTaskEnabled(taskId, enabled) {
+  try {
+    await request(`/api/tasks/${encodeURIComponent(taskId)}/enabled`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: activeUserId, enabled }),
+    });
+    document.querySelector("[data-task-status]").textContent = enabled ? "任务已启用。" : "任务已禁用。";
+    setStatus(enabled ? "定时跟踪任务已启用。" : "定时跟踪任务已禁用。");
+    await loadTasks();
+  } catch (error) {
+    document.querySelector("[data-task-status]").textContent = error.message;
+    setStatus(error.message);
+  }
+}
+
+async function deleteTrackingTask(taskId) {
+  try {
+    await request(`/api/tasks/${encodeURIComponent(taskId)}?user_id=${encodeURIComponent(activeUserId)}`, {
+      method: "DELETE",
+    });
+    document.querySelector("[data-task-status]").textContent = "任务已删除。";
+    setStatus("定时跟踪任务已删除。");
+    await loadTasks();
+  } catch (error) {
+    document.querySelector("[data-task-status]").textContent = error.message;
+    setStatus(error.message);
+  }
 }
 
 function bindTopicCards() {
@@ -638,11 +787,16 @@ function bindTopicCards() {
     if (button.dataset.bound === "true") return;
     button.dataset.bound = "true";
     button.addEventListener("click", async () => {
-      document.querySelectorAll(".topic-card").forEach((item) => item.classList.toggle("active", item === button));
-      pendingTopicFromNextMessage = false;
       const selectedConversationId = button.dataset.conversationId || "";
       const selectedTopic = button.dataset.topicTitle || button.textContent.trim();
       const selectedScope = parseScope(button.dataset.categoryScope || "");
+      if (topicLocked && consoleState.topic && selectedTopic !== consoleState.topic) {
+        document.querySelectorAll(".topic-card").forEach((item) => item.classList.toggle("active", item.dataset.topicTitle === consoleState.topic));
+        setStatus(`当前对话主题已确定：${consoleState.topic}`);
+        return;
+      }
+      document.querySelectorAll(".topic-card").forEach((item) => item.classList.toggle("active", item === button));
+      pendingTopicFromNextMessage = false;
       if (selectedConversationId) {
         conversationId = selectedConversationId;
         localStorage.setItem("pna_conversation_id", conversationId);
@@ -651,10 +805,13 @@ function bindTopicCards() {
         localStorage.removeItem("pna_conversation_id");
       }
       consoleState.topic = selectedTopic;
+      topicLocked = Boolean(consoleState.topic);
       consoleState.categoryScope = selectedScope;
+      saveTopicContext();
       const previousTopic = consoleState.topic;
       consoleState.topic = button.dataset.topicTitle || button.textContent.trim();
       consoleState.categoryScope = parseScope(button.dataset.categoryScope || "");
+      saveTopicContext();
       syncChatContext();
       syncContextDock();
       document.querySelector("#topicInput").value = consoleState.topic;
@@ -672,7 +829,9 @@ function bindTopicCards() {
           messages.appendChild(chatTurn("assistant", `已切换到：${selectedTopic}`));
         }
         consoleState.topic = selectedTopic;
+        topicLocked = Boolean(consoleState.topic);
         consoleState.categoryScope = selectedScope;
+        saveTopicContext();
         syncChatContext();
         syncContextDock();
         document.querySelector("#topicInput").value = consoleState.topic;
@@ -1067,6 +1226,39 @@ function parseScope(value) {
     .filter(Boolean);
 }
 
+function readSavedTopicContext() {
+  try {
+    const payload = JSON.parse(localStorage.getItem(topicStorageKey()) || "{}");
+    if (payload.version !== TOPIC_CONTEXT_VERSION) return { topic: "", categoryScope: [] };
+    return {
+      topic: String(payload.topic || "").trim(),
+      categoryScope: Array.isArray(payload.category_scope) ? payload.category_scope : [],
+    };
+  } catch (error) {
+    return { topic: "", categoryScope: [] };
+  }
+}
+
+function saveTopicContext() {
+  if (!consoleState.topic) {
+    clearSavedTopicContext();
+    return;
+  }
+  localStorage.setItem(topicStorageKey(), JSON.stringify({
+    version: TOPIC_CONTEXT_VERSION,
+    topic: consoleState.topic,
+    category_scope: consoleState.categoryScope || [],
+  }));
+}
+
+function clearSavedTopicContext() {
+  localStorage.removeItem(topicStorageKey());
+}
+
+function currentTopicLabel() {
+  return consoleState.topic || "新对话";
+}
+
 function syncTaskTopic() {
   const form = document.querySelector("#taskForm");
   if (!form) return;
@@ -1084,8 +1276,16 @@ function syncChatContext() {
 }
 
 function applyChatConversationContext(context = {}) {
-  if (Object.prototype.hasOwnProperty.call(context, "topic")) consoleState.topic = cleanSkillTopicTitle(context.topic || "");
+  if (Object.prototype.hasOwnProperty.call(context, "topic")) {
+    const nextTopic = cleanSkillTopicTitle(context.topic || "");
+    if (nextTopic && topicLocked && nextTopic !== consoleState.topic) return;
+    if (nextTopic) {
+      consoleState.topic = nextTopic;
+      if (!pendingTopicFromNextMessage) topicLocked = true;
+    }
+  }
   if (Array.isArray(context.category_scope)) consoleState.categoryScope = context.category_scope;
+  saveTopicContext();
   const topicInput = document.querySelector("#topicInput");
   const categorySelect = document.querySelector("#categoryScope");
   if (topicInput) topicInput.value = consoleState.topic;
@@ -1115,14 +1315,14 @@ function syncContextDock() {
   const category = document.querySelector("[data-current-category-chip]");
   const view = document.querySelector("[data-current-view-chip]");
   if (topic) {
-    topic.textContent = consoleState.topic || "未设置主题";
+    topic.textContent = currentTopicLabel();
     topic.title = topic.textContent;
   }
   if (category) {
     category.textContent = consoleState.categoryScope.join(" / ") || "all";
     category.title = category.textContent;
   }
-  if (topic) topic.textContent = consoleState.topic;
+  if (topic) topic.textContent = currentTopicLabel();
   if (category) category.textContent = consoleState.categoryScope.join(" / ") || "all";
   if (view) view.textContent = consoleState.view === "relation-graph" ? "关系网" : "事件线";
   updateAgentBrief(consoleState.topicPayload);
@@ -1136,14 +1336,14 @@ function updateAgentBrief(payload) {
   const articles = payload?.source_articles || [];
   const events = payload?.event_line?.items || [];
   if (topic) {
-    topic.textContent = consoleState.topic || "新对话";
+    topic.textContent = currentTopicLabel();
     topic.title = topic.textContent;
   }
   if (category) {
     category.textContent = consoleState.categoryScope.join(" / ") || "all";
     category.title = category.textContent;
   }
-  if (topic) topic.textContent = consoleState.topic;
+  if (topic) topic.textContent = currentTopicLabel();
   if (category) category.textContent = consoleState.categoryScope.join(" / ") || "all";
   if (evidence) evidence.textContent = String(articles.length || payload?.build?.article_count || 0);
   if (next) next.textContent = events.length >= 3 ? "报告" : "深挖";
@@ -1250,12 +1450,15 @@ function closeEventActionPopover() {
 async function runFeedEventAsk(item, title, ask, isEventCard) {
   const category = isEventCard ? eventCardCategory(item) : feedItemCategory(item);
   const categoryScope = category ? [category] : [];
-  consoleState.topic = title;
-  consoleState.categoryScope = categoryScope;
+  if (!topicLocked) {
+    consoleState.topic = title;
+    topicLocked = Boolean(consoleState.topic);
+    consoleState.categoryScope = categoryScope;
+  }
   const topicInput = document.querySelector("#topicInput");
   const categorySelect = document.querySelector("#categoryScope");
-  if (topicInput) topicInput.value = title;
-  if (categorySelect) categorySelect.value = categoryScope.join(",");
+  if (topicInput) topicInput.value = consoleState.topic;
+  if (categorySelect) categorySelect.value = consoleState.categoryScope.join(",");
   syncChatContext();
   syncContextDock();
   syncTaskTopic();

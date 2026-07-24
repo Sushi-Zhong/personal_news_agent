@@ -31,6 +31,74 @@ from personal_news_agent.services.store import NewsStore
 
 RELATED_QUERY_MIN = 3
 RELATED_QUERY_MAX = 8
+TOPIC_DRIFT_NOTICE = "提示：这条追问和当前关注主题关联较弱，我会照常回答，但不会因此更改当前主题或新增关注卡片。"
+MULTI_FOCUS_DRIFT_NOTICE = "提示：这条消息里包含多个彼此关联较弱的热点，我会照常分别回答，但不会把它们合并成同一个主题或新增关注卡片。"
+TOPIC_TEMPLATE_PHRASES = (
+    "围绕",
+    "围绕热点事件",
+    "热点资讯",
+    "热点事件",
+    "中新网相关热点",
+    "相关热点",
+    "基于资讯",
+    "展开",
+    "继续深挖",
+    "深度挖掘",
+    "深挖",
+    "做一次",
+    "按",
+    "告诉我发生了什么",
+    "告诉我后续应该重点盯哪些变化",
+    "告诉我",
+    "发生了什么",
+    "为什么重要",
+    "后续看什么",
+    "和后续观察点",
+    "后续观察点",
+    "后续观察",
+    "后续应该重点盯哪些变化",
+    "后续回应或新进展",
+    "是否出现后续回应或新进展",
+    "是否出现新的权威来源",
+    "新的权威来源",
+    "权威来源",
+    "是否出现",
+    "最近有什么值得关注的变化",
+    "今天有哪些值得关注的新变化",
+    "值得关注的新变化",
+    "最新新闻",
+    "按来源搜索",
+    "正文抓取",
+    "证据合并",
+    "和事件线处理",
+    "事件线处理",
+    "最新进展",
+    "关键主体",
+    "不确定性总结",
+    "整理成专题",
+    "和关系网观察重点",
+    "事件线",
+    "关系网观察重点",
+    "观察重点",
+    "设为跟踪主题",
+    "保存跟踪",
+    "跟踪主题",
+    "持续跟踪",
+    "跟踪",
+    "追踪",
+    "继续观察",
+    "给我结论",
+    "给我",
+    "结论",
+    "证据",
+    "观察后续是否影响市场行业公众服务或地方执行",
+    "观察后续是否影响市场、行业、公众服务或地方执行",
+    "基于我的兴趣和当前推荐",
+    "今日简报",
+    "一版今日简报",
+    "已把",
+    "把",
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +137,7 @@ class NewsChatService:
         self.local_agent = local_agent or LocalAgentService()
         self.skill_registry = skill_registry
         self.services = services or {}
+        self.topic_drift_notice = TOPIC_DRIFT_NOTICE
 
     async def chat(
         self,
@@ -82,17 +151,18 @@ class NewsChatService:
     ) -> ChatResponse:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
         topic, category_scope = self._resolve_conversation_context(conv_id, message, topic, category_scope, user_id)
+        save_topic = self._request_topic_for_save(message, topic)
         moderation_response = await self._moderate_query(conv_id, message)
         if moderation_response:
-            self._save_response_turn(moderation_response, message, user_id, topic, category_scope)
+            self._save_response_turn(moderation_response, message, user_id, save_topic, category_scope)
             return moderation_response
         schedule_response = await self._schedule_command_response(conv_id, user_id, message)
         if schedule_response:
-            self._save_response_turn(schedule_response, message, user_id, topic, category_scope)
+            self._save_response_turn(schedule_response, message, user_id, save_topic, category_scope)
             return schedule_response
         skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope, allow_web_search)
         if skill_response:
-            self._save_response_turn(skill_response, message, user_id, topic, category_scope)
+            self._save_response_turn(skill_response, message, user_id, save_topic, category_scope)
             return skill_response
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         ordinal = extract_ordinal(message) if not topic_response else None
@@ -119,7 +189,7 @@ class NewsChatService:
                 user_id,
                 allow_web_search,
             )
-        self._save_response_turn(response, message, user_id, topic, category_scope)
+        self._save_response_turn(response, message, user_id, save_topic, category_scope)
         return response
 
     async def related_search(
@@ -209,6 +279,8 @@ class NewsChatService:
         ]
         mind_map = _related_mind_map_payload(base_query, grouped, evidence, planner_source)
         answer = _related_search_answer(base_query, grouped, evidence, planner_source)
+        drift_warning = _topic_drift_warning(topic, base_query, query)
+        answer = _prepend_notice(answer, drift_warning)
         response = ChatResponse(
             conversation_id=conv_id,
             answer=answer,
@@ -239,21 +311,22 @@ class NewsChatService:
     ) -> AsyncIterator[dict[str, Any]]:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
         topic, category_scope = self._resolve_conversation_context(conv_id, message, topic, category_scope, user_id)
+        save_topic = self._request_topic_for_save(message, topic)
         yield {"type": "start", "conversation_id": conv_id, "message": "开始处理问题。"}
         moderation_response = await self._moderate_query(conv_id, message)
         if moderation_response:
-            self._save_response_turn(moderation_response, message, user_id, topic, category_scope)
+            self._save_response_turn(moderation_response, message, user_id, save_topic, category_scope)
             yield {"type": "final", "response": moderation_response.model_dump(mode="json")}
             return
         schedule_response = await self._schedule_command_response(conv_id, user_id, message)
         if schedule_response:
-            self._save_response_turn(schedule_response, message, user_id, topic, category_scope)
+            self._save_response_turn(schedule_response, message, user_id, save_topic, category_scope)
             yield {"type": "trace", "item": {"stage": "定时任务", "status": "completed", "message": schedule_response.context_relation}}
             yield {"type": "final", "response": schedule_response.model_dump(mode="json")}
             return
         skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope, allow_web_search)
         if skill_response:
-            self._save_response_turn(skill_response, message, user_id, topic, category_scope)
+            self._save_response_turn(skill_response, message, user_id, save_topic, category_scope)
             yield {"type": "trace", "item": {"stage": "Skill 执行", "status": "completed", "message": skill_response.context_relation}}
             yield {"type": "final", "response": skill_response.model_dump(mode="json")}
             return
@@ -261,7 +334,7 @@ class NewsChatService:
         if topic_response:
             for item in topic_response.research_trace:
                 yield {"type": "trace", "item": item}
-            self._save_response_turn(topic_response, message, user_id, topic, category_scope)
+            self._save_response_turn(topic_response, message, user_id, save_topic, category_scope)
             yield {"type": "final", "response": topic_response.model_dump(mode="json")}
             return
         ordinal = extract_ordinal(message)
@@ -279,7 +352,7 @@ class NewsChatService:
                     allow_web_search,
                 )
             )
-            self._save_response_turn(response, message, user_id, topic, category_scope)
+            self._save_response_turn(response, message, user_id, save_topic, category_scope)
             yield {"type": "final", "response": response.model_dump(mode="json")}
             return
 
@@ -299,7 +372,7 @@ class NewsChatService:
                     user_id,
                     allow_web_search,
                 )
-                self._save_response_turn(response, message, user_id, topic, category_scope)
+                self._save_response_turn(response, message, user_id, save_topic, category_scope)
                 await queue.put({"type": "final", "response": response.model_dump(mode="json")})
             except Exception as exc:
                 await queue.put({"type": "error", "message": str(exc)})
@@ -544,8 +617,15 @@ class NewsChatService:
         category_scope: list[str] | None,
         user_id: str,
     ) -> tuple[str | None, list[str] | None]:
-        if _explicit_focus_from_message(message):
-            return None, None
+        topic = None if _is_topic_placeholder(topic) else topic
+        explicit_focus = _explicit_focus_from_message(message)
+        if explicit_focus:
+            if topic and _compact_topic_text(topic) != _compact_topic_text(explicit_focus):
+                return topic, None
+            turns = self.store.list_turns(conversation_id, user_id=user_id, limit=3)
+            last = _last_turn_with_topic(turns)
+            previous_topic = (last or {}).get("topic") or _focus_topic_text(last or {})
+            return previous_topic or topic, None
         if not is_contextual_followup(message):
             return topic, category_scope
         turns = self.store.list_turns(conversation_id, user_id=user_id, limit=12)
@@ -559,6 +639,9 @@ class NewsChatService:
         previous_topic = last.get("topic") or _focus_topic_text(last)
         previous_categories = last.get("category_scope") or category_scope
         return previous_topic or topic, previous_categories
+
+    def _request_topic_for_save(self, message: str, topic: str | None) -> str | None:
+        return None if _is_topic_placeholder(topic) else topic
 
     def _conversation_memory(
         self,
@@ -583,9 +666,11 @@ class NewsChatService:
         request_topic: str | None,
         request_categories: list[str] | None,
     ) -> str:
-        resolved_topic = request_topic or response.topic or (
-            response.focus_object.text if response.focus_object and response.focus_object.type == "topic" else None
-        )
+        resolved_topic = request_topic
+        if not resolved_topic and _response_can_seed_topic(response):
+            resolved_topic = response.topic or (
+                response.focus_object.text if response.focus_object and response.focus_object.type == "topic" else None
+            )
         resolved_categories = response.category_scope or request_categories or []
         turn_id = self.store.save_turn(
             response.conversation_id,
@@ -598,6 +683,8 @@ class NewsChatService:
             topic=resolved_topic,
             category_scope=resolved_categories,
         )
+        response.turn_id = turn_id
+        self.store.update_turn_response(turn_id, user_id, response.model_dump(mode="json"))
         return turn_id
 
     async def _news_search(
@@ -610,9 +697,13 @@ class NewsChatService:
         user_id: str = "default",
         allow_web_search: bool = False,
     ) -> ChatResponse:
-        query = _explicit_focus_from_message(message) or query_from_message(message, topic)
+        explicit_query = _explicit_focus_from_message(message)
+        query = explicit_query or query_from_message(message, topic)
+        response_topic = topic or query
+        focus_text = query if explicit_query else response_topic
         categories = categories_for_message(message, topic, category_scope)
-        drift_warning = _topic_drift_warning(topic, query, message)
+        rule_drift_warning = _topic_drift_warning(topic, query, message)
+        drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, message, rule_drift_warning))
         results = await self.search_service.search(
             query=query,
             category_scope=categories,
@@ -622,6 +713,7 @@ class NewsChatService:
             include_remote=allow_web_search,
         )
         results = _rank_for_chat(_enrich_from_store(self.store, results), message)[:8]
+        drift_warning = await drift_warning_task
         if use_llm and self.llm_client.configured and results:
             try:
                 history = self._conversation_memory(conversation_id, user_id)
@@ -639,9 +731,9 @@ class NewsChatService:
             conversation_id=conversation_id,
             answer=answer,
             context_relation=context_relation,
-            topic=topic or query,
+            topic=response_topic,
             category_scope=categories or [],
-            focus_object=FocusObject(type="topic", text=topic or query),
+            focus_object=FocusObject(type="topic", text=focus_text),
             required_context_items=["current_topic", "local_news_index", "retrieved_evidence"],
             recommendations=results,
         )
@@ -657,9 +749,13 @@ class NewsChatService:
         allow_web_search: bool = False,
     ) -> ChatResponse:
         trace: list[dict[str, Any]] = []
-        query = _explicit_focus_from_message(message) or query_from_message(message, topic)
+        explicit_query = _explicit_focus_from_message(message)
+        query = explicit_query or query_from_message(message, topic)
+        response_topic = topic or query
+        focus_text = query if explicit_query else response_topic
         categories = categories_for_message(message, topic, category_scope)
-        drift_warning = _topic_drift_warning(topic, query, message)
+        rule_drift_warning = _topic_drift_warning(topic, query, message)
+        drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, message, rule_drift_warning))
         time_range = time_range_from_message(message)
         search_plan = await self._plan_search_query(message, topic, query, time_range, allow_web_search)
         search_query = search_plan.query
@@ -818,6 +914,7 @@ class NewsChatService:
         if event_line and event_line.get("items"):
             await _add_trace(trace, {"stage": "事件线", "status": "completed", "message": f"生成 {len(event_line.get('items') or [])} 个时间节点。", "count": len(event_line.get("items") or [])}, on_trace)
 
+        drift_warning = await drift_warning_task
         if self.llm_client.configured and evidence:
             try:
                 await _add_trace(trace, {"stage": "生成回答", "status": "running", "message": "正在组织 markdown 回答。"}, on_trace)
@@ -839,9 +936,9 @@ class NewsChatService:
             answer=answer,
             markdown=answer,
             context_relation=context_relation,
-            topic=topic or query,
+            topic=response_topic,
             category_scope=categories or [],
-            focus_object=FocusObject(type="topic", text=topic or query),
+            focus_object=FocusObject(type="topic", text=focus_text),
             required_context_items=["research_pipeline", "source_search_ingest", "retrieved_evidence", "event_line"],
             recommendations=merged_results[:8],
             research_trace=trace,
@@ -849,6 +946,80 @@ class NewsChatService:
             expanded_queries=expanded_queries,
             event_line=event_line,
         )
+
+    async def _llm_topic_drift_warning(
+        self,
+        topic: str | None,
+        query: str,
+        message: str,
+        rule_notice: str | None,
+    ) -> str | None:
+        if rule_notice:
+            return rule_notice
+        if not self.llm_client.configured or not query:
+            return rule_notice
+        focuses = _explicit_focuses_from_message(message)
+        if not topic and len(focuses) < 2:
+            return rule_notice
+        if topic:
+            topic_compact = _compact_topic_text(topic)
+            query_compact = _compact_topic_text(query)
+            if topic_compact and query_compact and (
+                topic_compact == query_compact or topic_compact in query_compact or query_compact in topic_compact
+            ):
+                return None
+        payload = {
+            "current_topic": topic or "",
+            "normalized_query": query,
+            "user_message": message,
+            "explicit_focuses": focuses,
+            "task": (
+                "判断 user_message/normalized_query 是否应当视为 current_topic 的同一主题。"
+                "如果没有 current_topic 但 explicit_focuses 有多个，则判断这些热点是否属于同一事件链。"
+            ),
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "relation": {"type": "string", "enum": ["same_topic", "related", "weakly_related", "unrelated"]},
+                "same_topic": {"type": "boolean"},
+                "confidence": {"type": "number"},
+                "reason": {"type": "string"},
+            },
+            "required": ["relation", "same_topic", "confidence", "reason"],
+        }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是新闻主题相关性判定器，只做分类，不回答新闻问题。"
+                    "判断标准：同一主题必须共享明确核心主体、同一事件链、同一政策/公司/人物/赛事的连续进展。"
+                    "仅同属一个大类（如都是体育、都是中国新闻、都是热点）不算同一主题。"
+                    "忽略提问模板词，如围绕热点事件、展开、深挖、追踪、后续观察、告诉我发生了什么。"
+                    "如果一个是公共卫生、另一个是消费政策；一个是文物返还、另一个是足球球员表态，应判 unrelated。"
+                    "只返回 JSON。"
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        try:
+            result = await self.llm_client.structured(messages, "topic_relevance_judgement", schema)
+        except Exception:
+            return rule_notice
+        relation = str(result.get("relation") or "").strip().lower()
+        same_topic = result.get("same_topic")
+        try:
+            confidence = float(result.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if same_topic is False and confidence >= 0.45:
+            return MULTI_FOCUS_DRIFT_NOTICE if len(focuses) > 1 else TOPIC_DRIFT_NOTICE
+        if relation in {"weakly_related", "unrelated"} and confidence >= 0.45:
+            return MULTI_FOCUS_DRIFT_NOTICE if len(focuses) > 1 else TOPIC_DRIFT_NOTICE
+        if same_topic is True and relation in {"same_topic", "related"} and confidence >= 0.45:
+            return None
+        return rule_notice
 
     async def _plan_search_query(
         self,
@@ -1047,7 +1218,13 @@ def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
                 for item in values[:6]:
                     if not isinstance(item, dict):
                         continue
-                    lines.append(f"- [{item.get('index')}] {item.get('title') or ''}（{item.get('source_id') or 'unknown'}）")
+                    title = _markdown_link_label(item.get("title") or "未命名证据")
+                    url = _markdown_link_url(item.get("url") or "")
+                    source = item.get("source_id") or "unknown"
+                    if url:
+                        lines.append(f"- [{item.get('index')}] [{title}]({url})（{source}）")
+                    else:
+                        lines.append(f"- [{item.get('index')}] {title}（{source}）")
         evidence = payload.get("evidence") or []
         if evidence:
             lines.extend(["", f"### 检索到的全部证据（{len(evidence)} 条）"])
@@ -1115,7 +1292,21 @@ def _skill_command_has_topic_arg(text: str) -> bool:
 
 
 def _is_default_brief_topic(topic: str | None) -> bool:
-    return str(topic or "").strip() in {"", "今日资讯", "今日简报", "每日摘要", "今日新闻"}
+    return _is_topic_placeholder(topic) or str(topic or "").strip() in {"今日简报", "每日摘要", "今日新闻"}
+
+
+def _is_topic_placeholder(topic: str | None) -> bool:
+    return str(topic or "").strip() in {"", "新对话", "当前关注", "今日资讯"}
+
+
+def _response_can_seed_topic(response: ChatResponse) -> bool:
+    relation = response.context_relation or ""
+    return (
+        relation == "topic_agent_created"
+        or relation == "topic_grounded"
+        or relation.startswith("topic_grounded_")
+        or relation.startswith("research_pipeline")
+    )
 
 
 def _report_skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
@@ -1221,9 +1412,10 @@ def _extend_report_sources(lines: list[str], sources: Any) -> None:
         if not isinstance(item, dict):
             continue
         source = item.get("source_id") or "unknown"
-        source_title = _report_title_text(item.get("title") or "未命名来源")
+        source_title = _markdown_link_label(_report_title_text(item.get("title") or "未命名来源"))
         url = item.get("url") or ""
-        lines.append(f"- [{index}] {source_title}（{source}）{f' {url}' if url else ''}")
+        title_part = f"[{source_title}]({_markdown_link_url(url)})" if _markdown_link_url(url) else source_title
+        lines.append(f"- [{index}] {title_part}（{source}）")
         appended = True
     if not appended:
         lines.append("- 对话内暂未出现可列出的证据来源。")
@@ -1293,27 +1485,40 @@ def _factcheck_evidence_line(item: dict[str, Any]) -> str:
     date = item.get("published_at") or "时间未知"
     summary = item.get("summary") or item.get("content_excerpt") or ""
     url = item.get("url") or ""
-    head = f"- [{index}] {title}（{source}，{origin}，{date}）"
-    if url:
-        head += f" {url}"
+    title = _markdown_link_label(title)
+    link_url = _markdown_link_url(url)
+    title_part = f"[{title}]({link_url})" if link_url else title
+    head = f"- [{index}] {title_part}（{source}，{origin}，{date}）"
     if summary:
         head += f"：{summary[:180]}"
     return head
 
 
 def _explicit_focus_from_message(message: str) -> str:
+    focuses = _explicit_focuses_from_message(message)
+    if not focuses:
+        return ""
+    if len(focuses) == 1:
+        return focuses[0]
+    return "多热点：" + "；".join(focuses[:4])
+
+
+def _explicit_focuses_from_message(message: str) -> list[str]:
     text = str(message or "")
     patterns = (
         r"围绕热点事件[“\"《](.+?)[”\"》]",
         r"基于资讯[“\"《](.+?)[”\"》]",
     )
+    focuses: list[str] = []
+    seen: set[str] = set()
     for pattern in patterns:
-        matches = re.findall(pattern, text)
-        for value in reversed(matches):
+        for value in re.findall(pattern, text):
             cleaned = _clean_focus_title(value)
-            if cleaned:
-                return cleaned
-    return ""
+            key = _compact_topic_text(cleaned)
+            if cleaned and key not in seen:
+                focuses.append(cleaned)
+                seen.add(key)
+    return focuses
 
 
 def _hot_event_focus_from_message(message: str) -> str:
@@ -1329,7 +1534,7 @@ def _clean_focus_title(value: str) -> str:
     if "相关热点:" in text:
         text = text.rsplit("相关热点:", 1)[-1].strip()
     text = re.sub(r"^(围绕)?热点事件", "", text).strip(" “\"《》")
-    text = re.sub(r"(展开|发生了什么|为什么重要|后续看什么).*$", "", text).strip(" ，。")
+    text = _strip_topic_template_phrases(text)
     for separator in ("--", "——", " - ", "-"):
         if separator not in text:
             continue
@@ -1511,7 +1716,8 @@ async def _add_trace(
 
 def _grounded_answer(query: str, message: str, results: list[SearchResult], prefix: str | None = None) -> str:
     if not results:
-        return f"我现在没有在本地新闻库里找到【{query}】的可靠证据。可以先触发源搜索入库，再继续问我。"
+        lead = f"{prefix}\n\n" if prefix else ""
+        return f"{lead}我现在没有在本地新闻库里找到【{query}】的可靠证据。可以先触发源搜索入库，再继续问我。"
     top = results[:5]
     dates = sorted({_date_text(item.published_at) for item in top if _date_text(item.published_at)})
     sources = "、".join(sorted({item.source_id for item in top}))
@@ -1532,23 +1738,49 @@ def _grounded_answer(query: str, message: str, results: list[SearchResult], pref
 
 
 def _topic_drift_warning(topic: str | None, query: str, message: str) -> str | None:
+    focuses = _explicit_focuses_from_message(message)
+    if len(focuses) > 1 and _focuses_are_weakly_related(focuses):
+        return MULTI_FOCUS_DRIFT_NOTICE
     if not topic or not query:
         return None
+    has_explicit_focus = bool(focuses)
     if _compact_topic_text(topic) == _compact_topic_text(query):
         return None
     if _compact_topic_text(topic) in _compact_topic_text(query) or _compact_topic_text(query) in _compact_topic_text(topic):
         return None
-    if is_contextual_followup(message):
+    if not has_explicit_focus and is_contextual_followup(message):
         return None
-    if _looks_like_general_topic_extension(message):
+    if not has_explicit_focus and _looks_like_general_topic_extension(message):
         return None
+    if _has_new_latin_subject(topic, query):
+        return TOPIC_DRIFT_NOTICE
     topic_terms = _topic_drift_terms(topic)
     query_terms = _topic_drift_terms(query)
     if topic_terms and query_terms and topic_terms.intersection(query_terms):
         return None
     if not _has_strong_new_subject(query) and len(query_terms) < 2:
         return None
-    return "提示：这条追问和当前关注主题关联较弱，我会照常回答，但不会因此更改当前主题或新增关注卡片。"
+    return TOPIC_DRIFT_NOTICE
+
+
+def _focuses_are_weakly_related(focuses: list[str]) -> bool:
+    if len(focuses) < 2:
+        return False
+    base_terms = _topic_drift_terms(focuses[0])
+    for focus in focuses[1:]:
+        terms = _topic_drift_terms(focus)
+        if base_terms and terms and base_terms.intersection(terms):
+            continue
+        return True
+    return False
+
+
+def _has_new_latin_subject(topic: str, query: str) -> bool:
+    compact_topic = _compact_topic_text(topic)
+    for term in re.findall(r"[a-z][a-z0-9+#._-]{2,}", _compact_topic_text(query)):
+        if term not in compact_topic and term not in _TOPIC_DRIFT_STOP_TERMS:
+            return True
+    return False
 
 
 def _prepend_notice(answer: str, notice: str | None) -> str:
@@ -1588,7 +1820,27 @@ def _looks_like_general_topic_extension(message: str) -> bool:
 
 
 def _compact_topic_text(value: str) -> str:
-    return re.sub(r"\s+", "", str(value or "").lower())
+    compact = re.sub(r"\s+", "", str(value or "").lower())
+    compact = re.sub(r"^\d+[:：]?", "", compact)
+    for ignored in sorted(TOPIC_TEMPLATE_PHRASES, key=len, reverse=True):
+        compact = compact.replace(ignored, "")
+    compact = re.sub(r"\d*相关热点[:：]?", "", compact)
+    compact = re.sub(r"^\d+[:：]?", "", compact)
+    for source in ("-中新网", "-新华网", "-人民网", "-央视网", "-中国新闻网", "-中国共产党新闻网"):
+        compact = compact.replace(source, "")
+    compact = re.sub(r"(中新网|新华网|人民网|央视网|中国新闻网|中国共产党新闻网)$", "", compact)
+    compact = re.sub(r"[，。、；;:：!?！？“”\"《》「」]+", "", compact)
+    compact = re.sub(r"^\d+(?=[\u4e00-\u9fff])", "", compact)
+    compact = compact.strip("和")
+    return compact
+
+
+def _strip_topic_template_phrases(value: str) -> str:
+    text = str(value or "")
+    for phrase in sorted(TOPIC_TEMPLATE_PHRASES, key=len, reverse=True):
+        text = text.replace(phrase, "")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" \t\r\n:：,，。；;!?！？“”\"《》")
 
 
 _TOPIC_DRIFT_STOP_TERMS = {

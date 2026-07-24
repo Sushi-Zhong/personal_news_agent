@@ -133,6 +133,12 @@ class ScheduledTaskService:
     def list_tasks(self, user_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return self.store.list_tasks(user_id=user_id, limit=limit)
 
+    def set_task_enabled(self, task_id: str, user_id: str = "default", enabled: bool = True) -> dict[str, Any] | None:
+        return self.store.set_task_enabled(task_id, user_id, enabled)
+
+    def delete_task(self, task_id: str, user_id: str = "default") -> dict[str, Any] | None:
+        return self.store.delete_task(task_id, user_id)
+
     async def run_task(self, task_id: str) -> dict:
         task = self.store.get_task(task_id)
         if not task:

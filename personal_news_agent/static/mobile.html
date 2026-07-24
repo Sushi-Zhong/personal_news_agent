@@ -18,10 +18,10 @@
       <section class="mobile-card mobile-today-card" hidden>
         <div class="mobile-brief-title">
           <span>今日</span>
-          <strong data-mobile-brief-topic>新能源汽车产业链</strong>
+          <strong data-mobile-brief-topic>新对话</strong>
         </div>
         <div class="mobile-brief-metrics" aria-label="今日简报指标">
-          <article><strong data-mobile-feed-count>--</strong><span>推荐</span></article>
+          <article><strong data-mobile-feed-count>--</strong><span>相关资讯</span></article>
           <article><strong data-mobile-event-count>--</strong><span>热点</span></article>
           <article><strong data-mobile-track-count>--</strong><span>跟踪</span></article>
         </div>
@@ -36,16 +36,22 @@
       <nav class="category-tabs" id="mobileTabs">
         <button data-category="" class="active">全部</button>
         <button data-category="politics">时政</button>
+        <button data-category="economy">经济</button>
         <button data-category="tech">科技</button>
-        <button data-category="game">游戏</button>
         <button data-category="auto">汽车</button>
+        <button data-category="game">游戏</button>
+        <button data-category="anime">动漫</button>
+        <button data-category="entertainment">娱乐</button>
         <button data-category="sports">体育</button>
       </nav>
 
       <section class="mobile-card mobile-agent-card">
         <div class="mobile-card-head">
-          <h2>Agent</h2>
-          <button type="button" class="secondary-button" data-command="/search 新能源汽车产业链 --cat auto">抓取</button>
+          <h2 data-mobile-agent-topic>新对话</h2>
+          <div class="mobile-card-actions">
+            <button type="button" class="secondary-button" data-mobile-topic-popover>关注</button>
+            <button type="button" class="secondary-button" data-command="/search 新能源汽车产业链 --cat auto">抓取</button>
+          </div>
         </div>
         <div class="mobile-chat-label">Agent 对话组件</div>
         <div id="messages" class="messages mobile-messages chat-stream">
@@ -59,15 +65,19 @@
 
       <section class="mobile-card mobile-push-card">
         <div class="mobile-card-head">
-          <h2>触达</h2>
-          <button id="enableBrowserPushMobile" type="button" class="secondary-button">提醒</button>
+          <h2>跟踪提醒</h2>
+          <div class="mobile-card-actions">
+            <button type="button" class="secondary-button" data-mobile-task-list>任务</button>
+            <button type="button" class="secondary-button" data-mobile-track-popover>跟踪</button>
+            <button id="enableBrowserPushMobile" type="button" class="secondary-button">提醒</button>
+          </div>
         </div>
         <div class="notification-list" data-notifications></div>
         <p class="status" data-notification-status></p>
       </section>
 
       <section class="mobile-card mobile-feed-card">
-        <h2>推荐</h2>
+        <h2>相关资讯</h2>
         <div id="feed" class="list"></div>
       </section>
       <section class="mobile-card mobile-events-card">
@@ -122,6 +132,6 @@
       </section>
     </main>
     <script src="/static/shared.js?v=20260721-no-check-1"></script>
-    <script src="/static/mobile.js?v=20260721-no-check-1"></script>
+    <script src="/static/mobile.js?v=20260724-mobile-response-feed-1"></script>
   </body>
 </html>

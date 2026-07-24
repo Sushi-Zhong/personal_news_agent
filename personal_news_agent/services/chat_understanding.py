@@ -8,24 +8,23 @@ from personal_news_agent.core.tag_classifier import classify_category_tags
 
 
 ORDINALS = {
-    "第一": 1,
-    "第二": 2,
-    "第三": 3,
-    "第四": 4,
-    "第五": 5,
-    "第1": 1,
-    "第2": 2,
-    "第3": 3,
-    "第4": 4,
-    "第5": 5,
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "1": 1,
+    "2": 2,
+    "3": 3,
+    "4": 4,
+    "5": 5,
 }
 
 def extract_ordinal(message: str) -> int | None:
-    for token, value in ORDINALS.items():
-        if token in message:
-            return value
-    match = re.search(r"第\s*(\d+)\s*条", message)
-    return int(match.group(1)) if match else None
+    match = re.search(r"第\s*([一二三四五1-5])\s*(?:条|篇|则|个|项|篇新闻|条新闻|个新闻)", message)
+    if not match:
+        return None
+    return ORDINALS.get(match.group(1))
 
 
 def infer_categories(message: str) -> list[str] | None:

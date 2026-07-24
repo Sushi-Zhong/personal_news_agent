@@ -113,20 +113,25 @@ class ListPageAdapter:
         results: list[RawSearchResult] = []
         allowed_domains = list(self.source.search.domain_filters or (self.source.root_domain,))
         for record in records:
-            if not isinstance(record, dict) or not record.get(url_field):
+            if not isinstance(record, dict):
                 continue
-            url_value = str(record.get(url_field))
+            url_value = _record_value(record, url_field)
+            if not url_value:
+                continue
+            url_value = str(url_value)
             parsed = urlparse(url_value)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 continue
             if allowed_domains and not any(_host_allowed(parsed.netloc, domain) for domain in allowed_domains):
                 continue
+            title_value = _record_value(record, title_field) or url_value
+            snippet_value = _record_value(record, snippet_field) or ""
             results.append(
                 RawSearchResult(
                     source_id=self.source.source_id,
-                    title=_strip_html(str(record.get(title_field) or record.get(url_field))),
+                    title=_strip_html(str(title_value)),
                     url=url_value,
-                    snippet=_strip_html(str(record.get(snippet_field) or ""))[:240],
+                    snippet=_strip_html(str(snippet_value))[:240],
                     published_at=_parse_search_record_datetime(record, request),
                 )
             )
@@ -157,6 +162,10 @@ def _extract_path(payload: Any, path: str) -> Any:
     return current
 
 
+def _record_value(record: dict[str, Any], field: str) -> Any:
+    return _extract_path(record, field) if "." in field else record.get(field)
+
+
 def _parse_search_record_datetime(record: dict[str, Any], request: dict[str, Any]) -> datetime | None:
     fields = [
         str(request.get("date_field") or ""),
@@ -173,7 +182,7 @@ def _parse_search_record_datetime(record: dict[str, Any], request: dict[str, Any
     for field in fields:
         if not field:
             continue
-        value = _extract_path(record, field) if "." in field else record.get(field)
+        value = _record_value(record, field)
         parsed = _parse_published_datetime(str(value or ""))
         if parsed:
             return parsed

@@ -106,6 +106,11 @@ class FeedbackRequest(BaseModel):
     feedback_type: str
 
 
+class TurnRelationRequest(BaseModel):
+    user_id: str = "default"
+    relation: str
+
+
 class TaskRequest(BaseModel):
     user_id: str = "default"
     task_type: str
@@ -127,6 +132,11 @@ class ScheduleCommandRequest(BaseModel):
 class DueTasksRequest(BaseModel):
     user_id: str = "default"
     limit: int = Field(default=10, ge=1, le=50)
+
+
+class TaskEnabledRequest(BaseModel):
+    user_id: str = "default"
+    enabled: bool = False
 
 
 class NotificationReadRequest(BaseModel):

@@ -37,6 +37,7 @@ from personal_news_agent.services.search import (
     search_result_matches_terms,
 )
 from personal_news_agent.services.source_adapter import ListPageAdapter
+from personal_news_agent.services.source_adapter import _record_value
 from personal_news_agent.services.source_registry import SourceRegistryService
 from personal_news_agent.services.store import NewsStore
 from personal_news_agent.services.tasks import ScheduledTaskService, parse_schedule_command
@@ -287,7 +288,7 @@ def test_chat_uses_explicit_hot_event_as_current_focus(services):
         )
     )
 
-    assert response.topic == "徽州文化艺术展亮相上海市历史博物馆"
+    assert response.topic == "人民日报理论版--理论--人民网"
     assert response.focus_object is not None
     assert response.focus_object.type == "topic"
     assert response.focus_object.text == "徽州文化艺术展亮相上海市历史博物馆"
@@ -314,7 +315,7 @@ def test_chat_uses_explicit_article_title_over_stale_topic(services):
         )
     )
 
-    assert response.topic == "人气动画新篇章定档"
+    assert response.topic == "inappropriate_oral"
     assert response.focus_object is not None
     assert response.focus_object.text == "人气动画新篇章定档"
     assert search.calls[0]["query"] == "人气动画新篇章定档"
@@ -451,8 +452,8 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260721-no-check-1" in home_source
-    assert "20260721-no-check-1" in home_html
+    assert "20260724-mobile-response-feed-1" in home_source
+    assert "20260724-mobile-response-feed-1" in home_html
     assert "shared.js?v=20260721-no-check-1" in mobile_html
 
 
@@ -619,6 +620,58 @@ def test_chat_new_question_answers_without_changing_topic_or_creating_card(servi
     assert topics == []
     turn = store.last_turn("off_topic_notice_conv", user_id="off_topic_user")
     assert turn["topic"] == "用户与游戏公司起冲突的案例"
+
+
+def test_explicit_hot_event_compares_against_previous_turn_when_topic_matches_message_focus(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    chat = NewsChatService(store, search)
+    first_focus = "美国马里兰州青少年探访黄山 沉浸式感受中国山水魅力"
+    second_focus = "军工装备板块再度走强"
+
+    first = asyncio.run(
+        chat.chat(
+            "hot_event_drift_conv",
+            f"围绕热点事件“中新网相关热点：{first_focus}-中新网”展开，告诉我发生了什么、为什么重要、后续看什么。",
+            topic=first_focus,
+            user_id="hot_event_drift_user",
+        )
+    )
+    second = asyncio.run(
+        chat.chat(
+            "hot_event_drift_conv",
+            f"围绕热点事件“{second_focus}”展开，告诉我发生了什么、为什么重要、后续看什么。",
+            topic=second_focus,
+            user_id="hot_event_drift_user",
+        )
+    )
+
+    assert "当前关注主题关联较弱" not in first.answer
+    assert "当前关注主题关联较弱" in second.answer
+    assert second.topic == first_focus
+    assert second.focus_object is not None
+    assert second.focus_object.text == second_focus
+
+
+def test_placeholder_topic_is_replaced_by_first_valid_query(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    chat = NewsChatService(store, search)
+
+    response = asyncio.run(
+        chat.chat(
+            "placeholder_topic_conv",
+            "围绕热点事件“军工装备板块再度走强”展开，告诉我发生了什么、为什么重要、后续看什么。",
+            topic="新对话",
+            user_id="placeholder_topic_user",
+        )
+    )
+
+    assert response.topic == "军工装备板块再度走强"
+    assert response.focus_object is not None
+    assert response.focus_object.text == "军工装备板块再度走强"
+    turn = store.last_turn("placeholder_topic_conv", user_id="placeholder_topic_user")
+    assert turn["topic"] == "军工装备板块再度走强"
 
 
 def test_chat_related_reputation_question_answers_under_current_topic(services):
@@ -829,6 +882,14 @@ def test_native_source_search_encodes_query(services):
     assert results
     assert "%E6%9C%BA%E8%BD%A6%E8%B5%9B%E4%BA%8B" in fetcher.urls[0]
     assert "{query" not in fetcher.urls[0]
+
+
+def test_search_api_field_matching_supports_nested_paths():
+    record = {"article": {"title": "嵌套标题", "url": "https://news.example.com/a.html"}}
+
+    assert _record_value(record, "article.title") == "嵌套标题"
+    assert _record_value(record, "article.url") == "https://news.example.com/a.html"
+    assert _record_value(record, "missing.title") is None
 
 
 def test_search_redirect_link_unwraps_targetpage():
@@ -1320,6 +1381,55 @@ def test_brief_uses_existing_conversation_content_without_new_search(services):
     assert "简报阶段未新增检索" in response.answer
 
 
+def test_brief_includes_turn_forced_related_by_user(services):
+    registry, store, _ = services
+
+    class UniqueUrlSearchService(RecordingSearchService):
+        async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
+            self.calls.append(
+                {
+                    "query": query,
+                    "category_scope": category_scope,
+                    "source_scope": source_scope,
+                    "time_range": time_range,
+                    "include_remote": include_remote,
+                }
+            )
+            return [
+                SearchResult(
+                    source_id="test",
+                    title=f"{query} 报道",
+                    url=f"https://example.com/{stable_id('brief_forced', query)}",
+                    summary=f"{query} 的摘要",
+                    category=(category_scope or ["all"])[0],
+                    published_at=datetime.now(timezone.utc),
+                    score=1.0,
+                    origin="local",
+                )
+            ]
+
+    search = UniqueUrlSearchService()
+    reports = ReportGenerationService(store, search)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry},
+    )
+
+    first = asyncio.run(chat.chat("forced_related_brief_conv", "张雪机车最新进展", category_scope=["sports"], user_id="default"))
+    second = asyncio.run(chat.chat("forced_related_brief_conv", "军工装备板块再度走强", topic=first.topic, category_scope=["sports"], user_id="default"))
+    assert "当前关注主题关联较弱" in second.answer
+    second_turn = store.last_turn("forced_related_brief_conv", user_id="default")
+    store.set_turn_relation(second_turn["id"], "default", "related", chat.topic_drift_notice)
+
+    response = asyncio.run(chat.chat("forced_related_brief_conv", "/brief", topic=first.topic, user_id="default"))
+
+    titles = [item["title"] for item in response.skill_result["data"]["sources"]]
+    assert any("张雪机车" in title for title in titles)
+    assert any("军工装备板块再度走强" in title for title in titles)
+
+
 def _assert_fixed_report_modules(answer: str):
     modules = [
         "### 一句话结论",
@@ -1662,8 +1772,8 @@ def test_bare_report_keeps_original_conversation_topic_and_includes_expansions(s
     response = asyncio.run(chat.chat("game_ownership_report_conv", "/report", user_id="default"))
 
     assert first.topic == original_topic
-    assert second.topic != original_topic
-    assert third.topic != original_topic
+    assert second.topic == original_topic
+    assert third.topic == original_topic
     assert response.context_relation == "skill:/report"
     assert response.skill_result["data"]["topic"] == original_topic
     titles = [item["title"] for item in response.skill_result["data"]["sources"]]

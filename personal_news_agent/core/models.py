@@ -154,6 +154,7 @@ class FocusObject(BaseModel):
 
 class ChatResponse(BaseModel):
     conversation_id: str
+    turn_id: str | None = None
     answer: str
     context_relation: str
     topic: str | None = None
