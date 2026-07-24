@@ -1,5 +1,5 @@
 if (activeUserId === "default") {
-  window.location.replace("/auth");
+  window.location.replace(appUrl("/auth"));
 } else {
   request(`/api/profile?user_id=${encodeURIComponent(activeUserId)}`)
     .then((data) => {
@@ -7,7 +7,7 @@ if (activeUserId === "default") {
         localStorage.removeItem("pna_user_id");
         localStorage.removeItem("pna_user_name");
         localStorage.removeItem("pna_session_token");
-        window.location.replace("/auth");
+        window.location.replace(appUrl("/auth"));
       }
     })
     .catch(() => {});
@@ -965,7 +965,7 @@ function renderReportCard(data) {
   const summary = sections["一、结论摘要"] || sections.summary || "";
   const reportId = data.report_id || "";
   const userId = activeUserId || "default";
-  const base = reportId ? `/api/reports/${encodeURIComponent(reportId)}/download?user_id=${encodeURIComponent(userId)}` : "";
+  const base = reportId ? appUrl(`/api/reports/${encodeURIComponent(reportId)}/download?user_id=${encodeURIComponent(userId)}`) : "";
   target.innerHTML = `<div class="deep-section">
     <strong>${escapeHtml(data.topic || consoleState.topic)}</strong>
     <p>${escapeHtml(summary)}</p>

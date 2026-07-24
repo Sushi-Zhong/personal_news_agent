@@ -1,5 +1,5 @@
 (function () {
-  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260724-mobile-response-feed-1";
+  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260724-pna-base-1";
   const mobileQuery = window.matchMedia("(max-width: 760px)");
   const mode = mobileQuery.matches ? "mobile" : "web";
   const template = document.querySelector(`#${mode}Template`);
@@ -23,10 +23,10 @@
 
   function loadPageScripts() {
     const sharedScript = document.createElement("script");
-    sharedScript.src = `/static/shared.js?v=${encodeURIComponent(assetVersion)}`;
+    sharedScript.src = `static/shared.js?v=${encodeURIComponent(assetVersion)}`;
     sharedScript.onload = () => {
       const pageScript = document.createElement("script");
-      pageScript.src = `/static/${mode}.js?v=${encodeURIComponent(assetVersion)}`;
+      pageScript.src = `static/${mode}.js?v=${encodeURIComponent(assetVersion)}`;
       document.body.appendChild(pageScript);
     };
     document.body.appendChild(sharedScript);

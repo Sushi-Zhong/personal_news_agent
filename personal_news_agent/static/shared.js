@@ -1,6 +1,10 @@
 let activeUserId = localStorage.getItem("pna_user_id") || "default";
 let conversationId = localStorage.getItem("pna_conversation_id") || null;
 let webSearchEnabled = localStorage.getItem(webSearchPreferenceKey()) === "1";
+const APP_BASE_PATH = (() => {
+  const prefix = "/pna";
+  return window.location.pathname === prefix || window.location.pathname.startsWith(`${prefix}/`) ? prefix : "";
+})();
 const TOPIC_DRIFT_NOTICE = "提示：这条追问和当前关注主题关联较弱，我会照常回答，但不会因此更改当前主题或新增关注卡片。";
 const MULTI_FOCUS_DRIFT_NOTICE = "提示：这条消息里包含多个彼此关联较弱的热点，我会照常分别回答，但不会把它们合并成同一个主题或新增关注卡片。";
 const TOPIC_DRIFT_NOTICES = [TOPIC_DRIFT_NOTICE, MULTI_FOCUS_DRIFT_NOTICE];
@@ -31,8 +35,14 @@ function bindWebSearchToggles() {
 
 bindWebSearchToggles();
 
+function appUrl(path) {
+  if (!path || !path.startsWith("/") || path.startsWith("//") || !APP_BASE_PATH) return path;
+  if (path === APP_BASE_PATH || path.startsWith(`${APP_BASE_PATH}/`)) return path;
+  return `${APP_BASE_PATH}${path}`;
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(appUrl(path), {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -463,7 +473,7 @@ function setAssistantResponseHtml(node, html) {
 }
 
 async function streamChat(payload, assistantNode, targetNode) {
-  const response = await fetch("/api/chat/stream", {
+  const response = await fetch(appUrl("/api/chat/stream"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -716,7 +726,7 @@ function renderReportDownloads(data) {
   const reportId = payload.report_id;
   if (result.command !== "/report" || !reportId) return "";
   const userId = activeUserId || "default";
-  const base = `/api/reports/${encodeURIComponent(reportId)}/download?user_id=${encodeURIComponent(userId)}`;
+  const base = appUrl(`/api/reports/${encodeURIComponent(reportId)}/download?user_id=${encodeURIComponent(userId)}`);
   return `<div class="report-downloads" aria-label="报告下载">
     <a href="${base}&format=pdf" download>下载 PDF</a>
     <a href="${base}&format=docx" download>下载 Word</a>

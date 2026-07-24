@@ -452,9 +452,9 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260724-mobile-response-feed-1" in home_source
-    assert "20260724-mobile-response-feed-1" in home_html
-    assert "shared.js?v=20260721-no-check-1" in mobile_html
+    assert "20260724-pna-base-1" in home_source
+    assert "20260724-pna-base-1" in home_html
+    assert "shared.js?v=20260724-pna-base-1" in mobile_html
 
 
 def test_time_filter_keeps_current_external_results_without_published_date():
