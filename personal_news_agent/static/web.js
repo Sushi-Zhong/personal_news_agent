@@ -790,7 +790,7 @@ function bindTopicCards() {
       const selectedConversationId = button.dataset.conversationId || "";
       const selectedTopic = button.dataset.topicTitle || button.textContent.trim();
       const selectedScope = parseScope(button.dataset.categoryScope || "");
-      if (topicLocked && consoleState.topic && selectedTopic !== consoleState.topic) {
+      if (!selectedConversationId && topicLocked && consoleState.topic && selectedTopic !== consoleState.topic) {
         document.querySelectorAll(".topic-card").forEach((item) => item.classList.toggle("active", item.dataset.topicTitle === consoleState.topic));
         setStatus(`当前对话主题已确定：${consoleState.topic}`);
         return;
