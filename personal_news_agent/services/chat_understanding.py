@@ -95,7 +95,8 @@ def is_contextual_followup(message: str) -> bool:
     compact = re.sub(r"\s+", "", message)
     markers = (
         "还有", "继续", "再说", "进一步", "展开", "深挖", "他们", "它们", "这些公司", "该公司", "该赛事", "这方面",
-        "上面", "刚才", "刚刚", "上次", "之前", "前面", "刚问",
+        "这些品牌", "这些牌子", "上面那些", "上面这些", "上述公司", "上述品牌", "上述牌子",
+        "刚才提到", "前面提到", "上面提到", "上面", "刚才", "刚刚", "上次", "之前", "前面", "刚问",
     )
     return any(marker in compact for marker in markers)
 

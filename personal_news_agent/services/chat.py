@@ -658,6 +658,55 @@ class NewsChatService:
         )
         return _dedupe_turns([*recent_turns, *current_turns])[-(current_limit + recent_limit):]
 
+    async def _resolve_contextual_search_message(
+        self,
+        conversation_id: str,
+        user_id: str,
+        message: str,
+        topic: str | None,
+    ) -> str:
+        if not is_contextual_followup(message):
+            return message
+        if not getattr(getattr(self.local_agent, "config", None), "enabled", True):
+            return message
+        history = self._conversation_memory(conversation_id, user_id, current_limit=4, recent_limit=0)
+        if not history:
+            return message
+        recent_memory = _conversation_history_text(history, turn_limit=3, question_limit=260, answer_limit=1600)
+        if recent_memory == "无":
+            return message
+        prompt = (
+            "请把用户的上下文追问改写成一个可以独立搜索的完整中文问题。"
+            "你只做指代消解和问题改写，不要回答问题。"
+            "如果用户说“上面那些、这些、刚才提到的、上述”等指代词，"
+            "请从 recent_memory 中找出对应的公司、品牌、人物、机构、事件或产品名称，并写入改写后的问题。"
+            "不要添加 recent_memory 中没有出现的具体对象。"
+            "如果无法确定指代对象，就原样返回用户问题。"
+            "只返回改写后的问题本身，最多 220 个中文字符。"
+        )
+        request = LocalAgentChatRequest(
+            session_id=_local_agent_context_session_id(conversation_id),
+            user_id=user_id,
+            message=prompt,
+            project_context={
+                "purpose": "contextual_query_rewrite",
+                "current_topic": topic or "",
+                "current_message": message,
+                "recent_memory": recent_memory,
+            },
+            metadata={"conversation_id": conversation_id, "source": "news_chat_context_rewrite"},
+        )
+        try:
+            response = await asyncio.wait_for(self.local_agent.chat(request), timeout=12)
+        except Exception:
+            return message
+        if getattr(response, "status", "error") != "ok":
+            return message
+        rewritten = _clean_contextual_rewrite(getattr(response.message, "content", ""))
+        if not rewritten:
+            return message
+        return rewritten
+
     def _save_response_turn(
         self,
         response: ChatResponse,
@@ -698,12 +747,13 @@ class NewsChatService:
         allow_web_search: bool = False,
     ) -> ChatResponse:
         explicit_query = _explicit_focus_from_message(message)
-        query = explicit_query or query_from_message(message, topic)
+        search_message = await self._resolve_contextual_search_message(conversation_id, user_id, message, topic)
+        query = explicit_query or query_from_message(search_message, topic)
         response_topic = topic or query
         focus_text = query if explicit_query else response_topic
-        categories = categories_for_message(message, topic, category_scope)
-        rule_drift_warning = _topic_drift_warning(topic, query, message)
-        drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, message, rule_drift_warning))
+        categories = categories_for_message(search_message, topic, category_scope)
+        rule_drift_warning = _topic_drift_warning(topic, query, search_message)
+        drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, search_message, rule_drift_warning))
         results = await self.search_service.search(
             query=query,
             category_scope=categories,
@@ -750,14 +800,15 @@ class NewsChatService:
     ) -> ChatResponse:
         trace: list[dict[str, Any]] = []
         explicit_query = _explicit_focus_from_message(message)
-        query = explicit_query or query_from_message(message, topic)
+        search_message = await self._resolve_contextual_search_message(conversation_id, user_id, message, topic)
+        query = explicit_query or query_from_message(search_message, topic)
         response_topic = topic or query
         focus_text = query if explicit_query else response_topic
-        categories = categories_for_message(message, topic, category_scope)
-        rule_drift_warning = _topic_drift_warning(topic, query, message)
-        drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, message, rule_drift_warning))
-        time_range = time_range_from_message(message)
-        search_plan = await self._plan_search_query(message, topic, query, time_range, allow_web_search)
+        categories = categories_for_message(search_message, topic, category_scope)
+        rule_drift_warning = _topic_drift_warning(topic, query, search_message)
+        drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, search_message, rule_drift_warning))
+        time_range = time_range_from_message(search_message)
+        search_plan = await self._plan_search_query(search_message, topic, query, time_range, allow_web_search)
         search_query = search_plan.query
         await _add_trace(
             trace,
@@ -770,6 +821,16 @@ class NewsChatService:
             },
             on_trace,
         )
+        if search_message != message:
+            await _add_trace(
+                trace,
+                {
+                    "stage": "上下文改写",
+                    "status": "completed",
+                    "message": f"已将追问改写为【{search_message[:120]}】。",
+                },
+                on_trace,
+            )
         if search_plan.source == "llm":
             await _add_trace(
                 trace,
@@ -2198,13 +2259,19 @@ def _last_turn_with_topic(turns: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
-def _conversation_history_text(history: list[dict[str, Any]] | None) -> str:
+def _conversation_history_text(
+    history: list[dict[str, Any]] | None,
+    *,
+    turn_limit: int = 4,
+    question_limit: int = 240,
+    answer_limit: int = 500,
+) -> str:
     if not history:
         return "无"
     lines = []
-    for turn in history[-4:]:
-        question = str(turn.get("user_message") or "").strip()[:240]
-        answer = str(turn.get("assistant_answer") or "").strip()[:500]
+    for turn in history[-turn_limit:]:
+        question = str(turn.get("user_message") or "").strip()[:question_limit]
+        answer = str(turn.get("assistant_answer") or "").strip()[:answer_limit]
         conversation_id = str(turn.get("conversation_id") or "").strip()
         prefix = f"[{conversation_id}] " if conversation_id else ""
         if question:
@@ -2212,6 +2279,28 @@ def _conversation_history_text(history: list[dict[str, Any]] | None) -> str:
         if answer:
             lines.append(f"{prefix}助手：{answer}")
     return "\n".join(lines) or "无"
+
+
+def _local_agent_context_session_id(conversation_id: str) -> str:
+    return f"pna-context-{conversation_id}"
+
+
+def _clean_contextual_rewrite(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^```(?:json|text)?", "", text.strip(), flags=re.IGNORECASE).strip()
+    text = re.sub(r"```$", "", text.strip()).strip()
+    if text.startswith("{"):
+        try:
+            payload = _decode_json_object(text)
+            text = str(payload.get("query") or payload.get("question") or payload.get("rewritten") or "").strip()
+        except Exception:
+            pass
+    text = re.sub(r"^(改写后的问题|完整问题|问题|查询|query|question)\s*[:：]", "", text, flags=re.IGNORECASE).strip()
+    text = text.strip(" \t\r\n\"“”'`")
+    text = re.sub(r"\s+", " ", text)
+    return text[:220]
 
 
 def _topic_create_request(message: str) -> tuple[bool, str | None]:

@@ -204,6 +204,39 @@ def test_search_query_plan_falls_back_without_web_permission(services):
     assert llm.calls == 0
 
 
+def test_contextual_followup_is_rewritten_with_local_agent_memory(services):
+    _, store, _ = services
+    store.save_turn(
+        "ctx_conv",
+        "现在有什么烹饪机器人牌子？",
+        "代表品牌包括苏泊尔、添可、九阳、ChefRobot、长膳和智谷天厨。",
+        [],
+        {"type": "topic", "text": "ai烹饪机器人"},
+        user_id="default",
+        topic="ai烹饪机器人",
+        category_scope=["tech"],
+    )
+    search = CaptureQuerySearchService()
+    local_agent = FakeContextRewriteLocalAgent("苏泊尔 添可 九阳 ChefRobot 长膳 智谷天厨 公司特色")
+    chat = NewsChatService(store, search, local_agent=local_agent, llm_client=FakeDisabledLLM())
+
+    asyncio.run(
+        chat.chat(
+            "ctx_conv",
+            "上面那些公司都有什么特色",
+            topic="ai烹饪机器人",
+            category_scope=["tech"],
+            user_id="default",
+        )
+    )
+
+    assert local_agent.calls == 1
+    assert "苏泊尔" in local_agent.last_payload.project_context["recent_memory"]
+    assert "苏泊尔" in search.queries[0]
+    assert "ChefRobot" in search.queries[0]
+    assert "公司特色" in search.queries[0]
+
+
 def test_related_search_uses_local_agent_queries_and_saves_turn(services):
     _, store, _ = services
     search = FakeRelatedSearchService()
@@ -2229,6 +2262,20 @@ class EmptySearchService:
         return []
 
 
+class CaptureQuerySearchService:
+    external_configured = False
+
+    def __init__(self):
+        self.queries = []
+
+    async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
+        self.queries.append(query)
+        return []
+
+    async def search_external(self, query, category_scope, source_scope, max_results=8):
+        return []
+
+
 class EnoughLocalWithExternalSearchService:
     external_configured = True
 
@@ -2289,6 +2336,21 @@ class FakeRelatedLocalAgent:
     async def chat(self, payload):
         self.calls += 1
         return type("FakeRelatedResponse", (), {"status": "ok", "message": FakeRelatedMessage()})()
+
+
+class FakeContextRewriteLocalAgent:
+    config = type("FakeLocalAgentConfig", (), {"enabled": True})()
+
+    def __init__(self, content):
+        self.content = content
+        self.calls = 0
+        self.last_payload = None
+
+    async def chat(self, payload):
+        self.calls += 1
+        self.last_payload = payload
+        message = type("FakeContextRewriteMessage", (), {"content": self.content})()
+        return type("FakeContextRewriteResponse", (), {"status": "ok", "message": message})()
 
 
 class FakeBriefMessage:
