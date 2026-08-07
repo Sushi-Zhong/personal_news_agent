@@ -313,7 +313,7 @@ async function sendChat(message, target = "#messages") {
   targetNode.appendChild(userNode);
   const assistantNode = chatTurn("assistant", "", true);
   targetNode.appendChild(assistantNode);
-  scrollChatTurnToTop(targetNode, userNode);
+  scrollChatToBottom(targetNode);
   return sendChatIntoTurn(message, assistantNode, target);
 }
 
@@ -344,6 +344,7 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   conversationId = data.conversation_id;
   localStorage.setItem("pna_conversation_id", conversationId);
   setAssistantResponseHtml(assistantNode, chatResponseHtml(data));
+  scrollChatToBottom(targetNode);
   syncChatResponseContext(data);
   await notifyConversationHistoryChanged();
   return data;
@@ -410,7 +411,7 @@ async function restoreChatMemory(target = "#messages") {
     if (typeof window.applyChatConversationContext === "function") {
       window.applyChatConversationContext(data.context || {});
     }
-    targetNode.scrollTop = targetNode.scrollHeight;
+    scrollChatToBottom(targetNode, "auto");
     return true;
   } catch (error) {
     return false;
@@ -442,9 +443,7 @@ function appendLocalTurn(role, text, target = "#messages", loading = false) {
   targetNode.classList.add("chat-stream");
   const node = loading ? chatTurn("assistant", "", true) : chatTurn(role, text);
   targetNode.appendChild(node);
-  if (role === "user") {
-    scrollChatTurnToTop(targetNode, node);
-  }
+  scrollChatToBottom(targetNode);
   return node;
 }
 
@@ -457,6 +456,7 @@ function setAssistantResponseHtml(node, html) {
   if (!node) return;
   node.innerHTML = `${html}${turnActionsHtml("assistant")}`;
   mountRelatedMindMaps(node);
+  scrollChatToBottom(node.closest(".messages"), "auto");
 }
 
 async function streamChat(payload, assistantNode, targetNode) {
@@ -497,17 +497,20 @@ async function streamChat(payload, assistantNode, targetNode) {
         throw new Error(event.message || "流式请求失败");
       }
       assistantNode.innerHTML = chatStreamingHtml(state);
+      scrollChatToBottom(targetNode, "auto");
     }
   }
   return null;
 }
 
-function scrollChatTurnToTop(targetNode, turnNode) {
-  if (!targetNode || !turnNode) return;
+function scrollChatToBottom(targetNode, behavior = "smooth") {
+  if (!targetNode) return;
   requestAnimationFrame(() => {
-    const targetRect = targetNode.getBoundingClientRect();
-    const turnRect = turnNode.getBoundingClientRect();
-    targetNode.scrollTop += turnRect.top - targetRect.top;
+    if (typeof targetNode.scrollTo === "function") {
+      targetNode.scrollTo({ top: targetNode.scrollHeight, behavior });
+    } else {
+      targetNode.scrollTop = targetNode.scrollHeight;
+    }
   });
 }
 

@@ -47,7 +47,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
 
     @app.get("/")
     async def index() -> FileResponse:
-        return FileResponse(static_dir / "home.html")
+        return FileResponse(static_dir / "landing.html")
 
     @app.get("/web")
     async def web_app() -> FileResponse:

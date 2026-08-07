@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="个人资讯助手：主动捕捉热点、判断信息真伪、沉淀专题脉络，并按用户定时任务生成主题报告。"
+    />
+    <title>个人资讯助手 · Agentic News Intelligence</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260804-console-readability-1" />
+  </head>
+  <body class="landing-shell">
+    <header class="landing-nav">
+      <a class="landing-brand" href="/" aria-label="个人资讯助手首页">
+        <span class="brand-mark">N</span>
+        <span>
+          <strong>Personal News Agent</strong>
+          <small>AGENTIC NEWS INTELLIGENCE</small>
+        </span>
+      </a>
+      <nav class="landing-links" aria-label="产品导航">
+        <a href="#capabilities">核心能力</a>
+        <a href="#workflow">工作流</a>
+        <a href="#trust">可信机制</a>
+      </nav>
+      <div class="landing-actions">
+        <a class="ghost-link" href="/web">进入工作台</a>
+        <a class="primary-link" href="/auth">登录 / 注册 <span aria-hidden="true">→</span></a>
+      </div>
+    </header>
+
+    <main>
+      <section class="landing-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">PORTAL CRAWLING · TOPIC FUSION · SCHEDULED PUSH</p>
+          <h1>从海量新闻源出发，让 Agent 主动捕捉关键变化。</h1>
+          <p class="hero-lead">
+            系统持续扫描门户索引页和专题站点，一层 follow 抓取正文，去重入库后结合大模型抽取主题、事件和核心摘要，
+            最终面向个人兴趣生成热点解读、真相判断和定时主题报告。
+          </p>
+          <div class="hero-cta">
+            <a class="primary-link large" href="/auth">立即登录使用</a>
+            <a class="ghost-link large" href="/web">查看工作台</a>
+          </div>
+          <div class="hero-metrics" aria-label="产品能力指标">
+            <article>
+              <strong>15min</strong>
+              <span>低频持续轮询</span>
+            </article>
+            <article>
+              <strong>1-hop</strong>
+              <span>索引页链接跟随</span>
+            </article>
+            <article>
+              <strong>4+ 类</strong>
+              <span>热点/真相/报告/推送</span>
+            </article>
+          </div>
+        </div>
+
+        <aside class="agent-preview" aria-label="资讯 Agent 工作台预览">
+          <div class="preview-top">
+            <span></span><span></span><span></span>
+            <strong>NEWS AGENT · INTELLIGENCE CONSOLE</strong>
+            <em>Agent Online</em>
+          </div>
+          <div class="preview-tabs">
+            <span class="active">热点解读</span>
+            <span>真相判断</span>
+            <span>定时报告</span>
+          </div>
+          <div class="preview-dialog">
+            <p class="preview-user">帮我盯一下 AI 终端和中东局势今天的新变化。</p>
+            <div class="preview-agent">
+              <div class="mini-agent-mark">N</div>
+              <div>
+                <strong>News Agent</strong>
+                <small>已从门户索引页、搜索结果和近期主题中合并事件。</small>
+              </div>
+            </div>
+            <ol class="preview-steps">
+              <li><span>01</span>识别来源索引页与板块</li>
+              <li><span>02</span>正文抓取、URL 与内容去重</li>
+              <li><span>03</span>主题融合、事件摘要与证据归档</li>
+            </ol>
+            <section class="preview-result">
+              <small>示例结果</small>
+              <h2>AI 终端供应链热度继续上升</h2>
+              <p>多家门户科技频道集中出现新品、供应链和应用生态内容，建议纳入未来 48 小时跟踪。</p>
+              <div class="bar-chart" aria-hidden="true">
+                <i style="--h: 42%"></i><i style="--h: 58%"></i><i style="--h: 52%"></i><i style="--h: 78%"></i><i style="--h: 86%"></i>
+              </div>
+            </section>
+          </div>
+        </aside>
+      </section>
+
+      <section id="capabilities" class="landing-section">
+        <div class="section-head">
+          <p class="eyebrow">CORE CAPABILITIES</p>
+          <h2>围绕个人信息助理的四条主线</h2>
+        </div>
+        <div class="capability-grid">
+          <article>
+            <span>01</span>
+            <h3>热点解读</h3>
+            <p>将分散新闻合并为板块、主题和事件摘要，减少重复阅读，突出真正变化。</p>
+          </article>
+          <article>
+            <span>02</span>
+            <h3>真相判断</h3>
+            <p>围绕声明、争议和传闻组织证据，区分已证实、待核验和来源冲突的信息。</p>
+          </article>
+          <article>
+            <span>03</span>
+            <h3>主动捕捉</h3>
+            <p>系统资产绑定门户索引页和板块，后台低并发持续扫描，不依赖用户手动搜索。</p>
+          </article>
+          <article>
+            <span>04</span>
+            <h3>定时主题报告</h3>
+            <p>用户用自然语言创建定时任务，系统按时间生成专题报告并推送到专属会话。</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="workflow" class="landing-section workflow-section">
+        <div class="section-head">
+          <p class="eyebrow">AGENT WORKFLOW</p>
+          <h2>从索引页到个人专题的稳定链路</h2>
+        </div>
+        <div class="workflow-grid">
+          <article><strong>Index Assets</strong><span>门户首页、频道页、专题索引页</span></article>
+          <article><strong>One-hop Fetch</strong><span>提取 title / url / content 并去重</span></article>
+          <article><strong>LLM Extraction</strong><span>抽取 subject / topic / event / summary</span></article>
+          <article><strong>User Delivery</strong><span>工作台展示、专题报告、定时推送</span></article>
+        </div>
+      </section>
+
+      <section id="trust" class="landing-section trust-section">
+        <div>
+          <p class="eyebrow">PRODUCT PRINCIPLE</p>
+          <h2>产品化，但不牺牲可追踪性。</h2>
+          <p>
+            UI 只负责表达和交互，后台仍保持既有 API、用户配置、抓取、入库、专题和定时任务流程。
+            每个专题结果都会尽量保留来源、证据、主体、事件线和后续观察建议。
+          </p>
+        </div>
+        <a class="primary-link large" href="/auth">进入个人资讯助手</a>
+      </section>
+    </main>
+  </body>
+</html>
