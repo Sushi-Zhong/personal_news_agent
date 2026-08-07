@@ -23,8 +23,10 @@ from personal_news_agent.api.schemas import (
     RegisterRequest,
     ReportRequest,
     ScheduleCommandRequest,
+    TaskEnabledRequest,
     SearchRequest,
     TaskRequest,
+    TurnRelationRequest,
     TopicCreateRequest,
     TopicSummaryRequest,
     TopicViewRequest,
@@ -206,6 +208,15 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     async def feedback(payload: FeedbackRequest) -> dict[str, Any]:
         store.save_feedback(payload.user_id, payload.target_type, payload.target_id, payload.feedback_type)
         return {"status": "ok"}
+
+    @app.post("/api/chat/turns/{turn_id}/relation")
+    async def set_turn_relation(turn_id: str, payload: TurnRelationRequest) -> dict[str, Any]:
+        if payload.relation not in {"related", "unrelated"}:
+            raise HTTPException(status_code=400, detail="relation must be related or unrelated")
+        item = store.set_turn_relation(turn_id, payload.user_id, payload.relation, services["chat"].topic_drift_notice)
+        if not item:
+            raise HTTPException(status_code=404, detail="turn not found")
+        return {"item": item, "response": item.get("response")}
 
     @app.post("/api/news/search")
     async def search(payload: SearchRequest) -> dict[str, Any]:
@@ -440,6 +451,20 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     @app.get("/api/tasks")
     async def list_tasks(user_id: str = "default", limit: int = Query(default=50, ge=1, le=100)) -> dict[str, Any]:
         return {"items": services["tasks"].list_tasks(user_id=user_id, limit=limit)}
+
+    @app.post("/api/tasks/{task_id}/enabled")
+    async def set_task_enabled(task_id: str, payload: TaskEnabledRequest) -> dict[str, Any]:
+        item = services["tasks"].set_task_enabled(task_id, payload.user_id, payload.enabled)
+        if not item:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {"item": item}
+
+    @app.delete("/api/tasks/{task_id}")
+    async def delete_task(task_id: str, user_id: str = "default") -> dict[str, Any]:
+        item = services["tasks"].delete_task(task_id, user_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="task not found")
+        return {"item": item}
 
     @app.get("/api/conversations")
     async def list_conversations(user_id: str = "default", limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:

@@ -23,7 +23,7 @@ class ReportSkill:
                 conversation_id=context.conversation_id,
                 topic=topic,
                 category_scope=_categories(options.get("category")) or (context.category_scope or []),
-                strict_topic_filter=explicit_topic,
+                strict_topic_filter=bool(topic),
             )
             payload = report.model_dump(mode="json") if hasattr(report, "model_dump") else dict(report)
             return SkillResult(

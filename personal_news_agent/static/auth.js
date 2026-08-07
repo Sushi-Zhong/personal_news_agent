@@ -17,7 +17,7 @@ document.querySelector("#registerForm").addEventListener("submit", async (event)
   try {
     const result = await registerFromForm(form);
     document.querySelector("#registerStatus").textContent = `已创建：${result.user.display_name}，进入主界面后请完善个人配置。`;
-    window.location.href = "/web";
+    window.location.href = appUrl("/web");
   } catch (error) {
     document.querySelector("#registerStatus").textContent = error.message;
   } finally {
@@ -35,7 +35,7 @@ document.querySelector("#loginForm").addEventListener("submit", async (event) =>
   try {
     const result = await loginFromForm(form);
     document.querySelector("#loginStatus").textContent = `已登录：${result.user.display_name}`;
-    window.location.href = "/web";
+    window.location.href = appUrl("/web");
   } catch (error) {
     document.querySelector("#loginStatus").textContent = error.message;
   } finally {

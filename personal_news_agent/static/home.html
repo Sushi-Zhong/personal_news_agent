@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260804-console-readability-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260724-pna-base-1" />
   </head>
   <body>
     <template id="webTemplate" data-body-class="web-shell console-shell">
@@ -22,7 +22,7 @@
             <nav class="top-actions">
               <button id="openConfig" class="secondary-button">个人配置</button>
               <button id="refresh">刷新</button>
-              <a href="/auth">登录/注册</a>
+              <a href="auth">登录/注册</a>
             </nav>
           </header>
       
@@ -112,41 +112,6 @@
                   <p class="status" data-command-status></p>
                 </section>
       
-                <section class="rail-panel task-panel">
-                  <h2>定时跟踪</h2>
-                  <form id="taskForm" class="task-mini-form">
-                    <input name="topic" value="新能源汽车产业链" placeholder="专题" />
-                    <select name="category">
-                      <option value="sports">体育</option>
-                      <option value="politics">时政</option>
-                      <option value="economy">经济</option>
-                      <option value="tech">科技</option>
-                      <option value="game">游戏</option>
-                      <option value="auto">汽车</option>
-                    </select>
-                    <select name="task_type">
-                      <option value="topic_tracking">专题跟踪</option>
-                      <option value="daily_digest">每日摘要</option>
-                      <option value="weekly_digest">每周摘要</option>
-                    </select>
-                    <input name="schedule" value="*/20 * * * *" placeholder="*/20 * * * *" list="schedulePresets" />
-                    <datalist id="schedulePresets">
-                      <option value="*/20 * * * *">每 20 分钟</option>
-                      <option value="0 * * * *">每小时</option>
-                      <option value="0 9 * * *">每天 09:00</option>
-                      <option value="0 21 * * *">每天 21:00</option>
-                      <option value="0 9 * * 1">每周一 09:00</option>
-                    </datalist>
-                    <select name="delivery_channel">
-                      <option value="in_app">应用内</option>
-                      <option value="browser">浏览器提醒</option>
-                    </select>
-                    <button>保存任务</button>
-                  </form>
-                  <p class="status" data-task-status></p>
-                  <div class="task-list" data-task-list></div>
-                </section>
-      
                 <section class="rail-panel source-panel">
                   <h2>源状态</h2>
                   <div class="metric-grid">
@@ -168,14 +133,6 @@
                   <div data-deep-dive-output class="deep-dive-output">暂无</div>
                 </section>
       
-                <section class="rail-panel push-panel">
-                  <div class="panel-head compact-head">
-                    <h2>触达</h2>
-                    <button id="enableBrowserPush" class="secondary-button mini-button">提醒</button>
-                  </div>
-                  <div class="notification-list" data-notifications></div>
-                  <p class="status" data-notification-status></p>
-                </section>
               </details>
       
               <details class="agent-drawer topic-detail-drawer">
@@ -233,6 +190,50 @@
                   <div data-source-list></div>
                 </div>
               </section>
+              <section class="rail-panel task-panel">
+                <div class="panel-head compact-head">
+                  <h2>定时跟踪</h2>
+                </div>
+                <form id="taskForm" class="task-mini-form">
+                  <input name="topic" value="新能源汽车产业链" placeholder="专题" />
+                  <select name="category">
+                    <option value="sports">体育</option>
+                    <option value="politics">时政</option>
+                    <option value="economy">经济</option>
+                    <option value="tech">科技</option>
+                    <option value="game">游戏</option>
+                    <option value="auto">汽车</option>
+                  </select>
+                  <select name="task_type">
+                    <option value="topic_tracking">专题跟踪</option>
+                    <option value="daily_digest">每日摘要</option>
+                    <option value="weekly_digest">每周摘要</option>
+                  </select>
+                  <input name="schedule" value="*/20 * * * *" placeholder="*/20 * * * *" list="schedulePresets" />
+                  <datalist id="schedulePresets">
+                    <option value="*/20 * * * *">每 20 分钟</option>
+                    <option value="0 * * * *">每小时</option>
+                    <option value="0 9 * * *">每天 09:00</option>
+                    <option value="0 21 * * *">每天 21:00</option>
+                    <option value="0 9 * * 1">每周一 09:00</option>
+                  </datalist>
+                  <select name="delivery_channel">
+                    <option value="in_app">应用内</option>
+                    <option value="browser">浏览器提醒</option>
+                  </select>
+                  <button>保存任务</button>
+                </form>
+                <p class="status" data-task-status></p>
+                <div class="task-list title-only-list" data-task-list></div>
+              </section>
+              <section class="rail-panel push-panel">
+                <div class="panel-head compact-head">
+                  <h2>跟踪提醒</h2>
+                  <button id="enableBrowserPush" class="secondary-button mini-button">提醒</button>
+                </div>
+                <div class="notification-list" data-notifications></div>
+                <p class="status" data-notification-status></p>
+              </section>
             </aside>
           </main>
       
@@ -286,10 +287,10 @@
             <section class="mobile-card mobile-today-card" hidden>
               <div class="mobile-brief-title">
                 <span>今日</span>
-                <strong data-mobile-brief-topic>新能源汽车产业链</strong>
+                <strong data-mobile-brief-topic>新对话</strong>
               </div>
               <div class="mobile-brief-metrics" aria-label="今日简报指标">
-                <article><strong data-mobile-feed-count>--</strong><span>推荐</span></article>
+                <article><strong data-mobile-feed-count>--</strong><span>相关资讯</span></article>
                 <article><strong data-mobile-event-count>--</strong><span>热点</span></article>
                 <article><strong data-mobile-track-count>--</strong><span>跟踪</span></article>
               </div>
@@ -304,16 +305,22 @@
             <footer class="category-tabs" id="mobileTabs" aria-label="内容分类">
               <button data-category="" class="active">全部</button>
               <button data-category="politics">时政</button>
+              <button data-category="economy">经济</button>
               <button data-category="tech">科技</button>
-              <button data-category="game">游戏</button>
               <button data-category="auto">汽车</button>
+              <button data-category="game">游戏</button>
+              <button data-category="anime">动漫</button>
+              <button data-category="entertainment">娱乐</button>
               <button data-category="sports">体育</button>
             </footer>
       
             <section class="mobile-card mobile-agent-card">
               <div class="mobile-card-head">
-                <h2>Agent</h2>
-                <button type="button" class="secondary-button" data-command="/search 新能源汽车产业链 --cat auto">抓取</button>
+                <h2 data-mobile-agent-topic>新对话</h2>
+                <div class="mobile-card-actions">
+                  <button type="button" class="secondary-button" data-mobile-topic-popover>关注</button>
+                  <button type="button" class="secondary-button" data-command="/search 新能源汽车产业链 --cat auto">抓取</button>
+                </div>
               </div>
               <div class="mobile-chat-panel">
                 <div id="messages" class="messages mobile-messages chat-stream">
@@ -340,8 +347,12 @@
       
             <section class="mobile-card mobile-push-card">
               <div class="mobile-card-head">
-                <h2>触达</h2>
-                <button id="enableBrowserPushMobile" type="button" class="secondary-button">提醒</button>
+                <h2>跟踪提醒</h2>
+                <div class="mobile-card-actions">
+                  <button type="button" class="secondary-button" data-mobile-task-list>任务</button>
+                  <button type="button" class="secondary-button" data-mobile-track-popover>跟踪</button>
+                  <button id="enableBrowserPushMobile" type="button" class="secondary-button">提醒</button>
+                </div>
               </div>
               <div class="notification-list" data-notifications></div>
               <p class="status" data-notification-status></p>
@@ -349,7 +360,7 @@
       
             <section class="mobile-content-group">
               <section class="mobile-card mobile-feed-card">
-                <h2>推荐</h2>
+                <h2>相关资讯</h2>
                 <div id="feed" class="list"></div>
               </section>
               <section class="mobile-card mobile-events-card">
@@ -406,8 +417,8 @@
           </main>
     </template>
 
-    <script src="/static/vendor/react.production.min.js?v=18.3.1"></script>
-    <script src="/static/vendor/react-dom.production.min.js?v=18.3.1"></script>
-    <script src="/static/home.js?v=20260721-no-check-1"></script>
+    <script src="static/vendor/react.production.min.js?v=18.3.1"></script>
+    <script src="static/vendor/react-dom.production.min.js?v=18.3.1"></script>
+    <script src="static/home.js?v=20260724-pna-base-1"></script>
   </body>
 </html>

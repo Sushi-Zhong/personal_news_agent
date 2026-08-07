@@ -95,13 +95,13 @@ class ReportGenerationService:
             for turn in self.store.list_turns(conversation_id, user_id=user_id, limit=limit)
             if not str(turn.get("user_message") or "").strip().startswith("/report")
         ]
-        visible_turns = [turn for turn in turns if _turn_context_relation(turn) != "query_moderation_blocked"]
+        visible_turns = [turn for turn in turns if _turn_is_report_visible(turn)]
         if not visible_turns and topic:
             return await self.generate(user_id, topic, category_scope or [], report_type="timeline_analysis")
         report_topic = _clean_topic_prefix(topic) or _conversation_topic(visible_turns) or "当前对话"
-        scoped_turns = _filter_conversation_turns_by_topic(visible_turns, report_topic) if strict_topic_filter else visible_turns
+        scoped_turns = visible_turns
         categories = category_scope or _conversation_categories(scoped_turns)
-        evidence = _filter_conversation_evidence_by_topic(_conversation_evidence(scoped_turns), report_topic) if strict_topic_filter else _conversation_evidence(scoped_turns)
+        evidence = _conversation_evidence(scoped_turns)
         combined = _conversation_combined_text(scoped_turns, evidence, report_topic)
         keywords = extract_keywords(combined, limit=10)
         entities = extract_entities(combined, limit=10)
@@ -169,7 +169,7 @@ class ReportGenerationService:
             for turn in self.store.list_turns(conversation_id, user_id=user_id, limit=limit)
             if not str(turn.get("user_message") or "").strip().startswith("/brief")
         ]
-        visible_turns = [turn for turn in turns if _turn_context_relation(turn) != "query_moderation_blocked"]
+        visible_turns = [turn for turn in turns if _turn_is_report_visible(turn)]
         if not visible_turns:
             return await self.generate(user_id, topic or "今日资讯", category_scope or [], time_range=time_range, report_type="daily_digest")
         report_topic = _clean_topic_prefix(topic) or _conversation_topic(visible_turns) or "今日资讯"
@@ -394,6 +394,31 @@ def _days_from_range(value: str | None, default: int = 1) -> int:
 def _turn_context_relation(turn: dict[str, Any]) -> str:
     response = turn.get("response") or {}
     return str(response.get("context_relation") or "")
+
+
+def _turn_forced_relation(turn: dict[str, Any]) -> str:
+    response = turn.get("response") or {}
+    relation = str(response.get("forced_relation") or "").strip()
+    if relation in {"related", "unrelated"}:
+        return relation
+    context_relation = _turn_context_relation(turn)
+    if context_relation == "forced_related":
+        return "related"
+    if context_relation == "forced_unrelated":
+        return "unrelated"
+    return ""
+
+
+def _turn_is_report_visible(turn: dict[str, Any]) -> bool:
+    if _turn_context_relation(turn) == "query_moderation_blocked":
+        return False
+    forced_relation = _turn_forced_relation(turn)
+    if forced_relation == "unrelated":
+        return False
+    if forced_relation == "related":
+        return True
+    answer = str(turn.get("assistant_answer") or "")
+    return "当前关注主题关联较弱" not in answer
 
 
 def _clean_topic_prefix(value: str | None) -> str:

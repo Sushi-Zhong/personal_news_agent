@@ -1107,6 +1107,49 @@ class NewsStore:
             conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
         return turn_id
 
+    def update_turn_response(self, turn_id: str, user_id: str, response: dict[str, Any]) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE conversation_turns SET response_json = ? WHERE id = ? AND user_id = ?",
+                (json.dumps(response, ensure_ascii=False, default=str), turn_id, user_id),
+            )
+            row = conn.execute("SELECT * FROM conversation_turns WHERE id = ? AND user_id = ?", (turn_id, user_id)).fetchone()
+        return _conversation_turn_row(row) if row else None
+
+    def set_turn_relation(self, turn_id: str, user_id: str, relation: str, notice: str) -> dict[str, Any] | None:
+        if relation not in {"related", "unrelated"}:
+            raise ValueError("relation must be related or unrelated")
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM conversation_turns WHERE id = ? AND user_id = ?", (turn_id, user_id)).fetchone()
+            if not row:
+                return None
+            turn = _conversation_turn_row(row)
+            response = dict(turn.get("response") or {})
+            if not response:
+                response = {
+                    "conversation_id": turn["conversation_id"],
+                    "turn_id": turn_id,
+                    "answer": turn.get("assistant_answer") or "",
+                    "markdown": turn.get("assistant_answer") or "",
+                    "context_relation": "restored_history",
+                }
+            response["turn_id"] = turn_id
+            response["forced_relation"] = relation
+            response["context_relation"] = f"forced_{relation}"
+            for key in ("answer", "markdown"):
+                response[key] = _apply_relation_notice(response.get(key) or "", relation, notice)
+            conn.execute(
+                "UPDATE conversation_turns SET assistant_answer = ?, response_json = ? WHERE id = ? AND user_id = ?",
+                (
+                    response.get("answer") or "",
+                    json.dumps(response, ensure_ascii=False, default=str),
+                    turn_id,
+                    user_id,
+                ),
+            )
+            updated = conn.execute("SELECT * FROM conversation_turns WHERE id = ? AND user_id = ?", (turn_id, user_id)).fetchone()
+        return _conversation_turn_row(updated) if updated else None
+
     def last_turn(self, conversation_id: str, user_id: str | None = None) -> dict[str, Any] | None:
         clause = "conversation_id = ?"
         params: list[Any] = [conversation_id]
@@ -1363,6 +1406,26 @@ class NewsStore:
                 "UPDATE scheduled_tasks SET last_run_at = ?, next_run_at = ? WHERE id = ?",
                 (_now(), next_run_at, task_id),
             )
+
+    def set_task_enabled(self, task_id: str, user_id: str, enabled: bool) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            conn.execute(
+                "UPDATE scheduled_tasks SET enabled = ? WHERE id = ? AND user_id = ?",
+                (1 if enabled else 0, task_id, user_id),
+            )
+            row = conn.execute("SELECT * FROM scheduled_tasks WHERE id = ? AND user_id = ?", (task_id, user_id)).fetchone()
+        return _task_row(row) if row else None
+
+    def delete_task(self, task_id: str, user_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM scheduled_tasks WHERE id = ? AND user_id = ?", (task_id, user_id)).fetchone()
+            if not row:
+                return None
+            conn.execute("UPDATE scheduled_tasks SET enabled = 0 WHERE id = ? AND user_id = ?", (task_id, user_id))
+            conn.execute("DELETE FROM scheduled_tasks WHERE id = ? AND user_id = ?", (task_id, user_id))
+        data = _task_row(row)
+        data["enabled"] = False
+        return data
 
     def create_notification(
         self,
@@ -1640,6 +1703,7 @@ def _conversation_turn_row(row: sqlite3.Row) -> dict[str, Any]:
     if not data["response"]:
         data["response"] = {
             "conversation_id": data["conversation_id"],
+            "turn_id": data["id"],
             "answer": data["assistant_answer"],
             "markdown": data["assistant_answer"],
             "context_relation": "restored_history",
@@ -1650,7 +1714,29 @@ def _conversation_turn_row(row: sqlite3.Row) -> dict[str, Any]:
             "expanded_queries": [],
             "event_line": None,
         }
+    elif isinstance(data["response"], dict):
+        data["response"]["turn_id"] = data["response"].get("turn_id") or data["id"]
     return data
+
+
+def _apply_relation_notice(text: str, relation: str, notice: str) -> str:
+    cleaned = _remove_relation_notice(text, notice).lstrip()
+    if relation == "unrelated":
+        return f"> {notice}\n\n{cleaned}" if cleaned else f"> {notice}"
+    return cleaned
+
+
+def _remove_relation_notice(text: str, notice: str) -> str:
+    value = str(text or "")
+    patterns = (
+        f"> {notice}\n\n",
+        f"> {notice}\n",
+        f"{notice}\n\n",
+        notice,
+    )
+    for pattern in patterns:
+        value = value.replace(pattern, "")
+    return value
 
 
 def _task_row(row: sqlite3.Row) -> dict[str, Any]:

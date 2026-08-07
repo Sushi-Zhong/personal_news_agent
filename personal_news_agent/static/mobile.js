@@ -2,10 +2,13 @@ let mobileCategory = "";
 let mobileViewMode = "chat";
 let mobileSnapTimer = null;
 let mobileTypingScrollY = 0;
+let activeMobilePopover = null;
+let activeMobilePopoverCleanup = null;
 const mobileState = {
-  topic: "新能源汽车产业链",
+  topic: "",
   categoryScope: [],
 };
+let mobileTopicLocked = Boolean(mobileState.topic);
 const mobileBootstrapTopics = [
   { title: "新能源汽车产业链", category_scope: ["auto"], topic_type: "user" },
   { title: "科技公司上市观察", category_scope: ["tech", "economy"], topic_type: "system" },
@@ -123,6 +126,7 @@ document.querySelector("#chatForm").addEventListener("submit", async (event) => 
   const input = document.querySelector("#message");
   const message = input.value.trim();
   if (!message) return;
+  lockMobileTopicFromQuery(message);
   await handleMobileAssistantInput(message);
   await loadMobileTopics();
   input.value = "";
@@ -148,15 +152,44 @@ document.querySelectorAll("[data-mobile-action]").forEach((button) => {
     } else if (action === "deep") {
       await sendChat(`围绕${mobileState.topic}做一次深度挖掘，按最新进展、关键主体和不确定性总结。`);
     } else if (action === "track") {
-      await createMobileTrackingTask();
+      showMobileTrackingPopover(button);
     }
     updateMobileBrief();
   });
 });
 
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  const trackButton = target.closest("[data-mobile-track-popover]");
+  if (trackButton) {
+    event.preventDefault();
+    showMobileTrackingPopover(trackButton);
+    return;
+  }
+  const topicButton = target.closest("[data-mobile-topic-popover]");
+  if (topicButton) {
+    event.preventDefault();
+    showMobileTopicPopover(topicButton);
+    return;
+  }
+  const taskButton = target.closest("[data-mobile-task-list]");
+  if (taskButton) {
+    event.preventDefault();
+    showMobileTaskListPopover(taskButton);
+    return;
+  }
+  const eventItem = target.closest("#events .item");
+  if (eventItem) {
+    event.preventDefault();
+    showMobileEventActionPopover(eventItem);
+  }
+});
+
 bindAskButtons();
 bindNotificationReads();
 window.handleAssistantInput = handleMobileAssistantInput;
+window.handleChatResponseSideEffects = handleMobileChatResponseSideEffects;
 loadOnboardingOptions("#onboardingForm").then(() => loadProfileIntoForm("#onboardingForm"));
 startTaskPushPolling();
 refreshMobile();
@@ -324,8 +357,6 @@ async function handleMobileAssistantInput(message) {
     }
     if (["related"].includes(command.name)) {
       const relatedTopic = commandText(command) || commandArg(command, "topic", "q", "query");
-      if (relatedTopic) mobileState.topic = relatedTopic;
-      applyMobileTopicCommand({ ...command, args: { ...command.args, _: relatedTopic ? [relatedTopic] : [] } });
       return runMobileRelatedSearchIntoTurn(assistantNode, relatedTopic);
     }
     if (["factcheck", "verify"].includes(command.name)) {
@@ -344,7 +375,7 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related、/search、/topic、/task、/schedule、/deep、/feed。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);
@@ -353,14 +384,14 @@ async function handleMobileAssistantInput(message) {
 }
 
 async function runMobileRelatedSearchIntoTurn(assistantNode, explicitTopic = "") {
-  const topic = explicitTopic || mobileState.topic || "当前关注";
+  const query = explicitTopic || mobileState.topic || "当前关注";
   const data = await request("/api/news/related", {
     method: "POST",
     body: JSON.stringify({
       conversation_id: conversationId,
       user_id: activeUserId || "default",
-      query: topic,
-      topic,
+      query,
+      topic: mobileState.topic || null,
       category_scope: mobileState.categoryScope,
       max_queries: 8,
       allow_web_search: isWebSearchEnabled(),
@@ -402,14 +433,104 @@ function bindMobileTopicButtons() {
     button.dataset.bound = "true";
     button.addEventListener("click", async () => {
       document.querySelectorAll("[data-mobile-topic]").forEach((item) => item.classList.toggle("active", item === button));
-      mobileState.topic = button.dataset.mobileTopic || mobileState.topic;
-      mobileState.categoryScope = parseScope(button.dataset.categoryScope || "");
+      setMobileTopic(button.dataset.mobileTopic || mobileState.topic);
+      mobileState.categoryScope = parseMobileScope(button.dataset.categoryScope || "");
       mobileCategory = mobileState.categoryScope[0] || mobileCategory;
       syncMobileTabs();
       syncMobileChatContext();
       await sendChat(`${mobileState.topic} 最近有什么值得关注的变化？`);
     });
   });
+}
+
+async function showMobileTopicPopover(anchor) {
+  closeMobilePopover();
+  const popover = document.createElement("div");
+  popover.className = "event-action-popover mobile-topic-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", "关注");
+  popover.innerHTML = `
+    <strong>关注</strong>
+    <button type="button" class="topic-card add" data-mobile-topic-new><span>新建关注</span><small>下一句作为主题</small></button>
+    <div data-mobile-topic-popover-list><article><span>正在加载</span></article></div>
+  `;
+  document.body.appendChild(popover);
+  positionMobilePopover(anchor, popover);
+  bindMobilePopoverDismiss(popover, anchor);
+  popover.querySelector("[data-mobile-topic-new]")?.addEventListener("click", startNewMobileTopicConversation);
+  try {
+    const data = await request(`/api/topics?user_id=${encodeURIComponent(activeUserId || "default")}&limit=20`);
+    renderMobileTopicPopoverList(popover.querySelector("[data-mobile-topic-popover-list]"), mergeMobileTopics([...(data.items || []), ...mobileBootstrapTopics]));
+  } catch (error) {
+    renderMobileTopicPopoverList(popover.querySelector("[data-mobile-topic-popover-list]"), mobileBootstrapTopics);
+  }
+}
+
+function renderMobileTopicPopoverList(target, items) {
+  if (!target) return;
+  if (!items.length) {
+    target.innerHTML = `<article><span>暂无关注</span></article>`;
+    return;
+  }
+  target.innerHTML = items
+    .map((item) => {
+      const title = item.title || "";
+      const scope = (item.category_scope || []).join(",");
+      const conversation = item.conversation_id || "";
+      const active = (conversation && conversation === conversationId) || title === mobileState.topic ? " active" : "";
+      const kind = item.topic_type === "system" ? " system-topic" : " user-topic";
+      const meta = scope ? scope.split(",").join(" / ") : (item.topic_type === "system" ? "system" : "all");
+      return `<button type="button" class="topic-card${kind}${active}" data-mobile-topic-select="${escapeAttr(title)}" data-conversation-id="${escapeAttr(conversation)}" data-category-scope="${escapeAttr(scope)}"><span>${escapeHtml(shortMobileTopic(title))}</span><small>${escapeHtml(meta)}</small></button>`;
+    })
+    .join("");
+  target.querySelectorAll("[data-mobile-topic-select]").forEach((button) => {
+    button.addEventListener("click", () => selectMobileTopicFromPopover(button));
+  });
+}
+
+async function selectMobileTopicFromPopover(button) {
+  const selectedTopic = button.dataset.mobileTopicSelect || "";
+  const selectedConversationId = button.dataset.conversationId || "";
+  setMobileTopic(selectedTopic || mobileState.topic);
+  mobileState.categoryScope = parseMobileScope(button.dataset.categoryScope || "");
+  mobileCategory = mobileState.categoryScope[0] || "";
+  if (selectedConversationId) {
+    conversationId = selectedConversationId;
+    localStorage.setItem("pna_conversation_id", conversationId);
+  } else {
+    conversationId = null;
+    localStorage.removeItem("pna_conversation_id");
+  }
+  syncMobileTabs();
+  syncMobileChatContext();
+  const messages = document.querySelector("#messages");
+  if (messages) {
+    messages.innerHTML = "";
+    messages.appendChild(chatTurn("assistant", `已切换到：${mobileState.topic}`));
+  }
+  if (selectedConversationId) {
+    await restoreChatMemory("#messages");
+  }
+  closeMobilePopover();
+  await loadMobileTopics();
+}
+
+async function startNewMobileTopicConversation() {
+  conversationId = null;
+  localStorage.removeItem("pna_conversation_id");
+  mobileState.topic = "";
+  mobileState.categoryScope = [];
+  mobileTopicLocked = false;
+  mobileCategory = "";
+  syncMobileTabs();
+  syncMobileChatContext();
+  const messages = document.querySelector("#messages");
+  if (messages) {
+    messages.innerHTML = "";
+    messages.appendChild(chatTurn("assistant", "请输入要关注的主题。你发出的第一句话会成为这组关注对话的主题。"));
+  }
+  closeMobilePopover();
+  await loadMobileTopics();
 }
 
 function mergeMobileTopics(items) {
@@ -421,6 +542,13 @@ function mergeMobileTopics(items) {
   });
 }
 
+function parseMobileScope(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function shortMobileTopic(title) {
   return title.replace("传闻", "").replace("2026 ", "").replace("的影响", "").trim();
 }
@@ -428,7 +556,7 @@ function shortMobileTopic(title) {
 function applyMobileTopicCommand(command) {
   const topic = commandText(command) || commandArg(command, "topic", "q", "query");
   const scope = commandScope(command, mobileState.categoryScope);
-  if (topic) mobileState.topic = topic;
+  if (topic) setMobileTopic(topic);
   mobileState.categoryScope = scope;
   mobileCategory = scope[0] || mobileCategory;
   syncMobileTabs();
@@ -446,7 +574,9 @@ function syncMobileChatContext() {
 }
 
 function applyMobileChatConversationContext(context = {}) {
-  if (context.topic) mobileState.topic = cleanMobileSkillTopicTitle(context.topic);
+  if (context.topic) {
+    setMobileTopic(cleanMobileSkillTopicTitle(context.topic));
+  }
   if (Array.isArray(context.category_scope)) mobileState.categoryScope = context.category_scope;
   mobileCategory = mobileState.categoryScope[0] || "";
   syncMobileTabs();
@@ -484,14 +614,16 @@ function syncMobileSessionState() {
 }
 
 async function createMobileTrackingTask(options = {}) {
+  const topic = options.topic || mobileState.topic;
+  const categoryScope = options.categoryScope || mobileState.categoryScope;
   const result = await request("/api/tasks", {
     method: "POST",
     body: JSON.stringify({
       user_id: activeUserId,
       task_type: options.taskType || "topic_tracking",
       schedule: options.schedule || "*/20 * * * *",
-      category_scope: mobileState.categoryScope,
-      topics: [mobileState.topic],
+      category_scope: categoryScope,
+      topics: [topic],
       output_style: "事件线+关系网",
       delivery_channel: options.delivery || "in_app",
     }),
@@ -504,13 +636,318 @@ async function createMobileTrackingTask(options = {}) {
   return result;
 }
 
+function showMobileTrackingPopover(anchor) {
+  closeMobilePopover();
+  const popover = document.createElement("div");
+  popover.className = "event-action-popover mobile-task-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", "定时跟踪");
+  popover.innerHTML = `
+    <strong>定时跟踪</strong>
+    <form class="mobile-task-form" data-mobile-track-form>
+      <input name="topic" value="${escapeAttr(mobileState.topic || "")}" placeholder="专题" />
+      <select name="category">
+        ${mobileCategoryOptions((mobileState.categoryScope || [])[0])}
+      </select>
+      <select name="task_type">
+        <option value="topic_tracking">专题跟踪</option>
+        <option value="daily_digest">每日摘要</option>
+        <option value="weekly_digest">每周摘要</option>
+      </select>
+      <input name="schedule" value="*/20 * * * *" placeholder="*/20 * * * *" />
+      <select name="delivery_channel">
+        <option value="in_app">应用内</option>
+        <option value="browser">浏览器提醒</option>
+      </select>
+      <button type="submit">保存任务</button>
+    </form>
+    <p data-mobile-task-popover-status></p>
+  `;
+  document.body.appendChild(popover);
+  positionMobilePopover(anchor, popover);
+  popover.querySelector("[data-mobile-track-form]")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const status = popover.querySelector("[data-mobile-task-popover-status]");
+    const category = form.elements.category.value;
+    if (status) status.textContent = "正在保存。";
+    try {
+      const result = await createMobileTrackingTask({
+        topic: form.elements.topic.value.trim() || mobileState.topic,
+        categoryScope: category ? [category] : [],
+        taskType: form.elements.task_type.value,
+        schedule: form.elements.schedule.value,
+        delivery: form.elements.delivery_channel.value,
+        silent: true,
+      });
+      if (status) status.textContent = `已保存：${nextMobileRunLabel(result.next_run_at)}`;
+      await refreshMobileTaskListCount();
+    } catch (error) {
+      if (status) status.textContent = error.message;
+    }
+  });
+  bindMobilePopoverDismiss(popover, anchor);
+}
+
+async function showMobileTaskListPopover(anchor) {
+  closeMobilePopover();
+  const popover = document.createElement("div");
+  popover.className = "event-action-popover mobile-task-popover mobile-task-list-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", "任务");
+  popover.innerHTML = `<strong>任务</strong><div class="task-list title-only-list" data-mobile-task-list-body><article><span>正在加载</span></article></div>`;
+  document.body.appendChild(popover);
+  positionMobilePopover(anchor, popover);
+  bindMobilePopoverDismiss(popover, anchor);
+  try {
+    const data = await request(`/api/tasks?user_id=${encodeURIComponent(activeUserId || "default")}&limit=20`);
+    renderMobileTaskList(popover.querySelector("[data-mobile-task-list-body]"), data.items || []);
+  } catch (error) {
+    popover.querySelector("[data-mobile-task-list-body]").innerHTML = `<article><span>${escapeHtml(error.message)}</span></article>`;
+  }
+}
+
+function renderMobileTaskList(target, items) {
+  if (!target) return;
+  if (!items.length) {
+    target.innerHTML = `<article><span>暂无任务</span></article>`;
+    return;
+  }
+  target.innerHTML = items
+    .map((item) => {
+      const title = (item.topics || []).join("、") || mobileTaskTypeLabel(item.task_type);
+      const enabled = item.enabled !== false;
+      const meta = enabled ? `${mobileTaskTypeLabel(item.task_type)} · ${item.schedule_cron} · ${nextMobileRunLabel(item.next_run_at)}` : "已禁用";
+      return `<article class="${enabled ? "" : "disabled"}" role="button" tabindex="0" data-mobile-task-id="${escapeAttr(item.id)}" data-task-enabled="${enabled ? "true" : "false"}" data-task-title="${escapeAttr(title)}" data-task-meta="${escapeAttr(meta)}">
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(meta)}</span>
+      </article>`;
+    })
+    .join("");
+  target.querySelectorAll("[data-mobile-task-id]").forEach((item) => {
+    item.addEventListener("click", () => showMobileTaskActionPopover(item));
+    item.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      showMobileTaskActionPopover(item);
+    });
+  });
+}
+
+function showMobileTaskActionPopover(item) {
+  const rect = item.getBoundingClientRect();
+  const taskId = item.dataset.mobileTaskId || "";
+  const enabled = item.dataset.taskEnabled !== "false";
+  const title = item.dataset.taskTitle || "定时跟踪任务";
+  const meta = item.dataset.taskMeta || "选择接下来要做的动作。";
+  closeMobilePopover();
+  const popover = document.createElement("div");
+  popover.className = "event-action-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", `定时跟踪操作：${title}`);
+  popover.innerHTML = `
+    <strong>${escapeHtml(title)}</strong>
+    <p>${escapeHtml(meta)}</p>
+    <div>
+      <button type="button" data-mobile-task-toggle>${enabled ? "禁用" : "启用"}</button>
+      <button type="button" data-mobile-task-delete>删除</button>
+      <button type="button" data-mobile-task-cancel>关闭</button>
+    </div>
+  `;
+  document.body.appendChild(popover);
+  popover.style.left = `${Math.min(window.innerWidth - popover.offsetWidth - 12, Math.max(12, rect.right + 8))}px`;
+  popover.style.top = `${Math.min(window.innerHeight - popover.offsetHeight - 12, Math.max(12, rect.top))}px`;
+  popover.querySelector("[data-mobile-task-toggle]")?.addEventListener("click", async () => {
+    await setMobileTrackingTaskEnabled(taskId, !enabled);
+    closeMobilePopover();
+  });
+  popover.querySelector("[data-mobile-task-delete]")?.addEventListener("click", async () => {
+    await deleteMobileTrackingTask(taskId);
+    closeMobilePopover();
+  });
+  popover.querySelector("[data-mobile-task-cancel]")?.addEventListener("click", closeMobilePopover);
+  bindMobilePopoverDismiss(popover, null);
+}
+
+function showMobileEventActionPopover(item) {
+  closeMobilePopover();
+  const title = item.querySelector(".title")?.textContent?.trim() || "";
+  if (!title) return;
+  const sourceUrl = item.dataset.eventUrl || "";
+  const sourceTitle = item.dataset.eventSourceTitle || title;
+  const ask = `围绕热点事件“${title}”展开，告诉我发生了什么、为什么重要、后续看什么。`;
+  const popover = document.createElement("div");
+  popover.className = "event-action-popover";
+  popover.setAttribute("role", "dialog");
+  popover.setAttribute("aria-label", `热点事件操作：${title}`);
+  popover.innerHTML = `
+    <strong>${escapeHtml(title)}</strong>
+    <p>${escapeHtml(sourceTitle || "选择接下来要做的动作。")}</p>
+    <div>
+      <button type="button" data-mobile-event-send>发送到对话框</button>
+      <button type="button" data-mobile-event-open ${sourceUrl ? "" : "disabled"}>打开原网址</button>
+    </div>
+  `;
+  document.body.appendChild(popover);
+  positionMobilePopover(item, popover);
+  popover.querySelector("[data-mobile-event-send]")?.addEventListener("click", async () => {
+    closeMobilePopover();
+    await sendChat(ask);
+    updateMobileBrief();
+  });
+  popover.querySelector("[data-mobile-event-open]")?.addEventListener("click", () => {
+    if (!sourceUrl) return;
+    closeMobilePopover();
+    window.open(sourceUrl, "_blank", "noopener,noreferrer");
+  });
+  bindMobilePopoverDismiss(popover, item);
+}
+
+async function setMobileTrackingTaskEnabled(taskId, enabled) {
+  if (!taskId) return;
+  await request(`/api/tasks/${encodeURIComponent(taskId)}/enabled`, {
+    method: "POST",
+    body: JSON.stringify({ user_id: activeUserId || "default", enabled }),
+  });
+  await refreshMobileTaskListCount();
+}
+
+async function deleteMobileTrackingTask(taskId) {
+  if (!taskId) return;
+  await request(`/api/tasks/${encodeURIComponent(taskId)}?user_id=${encodeURIComponent(activeUserId || "default")}`, {
+    method: "DELETE",
+  });
+  await refreshMobileTaskListCount();
+}
+
+async function refreshMobileTaskListCount() {
+  await loadTaskNotifications();
+  updateMobileBrief();
+}
+
+function closeMobilePopover() {
+  if (activeMobilePopoverCleanup) activeMobilePopoverCleanup();
+  activeMobilePopoverCleanup = null;
+  if (activeMobilePopover) activeMobilePopover.remove();
+  activeMobilePopover = null;
+}
+
+function bindMobilePopoverDismiss(popover, anchor) {
+  const onPointerDown = (event) => {
+    if (popover.contains(event.target) || anchor?.contains(event.target)) return;
+    closeMobilePopover();
+  };
+  const onKeyDown = (event) => {
+    if (event.key === "Escape") closeMobilePopover();
+  };
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+  }, 0);
+  activeMobilePopover = popover;
+  activeMobilePopoverCleanup = () => {
+    document.removeEventListener("pointerdown", onPointerDown);
+    document.removeEventListener("keydown", onKeyDown);
+  };
+}
+
+function positionMobilePopover(anchor, popover) {
+  const rect = anchor.getBoundingClientRect();
+  const left = Math.min(window.innerWidth - popover.offsetWidth - 12, Math.max(12, rect.right - popover.offsetWidth));
+  const top = Math.min(window.innerHeight - popover.offsetHeight - 12, Math.max(12, rect.bottom + 8));
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+}
+
+function mobileCategoryOptions(selected = "") {
+  const items = [
+    ["sports", "体育"],
+    ["politics", "时政"],
+    ["economy", "经济"],
+    ["tech", "科技"],
+    ["auto", "汽车"],
+    ["game", "游戏"],
+    ["anime", "动漫"],
+    ["entertainment", "娱乐"],
+    ["", "全部"],
+  ];
+  return items.map(([value, label]) => `<option value="${escapeAttr(value)}" ${value === selected ? "selected" : ""}>${escapeHtml(label)}</option>`).join("");
+}
+
+function mobileTaskTypeLabel(value) {
+  const labels = {
+    topic_tracking: "专题跟踪",
+    daily_digest: "每日摘要",
+    weekly_digest: "每周摘要",
+  };
+  return labels[value] || value || "任务";
+}
+
+function nextMobileRunLabel(value) {
+  if (!value) return "未定时";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "未定时";
+  return date.toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
 function updateMobileBrief() {
   const topic = document.querySelector("[data-mobile-brief-topic]");
+  const agentTopic = document.querySelector("[data-mobile-agent-topic]");
   const feedCount = document.querySelector("[data-mobile-feed-count]");
   const eventCount = document.querySelector("[data-mobile-event-count]");
   const trackCount = document.querySelector("[data-mobile-track-count]");
-  if (topic) topic.textContent = mobileState.topic || "今日资讯";
+  const topicLabel = mobileState.topic || "新对话";
+  if (topic) topic.textContent = topicLabel;
+  if (agentTopic) agentTopic.textContent = topicLabel;
   if (feedCount) feedCount.textContent = String(document.querySelectorAll("#feed .item").length);
   if (eventCount) eventCount.textContent = String(document.querySelectorAll("#events .item").length);
   if (trackCount) trackCount.textContent = String(document.querySelectorAll("[data-notifications] article").length);
+}
+
+function handleMobileChatResponseSideEffects(response) {
+  renderMobileResponseScopedFeed(mobileResponseScopedArticles(response));
+  return response;
+}
+
+function mobileResponseScopedArticles(response) {
+  const candidates = response?.evidence?.length
+    ? response.evidence
+    : response?.recommendations?.length
+      ? response.recommendations
+      : response?.skill_result?.data?.sources || [];
+  return (candidates || []).filter((item) => item && item.title);
+}
+
+function renderMobileResponseScopedFeed(articles) {
+  const target = document.querySelector("#feed");
+  if (!target) return;
+  if (!articles.length) {
+    target.innerHTML = `<div class="empty-state compact-empty">本轮暂无相关资讯</div>`;
+  } else {
+    target.innerHTML = articles.slice(0, 8).map((item) => itemHtml(item)).join("");
+  }
+  updateMobileBrief();
+}
+
+function lockMobileTopicFromQuery(message) {
+  const title = mobileQueryTopicTitle(message);
+  if (!title) return;
+  setMobileTopic(title);
+}
+
+function setMobileTopic(value) {
+  const title = cleanMobileSkillTopicTitle(value).trim();
+  if (!title || ["新对话", "当前关注", "今日资讯"].includes(title)) return;
+  if (mobileTopicLocked && title !== mobileState.topic) return;
+  mobileState.topic = title;
+  mobileTopicLocked = true;
+  updateMobileBrief();
+}
+
+function mobileQueryTopicTitle(message) {
+  const command = parseAssistantCommand(message);
+  const raw = command
+    ? commandText(command) || commandArg(command, "topic", "q", "query") || ""
+    : message;
+  return cleanMobileSkillTopicTitle(raw).trim();
 }

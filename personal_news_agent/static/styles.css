@@ -614,6 +614,20 @@ input {
   width: 28px;
 }
 
+.turn-actions .relation-toggle {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 0 8px;
+  width: auto;
+}
+
+.turn-actions .relation-toggle.active {
+  background: #e8f0ff;
+  border-color: #bcd0ff;
+  color: #155eef;
+}
+
 .turn-actions button:hover,
 .turn-actions button:focus-visible {
   background: #eef3f8;
@@ -757,6 +771,16 @@ input {
   background: #f5f7fb;
   border-left: 3px solid #7a8aa0;
   padding: 8px 10px;
+}
+
+.assistant-markdown h3,
+.assistant-markdown h4,
+.assistant-markdown p,
+.assistant-markdown li,
+.assistant-markdown blockquote,
+.assistant-markdown strong,
+.assistant-markdown a {
+  font-size: 14px;
 }
 
 .assistant-markdown .markdown-table-wrap {
@@ -1938,6 +1962,17 @@ pre {
   min-height: 404px;
 }
 
+.mobile-root .dynamic-topic-map,
+.mobile-shell .dynamic-topic-map {
+  min-height: 260px;
+  padding: 8px;
+}
+
+.mobile-root .dynamic-topic-map .topic-relation-graph,
+.mobile-shell .dynamic-topic-map .topic-relation-graph {
+  min-height: 240px;
+}
+
 .map-node {
   border: 0;
   border-radius: 999px;
@@ -2139,6 +2174,11 @@ pre {
 
 .mobile-card-head button {
   min-height: 32px;
+}
+
+.mobile-card-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .auth-card summary {
@@ -2571,6 +2611,42 @@ pre {
 
 .task-list article {
   grid-template-columns: 1fr;
+}
+
+.task-panel .title-only-list {
+  margin-top: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.task-panel .title-only-list article {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  gap: 3px;
+  padding: 9px 6px;
+}
+
+.task-panel .title-only-list article:hover,
+.task-panel .title-only-list article:focus {
+  background: #f3f6fa;
+  outline: none;
+}
+
+.task-panel .title-only-list article.disabled {
+  opacity: 0.62;
+}
+
+.task-panel .title-only-list strong {
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.task-panel .title-only-list span {
+  display: block;
+  font-size: 12px;
+  margin-top: 2px;
 }
 
 .notification-list article.unread {
@@ -3267,6 +3343,76 @@ pre {
 .event-action-popover button:disabled {
   cursor: not-allowed;
   opacity: 0.45;
+}
+
+.mobile-task-popover {
+  max-width: calc(100vw - 24px);
+  width: min(460px, calc(100vw - 24px));
+}
+
+.mobile-topic-popover {
+  max-width: calc(100vw - 24px);
+  width: min(360px, calc(100vw - 24px));
+}
+
+.mobile-topic-popover [data-mobile-topic-popover-list] {
+  display: grid;
+  gap: 8px;
+  max-height: min(360px, 58vh);
+  min-width: min(300px, calc(100vw - 48px));
+  overflow: auto;
+}
+
+.mobile-topic-popover .topic-card {
+  align-items: start;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  min-height: 48px;
+  padding: 9px 11px;
+  width: 100%;
+}
+
+.mobile-topic-popover .topic-card.active {
+  background: #155eef;
+  border-color: #155eef;
+  color: #ffffff;
+}
+
+.mobile-topic-popover .topic-card.active small {
+  color: #dbe7ff;
+}
+
+.mobile-task-form {
+  display: grid;
+  gap: 8px;
+}
+
+.mobile-task-form input,
+.mobile-task-form select {
+  border: 1px solid #cfd8e3;
+  border-radius: 8px;
+  font: inherit;
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.mobile-task-form button {
+  min-height: 44px;
+}
+
+.mobile-task-list-popover .task-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(360px, 70vh);
+  overflow: auto;
+}
+
+.mobile-task-list-popover .task-list article {
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  padding: 8px 2px;
 }
 
 .feed-panel .panel-head select {

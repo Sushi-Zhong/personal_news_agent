@@ -1,6 +1,13 @@
 let activeUserId = localStorage.getItem("pna_user_id") || "default";
 let conversationId = localStorage.getItem("pna_conversation_id") || null;
 let webSearchEnabled = localStorage.getItem(webSearchPreferenceKey()) === "1";
+const APP_BASE_PATH = (() => {
+  const prefix = "/pna";
+  return window.location.pathname === prefix || window.location.pathname.startsWith(`${prefix}/`) ? prefix : "";
+})();
+const TOPIC_DRIFT_NOTICE = "提示：这条追问和当前关注主题关联较弱，我会照常回答，但不会因此更改当前主题或新增关注卡片。";
+const MULTI_FOCUS_DRIFT_NOTICE = "提示：这条消息里包含多个彼此关联较弱的热点，我会照常分别回答，但不会把它们合并成同一个主题或新增关注卡片。";
+const TOPIC_DRIFT_NOTICES = [TOPIC_DRIFT_NOTICE, MULTI_FOCUS_DRIFT_NOTICE];
 
 function webSearchPreferenceKey() {
   return `pna_web_search_enabled:${activeUserId || "default"}`;
@@ -28,8 +35,14 @@ function bindWebSearchToggles() {
 
 bindWebSearchToggles();
 
+function appUrl(path) {
+  if (!path || !path.startsWith("/") || path.startsWith("//") || !APP_BASE_PATH) return path;
+  if (path === APP_BASE_PATH || path.startsWith(`${APP_BASE_PATH}/`)) return path;
+  return `${APP_BASE_PATH}${path}`;
+}
+
 async function request(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(appUrl(path), {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
@@ -319,15 +332,14 @@ async function sendChat(message, target = "#messages") {
 
 async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   const chatContext = window.currentChatContext || {};
-  const messageFocus = focusFromChatMessage(message);
   const targetNode = document.querySelector(target) || document.querySelector("#messages");
   targetNode.classList.add("chat-stream");
   const payload = {
     conversation_id: conversationId,
     user_id: activeUserId || "default",
     message,
-    topic: messageFocus || chatContext.topic || null,
-    category_scope: messageFocus ? null : chatContext.category_scope || null,
+    topic: chatContext.topic || null,
+    category_scope: chatContext.category_scope || null,
     use_llm: Boolean(chatContext.use_llm),
     allow_web_search: Boolean(chatContext.allow_web_search),
   };
@@ -455,12 +467,13 @@ function setAssistantTurnText(node, text) {
 function setAssistantResponseHtml(node, html) {
   if (!node) return;
   node.innerHTML = `${html}${turnActionsHtml("assistant")}`;
+  syncForcedRelationButtons(node);
   mountRelatedMindMaps(node);
   scrollChatToBottom(node.closest(".messages"), "auto");
 }
 
 async function streamChat(payload, assistantNode, targetNode) {
-  const response = await fetch("/api/chat/stream", {
+  const response = await fetch(appUrl("/api/chat/stream"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -546,7 +559,10 @@ function turnActionsHtml(role) {
   const edit = role === "user"
     ? '<button type="button" data-turn-action="edit" title="编辑并重新发送" aria-label="编辑并重新发送">✎</button>'
     : "";
-  return `<div class="turn-actions" aria-label="消息操作">${edit}<button type="button" data-turn-action="copy" title="复制" aria-label="复制">⧉</button></div>`;
+  const relation = role === "assistant"
+    ? '<button type="button" class="relation-toggle" data-turn-action="mark-related" title="强制标记为有关">有关</button><button type="button" class="relation-toggle" data-turn-action="mark-unrelated" title="强制标记为无关">无关</button>'
+    : "";
+  return `<div class="turn-actions" aria-label="消息操作">${edit}${relation}<button type="button" data-turn-action="copy" title="复制" aria-label="复制">⧉</button></div>`;
 }
 
 document.addEventListener("click", async (event) => {
@@ -575,8 +591,85 @@ document.addEventListener("click", async (event) => {
       button.textContent = original;
       button.setAttribute("aria-label", "复制");
     }, 1200);
+    return;
+  }
+  if (action === "mark-related") {
+    await forceTurnRelation(turn, "related");
+    return;
+  }
+  if (action === "mark-unrelated") {
+    await forceTurnRelation(turn, "unrelated");
   }
 });
+
+async function forceTurnRelation(turn, relation) {
+  if (!turn || !turn.classList.contains("chat-assistant")) return;
+  const turnId = responseTurnId(turn);
+  if (turnId) {
+    try {
+      const data = await request(`/api/chat/turns/${encodeURIComponent(turnId)}/relation`, {
+        method: "POST",
+        body: JSON.stringify({ user_id: activeUserId || "default", relation }),
+      });
+      if (data.response) {
+        setAssistantResponseHtml(turn, chatResponseHtml(data.response));
+        return;
+      }
+    } catch (error) {
+      // 如果后端更新失败，继续使用本地显示切换，避免按钮无响应。
+    }
+  }
+  turn.dataset.forcedRelation = relation;
+  syncForcedRelationButtons(turn);
+  if (relation === "related") {
+    removeTurnDriftNotice(turn);
+  } else {
+    ensureTurnDriftNotice(turn);
+  }
+}
+
+function ensureTurnDriftNotice(turn) {
+  const markdown = turn.querySelector(".assistant-markdown");
+  if (markdown) {
+    if (turnHasDriftNotice(turn)) return;
+    markdown.insertAdjacentHTML("afterbegin", `<blockquote class="manual-relation-notice">${escapeHtml(TOPIC_DRIFT_NOTICE)}</blockquote>`);
+    return;
+  }
+  const bubble = turn.querySelector(".chat-bubble");
+  if (!bubble || bubble.dataset.manualRelationNotice === "true") return;
+  bubble.dataset.originalText = bubble.textContent || "";
+  bubble.dataset.manualRelationNotice = "true";
+  bubble.textContent = `${TOPIC_DRIFT_NOTICE}\n\n${bubble.dataset.originalText}`;
+}
+
+function removeTurnDriftNotice(turn) {
+  turn.querySelectorAll("blockquote").forEach((node) => {
+    if (TOPIC_DRIFT_NOTICES.some((notice) => node.textContent.includes(notice))) node.remove();
+  });
+  const bubble = turn.querySelector(".chat-bubble");
+  if (bubble?.dataset.manualRelationNotice === "true") {
+    bubble.textContent = bubble.dataset.originalText || "";
+    delete bubble.dataset.manualRelationNotice;
+    delete bubble.dataset.originalText;
+  }
+}
+
+function turnHasDriftNotice(turn) {
+  return Array.from(turn.querySelectorAll("blockquote")).some((node) =>
+    TOPIC_DRIFT_NOTICES.some((notice) => node.textContent.includes(notice))
+  );
+}
+
+function responseTurnId(turn) {
+  return turn.querySelector("[data-response-turn-id]")?.dataset.responseTurnId || "";
+}
+
+function syncForcedRelationButtons(turn) {
+  const relation = turn.dataset.forcedRelation || turn.querySelector("[data-response-turn-id]")?.dataset.forcedRelation || "";
+  turn.querySelectorAll(".relation-toggle").forEach((button) => {
+    button.classList.toggle("active", Boolean(relation) && button.dataset.turnAction === `mark-${relation}`);
+  });
+}
 
 function turnCopyText(turn) {
   if (turn.classList.contains("chat-user")) {
@@ -613,12 +706,21 @@ function chatResponseHtml(data) {
   const trace = renderResearchTrace(data.research_trace || []);
   const mindMap = renderChatMindMapPlaceholder(data.mind_map);
   const isRelated = data.context_relation === "related_search" || data.mind_map?.type === "related_mind_map";
-  const answerText = isRelated ? stripRelatedGeneratedMarkdown(data.markdown || data.answer || "", true) : data.markdown || data.answer || "";
+  const isFactcheck = data.skill_result?.command === "/factcheck";
+  const answerText = isFactcheck
+    ? stripFactcheckEvidenceMarkdown(data.markdown || data.answer || "")
+    : isRelated
+      ? stripRelatedGeneratedMarkdown(data.markdown || data.answer || "", true)
+      : data.markdown || data.answer || "";
   const answer = renderMarkdown(answerText);
   const reportDownloads = renderReportDownloads(data);
   const evidenceIndex = isRelated ? renderChatEvidenceIndex(data.evidence || []) : "";
+  const factcheckEvidence = isFactcheck ? renderFactcheckEvidenceCards(data.skill_result?.data?.evidence || []) : "";
   const timeline = renderChatEventLine(data.event_line, data.evidence || []);
-  return `${trace}${mindMap}<div class="assistant-markdown">${answer}</div>${reportDownloads}${evidenceIndex}${timeline}`;
+  const responseMeta = data.turn_id
+    ? `<span hidden data-response-turn-id="${escapeAttr(data.turn_id)}" data-forced-relation="${escapeAttr(data.forced_relation || "")}"></span>`
+    : "";
+  return `${responseMeta}${trace}${mindMap}<div class="assistant-markdown">${answer}</div>${reportDownloads}${evidenceIndex}${factcheckEvidence}${timeline}`;
 }
 
 function renderReportDownloads(data) {
@@ -627,7 +729,7 @@ function renderReportDownloads(data) {
   const reportId = payload.report_id;
   if (result.command !== "/report" || !reportId) return "";
   const userId = activeUserId || "default";
-  const base = `/api/reports/${encodeURIComponent(reportId)}/download?user_id=${encodeURIComponent(userId)}`;
+  const base = appUrl(`/api/reports/${encodeURIComponent(reportId)}/download?user_id=${encodeURIComponent(userId)}`);
   return `<div class="report-downloads" aria-label="报告下载">
     <a href="${base}&format=pdf" download>下载 PDF</a>
     <a href="${base}&format=docx" download>下载 Word</a>
@@ -967,6 +1069,45 @@ function stripRelatedGeneratedMarkdown(markdown, stripEvidenceIndex = false) {
   return output.join("\n").trim();
 }
 
+function stripFactcheckEvidenceMarkdown(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const output = [];
+  let skippingSection = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (skippingSection && trimmed.startsWith("### ")) {
+      skippingSection = false;
+    }
+    if (trimmed.startsWith("### 检索到的全部证据")) {
+      skippingSection = true;
+      continue;
+    }
+    if (!skippingSection) output.push(line);
+  }
+  return output.join("\n").trim();
+}
+
+function renderFactcheckEvidenceCards(items) {
+  if (!items.length) return "";
+  return `<div class="chat-event-line factcheck-evidence-cards">${items
+    .slice(0, 12)
+    .map((item, index) => {
+      const title = item.title || "未命名证据";
+      const url = String(item.url || "").trim();
+      const tag = url.startsWith("http") ? "a" : "div";
+      const attrs = url.startsWith("http") ? ` href="${escapeAttr(url)}" target="_blank" rel="noreferrer"` : "";
+      const date = item.published_at || "发布时间未知";
+      const source = item.source_id || "来源未知";
+      const summary = truncateText(cleanEvidenceText(item.summary || item.content_excerpt || ""), 180);
+      return `<${tag} class="chat-event"${attrs}>
+        <time>${escapeHtml(date)}</time>
+        <strong>${escapeHtml(title)}</strong>
+        <p>${escapeHtml(source)}${summary ? ` — ${escapeHtml(summary)}` : ""}${url ? " Read more" : ""}</p>
+      </${tag}>`;
+    })
+    .join("")}</div>`;
+}
+
 function renderChatEvidenceIndex(items) {
   if (!items.length) return "";
   return `<div class="assistant-markdown related-evidence-index"><h3>证据索引</h3><ul>${items
@@ -1096,9 +1237,17 @@ function renderInlineMarkdown(value) {
 }
 
 function renderInlinePlain(value) {
-  return escapeHtml(value)
+  return linkifyPlainUrls(escapeHtml(value)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/`(.+?)`/g, "<code>$1</code>");
+    .replace(/`(.+?)`/g, "<code>$1</code>"));
+}
+
+function linkifyPlainUrls(value) {
+  return String(value || "").replace(/https?:\/\/[^\s<]+/g, (url) => {
+    const trailing = url.match(/[，。；、,.!?）)]$/)?.[0] || "";
+    const cleanUrl = trailing ? url.slice(0, -trailing.length) : url;
+    return `<a href="${escapeAttr(cleanUrl)}" target="_blank" rel="noreferrer">${cleanUrl}</a>${trailing}`;
+  });
 }
 
 function bindAskButtons() {
@@ -1150,7 +1299,7 @@ const assistantSlashCommands = [
   {
     name: "related",
     label: "查找相关新闻",
-    description: "补充相关报道、历史背景与延伸线索",
+    description: "不输入内容则用当前主题；输入内容则查 /related 后面的内容",
     icon: "⌁",
   },
 ];
@@ -1331,7 +1480,7 @@ function renderTaskNotifications(targetSelector, items) {
           <p>${escapeHtml(item.body || "")}</p>
           <span>${escapeHtml(notificationTimeLabel(item.created_at))}</span>
         </div>
-        ${item.read_at ? "" : `<button type="button" data-notification-read="${escapeAttr(item.id)}">已读</button>`}
+        ${item.read_at ? "" : `<button type="button" data-notification-read="${escapeAttr(item.id)}" title="点此标为已读">未读</button>`}
       </article>`
     )
     .join("");

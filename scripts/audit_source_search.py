@@ -163,13 +163,18 @@ async def audit_api(client: httpx.AsyncClient, request: dict[str, Any], query: s
         snippet_field = str(request.get("snippet_field", "content"))
         samples = []
         for record in records[:limit]:
-            if not isinstance(record, dict) or not record.get(url_field):
+            if not isinstance(record, dict):
                 continue
+            url_value = record_value(record, url_field)
+            if not url_value:
+                continue
+            title_value = record_value(record, title_field) or url_value
+            snippet_value = record_value(record, snippet_field) or ""
             samples.append(
                 {
-                    "title": strip_html(str(record.get(title_field) or record.get(url_field))),
-                    "url": str(record.get(url_field)),
-                    "snippet": strip_html(str(record.get(snippet_field) or ""))[:180],
+                    "title": strip_html(str(title_value)),
+                    "url": str(url_value),
+                    "snippet": strip_html(str(snippet_value))[:180],
                 }
             )
         check["record_count"] = len(records)
@@ -248,6 +253,10 @@ def extract_path(payload: Any, path: str) -> Any:
             return None
         current = current.get(part)
     return current
+
+
+def record_value(record: dict[str, Any], field: str) -> Any:
+    return extract_path(record, field) if "." in field else record.get(field)
 
 
 def strip_html(value: str) -> str:
