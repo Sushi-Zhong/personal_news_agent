@@ -6,6 +6,8 @@ import zipfile
 
 from personal_news_agent.app import app
 from personal_news_agent.config import settings
+from personal_news_agent.config import Settings
+from personal_news_agent.services.phone_verification import PhoneVerificationService
 
 
 object.__setattr__(settings, "realname_provider", "mock")
@@ -26,6 +28,15 @@ def test_api_health_and_main_routes():
         assert events.status_code == 200
         assert events.json()["items"]
 
+        recommended = client.get("/api/topics/recommended?user_id=default&limit=4&use_llm=false")
+        assert recommended.status_code == 200
+        assert recommended.json()["window_hours"] == 24
+        assert recommended.json()["refresh_window_hours"] == 6
+        assert recommended.json()["generation_source"] == "fallback"
+
+        invalid_window = client.get("/api/topics/recommended?window_hours=3&refresh_window_hours=6&use_llm=false")
+        assert invalid_window.status_code == 400
+
         backend = client.get("/api/news/search/backend")
         assert backend.status_code == 200
         assert backend.json()["local_backend"] == "sqlite_fts"
@@ -40,7 +51,7 @@ def test_api_health_and_main_routes():
         auth = client.get("/auth")
         assert auth.status_code == 200
         assert 'data-auth-mode-target="login"' in auth.text
-        assert "手机号实名认证，请用真实姓名对应的手机号" in auth.text
+        assert "短信验证码仅用于确认你持有该手机号" in auth.text
 
         mobile = client.get("/mobile")
         assert mobile.status_code == 200
@@ -50,42 +61,49 @@ def test_api_health_and_main_routes():
 
 def test_auth_register_login_and_realname_status():
     with TestClient(app) as client:
-        username = f"api_user_{uuid4().hex[:8]}"
+        _enable_mock_phone_auth(client)
+        auth_config = client.get("/api/auth/config")
+        assert auth_config.status_code == 200
+        assert auth_config.json()["available"] is True
+        assert auth_config.json()["method"] == "sms_otp"
         mobile = _mobile()
+        challenge = client.post("/api/auth/registration-code", json={"mobile": mobile})
+        assert challenge.status_code == 200
+        assert challenge.json()["debug_code"] == "123456"
         registered = client.post(
             "/api/auth/register",
             json={
-                "username": username,
-                "password": "123456",
-                "confirm_password": "123456",
-                "real_name": "张三",
                 "mobile": mobile,
+                "challenge_id": challenge.json()["challenge_id"],
+                "verification_code": "123456",
+                "password": "12345678",
+                "confirm_password": "12345678",
             },
         )
         assert registered.status_code == 200
-        assert registered.json()["user"]["username"] == username
+        assert registered.json()["user"]["username"] == mobile
         assert registered.json()["user"]["mobile"] == mobile[:3] + "****" + mobile[-4:]
         assert registered.json()["session"]["token"]
 
-        login = client.post("/api/auth/login", json={"username": username, "password": "123456"})
+        login = client.post("/api/auth/login", json={"mobile": mobile, "password": "12345678"})
         assert login.status_code == 200
-        assert login.json()["user"]["username"] == username
+        assert login.json()["user"]["username"] == mobile
 
         realname = client.get("/api/auth/realname/status")
         assert realname.status_code == 200
         assert realname.json()["provider"] == "mock"
 
-        mismatch = client.post(
-            "/api/auth/register",
-            json={
-                "username": f"bad_{uuid4().hex[:8]}",
-                "password": "123456",
-                "confirm_password": "654321",
-                "real_name": "李四",
-                "mobile": _mobile(),
-            },
-        )
+        mismatch_mobile = _mobile()
+        mismatch_challenge = client.post("/api/auth/registration-code", json={"mobile": mismatch_mobile}).json()
+        mismatch = client.post("/api/auth/register", json={
+            "mobile": mismatch_mobile,
+            "challenge_id": mismatch_challenge["challenge_id"],
+            "verification_code": "123456",
+            "password": "12345678",
+            "confirm_password": "87654321",
+        })
         assert mismatch.status_code == 400
+        assert mismatch.json()["detail"]["code"] == "password_mismatch"
 
 
 def test_onboarding_generates_profile_prompt_and_model_choice():
@@ -100,16 +118,17 @@ def test_onboarding_generates_profile_prompt_and_model_choice():
         assert any(item["key"] == "sports" and item["implemented"] for item in categories)
         assert any(item["key"] == "politics" and item["implemented"] for item in categories)
 
-        username = f"onboarding_{uuid4().hex[:8]}"
+        _enable_mock_phone_auth(client)
         mobile = _mobile()
+        challenge = client.post("/api/auth/registration-code", json={"mobile": mobile}).json()
         registered = client.post(
             "/api/auth/register",
             json={
-                "username": username,
-                "password": "123456",
-                "confirm_password": "123456",
-                "real_name": "王五",
                 "mobile": mobile,
+                "challenge_id": challenge["challenge_id"],
+                "verification_code": "123456",
+                "password": "12345678",
+                "confirm_password": "12345678",
             },
         )
         assert registered.status_code == 200
@@ -161,6 +180,19 @@ def test_onboarding_generates_profile_prompt_and_model_choice():
 
 def _mobile() -> str:
     return "13" + str(uuid4().int % 1_000_000_000).zfill(9)
+
+
+def _enable_mock_phone_auth(client: TestClient) -> None:
+    store = client.app.state.services["store"]
+    mock_settings = Settings(
+        database_url=settings.database_url,
+        phone_challenge_provider="mock",
+        phone_challenge_secret="api-test-phone-challenge-secret-that-is-long-enough",
+        phone_challenge_mock_enabled=True,
+        phone_challenge_mock_code="123456",
+        phone_challenge_resend_seconds=10,
+    )
+    client.app.state.services["auth"].phone_verification = PhoneVerificationService(store, mock_settings)
 
 
 def test_api_chat_report_and_task_flow():

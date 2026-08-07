@@ -180,6 +180,8 @@ PNA_RUN_USER=pna PNA_RUN_GROUP=pna ./scripts/install_systemd_services.sh
 
 Web、crawler 和 task runner 都会加载 `.env.ext`，然后使用 `PERSONAL_NEWS_VENV` 指向的 Python；该解释器不存在时回退到 `python3`。crawler 和 task runner 都只应各运行一个 systemd 实例。可在 `.env.ext` 中调整：
 
+systemd 的 Web unit 会设置 `PNA_WEB_DISABLE_BACKGROUND_CRAWL=1`，避免 Web 内嵌抓取与独立 crawler 重复运行；本地只启动 Web 时仍可用 `PERSONAL_NEWS_BACKGROUND_CRAWL=1` 自动抓取。
+
 ```bash
 export PNA_CRAWL_WORKERS=2
 export PNA_CRAWL_DUE_LIMIT=20

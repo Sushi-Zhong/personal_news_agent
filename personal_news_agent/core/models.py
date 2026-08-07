@@ -13,6 +13,7 @@ class SectionConfig:
     name: str
     category: str
     url: str
+    discovery_url: str | None = None
     crawl_strategy: str = "list_page"
     crawl_enabled: bool = True
     tags: tuple[str, ...] = ()

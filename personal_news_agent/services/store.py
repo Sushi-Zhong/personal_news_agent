@@ -181,6 +181,31 @@ CREATE TABLE IF NOT EXISTS pna_auth_sessions (
   created_at TEXT,
   expires_at TEXT
 );
+CREATE TABLE IF NOT EXISTS pna_phone_verification_challenges (
+  challenge_id TEXT PRIMARY KEY,
+  mobile_hash TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  purpose TEXT NOT NULL DEFAULT 'registration',
+  provider TEXT NOT NULL,
+  provider_request_id TEXT,
+  request_ip_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  resend_after TEXT NOT NULL,
+  max_attempts INTEGER NOT NULL,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  send_succeeded_at TEXT,
+  send_failed_at TEXT,
+  verified_at TEXT,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pna_phone_challenge_mobile_created
+  ON pna_phone_verification_challenges(mobile_hash, created_at);
+CREATE INDEX IF NOT EXISTS idx_pna_phone_challenge_ip_created
+  ON pna_phone_verification_challenges(request_ip_hash, created_at);
+CREATE INDEX IF NOT EXISTS idx_pna_phone_challenge_expiry
+  ON pna_phone_verification_challenges(expires_at);
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   display_name TEXT NOT NULL,
@@ -310,8 +335,10 @@ class NewsStore:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
             conn.commit()
@@ -320,6 +347,7 @@ class NewsStore:
 
     def init(self) -> None:
         with self.connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(SCHEMA)
             self._ensure_news_source_columns(conn)
             self._ensure_pna_user_columns(conn)
@@ -661,7 +689,8 @@ class NewsStore:
                 SELECT a.* FROM news_articles a
                 LEFT JOIN news_topic_articles ta ON ta.article_id = a.id
                 WHERE a.status = 'active' AND ta.article_id IS NULL AND length(COALESCE(a.content, '')) > 0
-                ORDER BY COALESCE(a.published_at, a.fetched_at) ASC LIMIT ?
+                  AND datetime(COALESCE(a.published_at, a.fetched_at)) <= datetime('now', '+10 minutes')
+                ORDER BY datetime(COALESCE(a.published_at, a.fetched_at)) DESC LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
@@ -679,6 +708,48 @@ class NewsStore:
         items = [_row(row) for row in rows]
         for item in items:
             item["keywords"] = json.loads(item.get("keywords_json") or "[]")
+        return items
+
+    def list_trending_news_topics(
+        self,
+        window_hours: int = 24,
+        refresh_window_hours: int = 6,
+        limit: int = 30,
+    ) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        cutoff = _dt(now - timedelta(hours=max(1, window_hours)))
+        refresh_cutoff = _dt(now - timedelta(hours=max(1, refresh_window_hours)))
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                  t.id,
+                  t.category,
+                  t.name AS title,
+                  t.summary,
+                  t.keywords_json,
+                  GROUP_CONCAT(DISTINCT a.id) AS article_ids_csv,
+                  COUNT(DISTINCT a.id) AS article_count,
+                  COUNT(DISTINCT a.source_id) AS source_count,
+                  SUM(CASE WHEN COALESCE(a.published_at, a.fetched_at) >= ? THEN 1 ELSE 0 END) AS recent_update_count,
+                  MIN(COALESCE(a.published_at, a.fetched_at)) AS first_seen_at,
+                  MAX(COALESCE(a.published_at, a.fetched_at)) AS latest_seen_at
+                FROM news_topics t
+                JOIN news_topic_articles ta ON ta.topic_id = t.id
+                JOIN news_articles a ON a.id = ta.article_id
+                WHERE t.status = 'active'
+                  AND a.status = 'active'
+                  AND COALESCE(a.published_at, a.fetched_at) >= ?
+                GROUP BY t.id, t.category, t.name, t.summary, t.keywords_json
+                ORDER BY source_count DESC, recent_update_count DESC, latest_seen_at DESC
+                LIMIT ?
+                """,
+                (refresh_cutoff, cutoff, min(max(1, limit), 100)),
+            ).fetchall()
+        items = [_row(row) for row in rows]
+        for item in items:
+            item["keywords"] = json.loads(item.pop("keywords_json", None) or "[]")
+            item["article_ids"] = [value for value in str(item.pop("article_ids_csv", "") or "").split(",") if value]
         return items
 
     def merge_article_into_news_topic(self, article_id: str, extraction: dict[str, Any], allowed_topic_ids: set[str]) -> dict[str, Any]:
@@ -886,6 +957,94 @@ class NewsStore:
             }
         )
         return {"id": user_id, "username": username, "display_name": username, "mobile": mobile, "created_at": now}
+
+    def create_phone_user(
+        self,
+        *,
+        mobile: str,
+        password_hash: str,
+        challenge_id: str,
+        mobile_hash: str,
+        verification_provider: str,
+    ) -> dict[str, Any]:
+        """Create the phone account and consume its verified challenge atomically."""
+
+        now = _now()
+        user_id = stable_id("usr", f"phone:{mobile}:{now}")
+        display_name = f"用户 {mobile[:3]}****{mobile[-4:]}"
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                challenge = conn.execute(
+                    """
+                    SELECT challenge_id
+                    FROM pna_phone_verification_challenges
+                    WHERE challenge_id = ?
+                      AND mobile_hash = ?
+                      AND purpose = 'registration'
+                      AND send_succeeded_at IS NOT NULL
+                      AND verified_at IS NOT NULL
+                      AND consumed_at IS NULL
+                      AND expires_at > ?
+                    LIMIT 1
+                    """,
+                    (challenge_id, mobile_hash, now),
+                ).fetchone()
+                if not challenge:
+                    raise ValueError("phone_code_consumed_or_expired")
+                if conn.execute("SELECT 1 FROM pna_users WHERE mobile = ? LIMIT 1", (mobile,)).fetchone():
+                    raise ValueError("mobile_already_registered")
+                conn.execute(
+                    """
+                    INSERT INTO pna_users(
+                      id, username, display_name, mobile, password_hash,
+                      realname_verified, realname_provider, realname_verified_at,
+                      created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        mobile,
+                        display_name,
+                        mobile,
+                        password_hash,
+                        verification_provider,
+                        now,
+                        now,
+                        now,
+                    ),
+                )
+                updated = conn.execute(
+                    """
+                    UPDATE pna_phone_verification_challenges
+                    SET consumed_at = ?, updated_at = ?
+                    WHERE challenge_id = ? AND consumed_at IS NULL
+                    """,
+                    (now, now, challenge_id),
+                )
+                if updated.rowcount != 1:
+                    raise ValueError("phone_code_consumed_or_expired")
+            except Exception:
+                conn.rollback()
+                raise
+        self.save_profile(
+            {
+                "user_id": user_id,
+                "interests": [],
+                "negative_interests": [],
+                "preferred_categories": ["tech", "game", "auto"],
+                "preferred_sources": [],
+                "self_description": "",
+                "output_style": "concise",
+            }
+        )
+        return {
+            "id": user_id,
+            "username": mobile,
+            "display_name": display_name,
+            "mobile": mobile,
+            "created_at": now,
+        }
 
     def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         with self.connect() as conn:

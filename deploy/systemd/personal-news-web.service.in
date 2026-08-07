@@ -10,6 +10,7 @@ User=__RUN_USER__
 Group=__RUN_GROUP__
 WorkingDirectory=__PROJECT_DIR__
 Environment=PYTHONUNBUFFERED=1
+Environment=PNA_WEB_DISABLE_BACKGROUND_CRAWL=1
 UMask=0027
 ExecStart=__PROJECT_DIR__/scripts/run_web_service.sh
 Restart=always

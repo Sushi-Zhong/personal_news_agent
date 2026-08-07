@@ -26,6 +26,7 @@ from personal_news_agent.services.topic_agent import TopicAgentService
 from personal_news_agent.services.topic_extraction import TopicExtractionService
 from personal_news_agent.services.topic_summary import TopicSummaryService
 from personal_news_agent.services.topic_views import TopicViewService
+from personal_news_agent.services.trending_topics import TrendingTopicService
 from personal_news_agent.services.url_store import CrawlUrlStore, MySQLCrawlUrlStore
 from personal_news_agent.skills.registry import build_default_registry
 
@@ -44,6 +45,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
     reports = ReportGenerationService(store, search_service, local_agent=local_agent)
     factcheck = FactCheckService(store, search_service, local_agent=local_agent)
     topic_summary = TopicSummaryService(store, search_service)
+    trending_topics = TrendingTopicService(store)
     tasks = ScheduledTaskService(store, reports, search_service=search_service, native_ingestion=native_ingestion)
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
     content_moderation = TextModerationPlusService()
@@ -68,6 +70,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
         "reports": reports,
         "factcheck": factcheck,
         "topic_summary": topic_summary,
+        "trending_topics": trending_topics,
         "tasks": tasks,
         "topic_agent": topic_agent,
         "topic_extraction": topic_extraction,

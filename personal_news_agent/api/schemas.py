@@ -152,17 +152,21 @@ class DueCrawlRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username: str = Field(min_length=3, max_length=80)
-    password: str = Field(min_length=6, max_length=128)
-    confirm_password: str = Field(min_length=6, max_length=128)
-    real_name: str = Field(min_length=2, max_length=40)
-    mobile: str = Field(min_length=11, max_length=11)
-    id_card: str | None = Field(default=None, min_length=15, max_length=18)
+    mobile: str = Field(min_length=11, max_length=20)
+    challenge_id: str = Field(min_length=8, max_length=96)
+    verification_code: str = Field(pattern=r"^[0-9]{6}$")
+    password: str = Field(min_length=8, max_length=128)
+    confirm_password: str = Field(min_length=8, max_length=128)
+
+
+class RegistrationCodeRequest(BaseModel):
+    mobile: str = Field(min_length=11, max_length=20)
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    mobile: str | None = None
+    username: str | None = None
+    password: str = Field(min_length=1, max_length=128)
 
 
 class OnboardingRequest(BaseModel):

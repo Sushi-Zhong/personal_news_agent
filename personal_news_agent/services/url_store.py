@@ -151,7 +151,14 @@ class MySQLCrawlUrlStore(CrawlUrlStore):
                                 now,
                                 now,
                                 now,
-                                json.dumps({"root_domain": source.root_domain, "crawl_strategy": section.crawl_strategy}, ensure_ascii=False),
+                                json.dumps(
+                                    {
+                                        "root_domain": source.root_domain,
+                                        "crawl_strategy": section.crawl_strategy,
+                                        "discovery_url": section.discovery_url,
+                                    },
+                                    ensure_ascii=False,
+                                ),
                             ),
                         )
 

@@ -38,8 +38,9 @@ class TopicExtractionService:
             try:
                 processed.append(await self.process_article(article))
             except Exception as exc:
-                errors.append({"article_id": article["id"], "error": str(exc)})
-                self.store.log("topic_extraction", "error", article["id"], {"error": str(exc)})
+                error = str(exc).strip() or type(exc).__name__
+                errors.append({"article_id": article["id"], "error": error})
+                self.store.log("topic_extraction", "error", article["id"], {"error": error})
         return {"status": "completed", "processed": len(processed), "items": processed, "errors": errors}
 
     async def process_article(self, article: dict[str, Any]) -> dict[str, Any]:

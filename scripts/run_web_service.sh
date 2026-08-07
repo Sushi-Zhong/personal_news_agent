@@ -6,7 +6,9 @@ cd "${PROJECT_DIR}"
 
 if [[ -f "${PROJECT_DIR}/.env.ext" ]]; then
   # shellcheck disable=SC1091
+  set -a
   source "${PROJECT_DIR}/.env.ext"
+  set +a
 fi
 
 PYTHON_BIN="python3"

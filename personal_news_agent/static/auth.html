@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>注册登录 · 个人资讯助手</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260724-pna-base-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260807-phone-auth-1" />
   </head>
   <body class="auth-shell">
     <header class="auth-nav">
@@ -37,9 +37,9 @@
         <section class="auth-panel active" data-auth-panel="login">
           <h2>登录</h2>
           <form id="loginForm" class="form-grid">
-            <input name="username" autocomplete="username" placeholder="用户名" required />
+            <input name="mobile" autocomplete="tel" inputmode="tel" placeholder="手机号" required />
             <input name="password" autocomplete="current-password" type="password" placeholder="密码" required />
-            <button>登录</button>
+            <button type="submit">登录</button>
           </form>
           <p id="loginStatus" class="status" aria-live="polite"></p>
           <p class="auth-switch">还没有账号？<button type="button" class="auth-link" data-auth-mode-target="register">注册</button></p>
@@ -47,19 +47,23 @@
         <section class="auth-panel" data-auth-panel="register" hidden>
           <h2>注册</h2>
           <form id="registerForm" class="form-grid">
-            <input name="username" autocomplete="username" placeholder="用户名" required />
-            <input name="password" autocomplete="new-password" type="password" placeholder="密码，至少6位" required />
+            <input name="mobile" autocomplete="tel" inputmode="tel" placeholder="手机号" required />
+            <input name="challenge_id" type="hidden" />
+            <div class="phone-code-row">
+              <input name="verification_code" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="6 位短信验证码" required />
+              <button type="button" data-send-registration-code>发送验证码</button>
+            </div>
+            <input name="password" autocomplete="new-password" type="password" placeholder="密码，至少8位" required />
             <input name="confirm_password" autocomplete="new-password" type="password" placeholder="确认密码" required />
-            <input name="real_name" autocomplete="name" placeholder="真实姓名" required />
-            <input name="mobile" autocomplete="tel" placeholder="手机号实名认证，请用真实姓名对应的手机号" required />
-            <button>注册</button>
+            <p class="auth-form-note">短信验证码仅用于确认你持有该手机号。</p>
+            <button type="submit">注册</button>
           </form>
           <p id="registerStatus" class="status" aria-live="polite"></p>
           <p class="auth-switch">已有账号？<button type="button" class="auth-link" data-auth-mode-target="login">登录</button></p>
         </section>
       </section>
     </main>
-    <script src="static/shared.js?v=20260724-pna-base-1"></script>
-    <script src="static/auth.js?v=20260724-pna-base-1"></script>
+    <script src="static/shared.js?v=20260807-phone-auth-1"></script>
+    <script src="static/auth.js?v=20260807-phone-auth-1"></script>
   </body>
 </html>

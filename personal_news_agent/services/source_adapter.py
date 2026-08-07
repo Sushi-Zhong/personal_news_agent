@@ -29,9 +29,12 @@ class ListPageAdapter:
         if not section.crawl_enabled:
             return []
         allowed_domains = list(self.source.search.domain_filters or (self.source.root_domain,))
+        discovery_url = section.discovery_url or section.url
         if section.crawl_strategy == "rss_feed":
-            return await self.fetcher.list_rss_links(self.source.source_id, section.key, section.url, limit, allowed_domains)
-        return await self.fetcher.list_links(self.source.source_id, section.key, section.url, limit, allowed_domains)
+            return await self.fetcher.list_rss_links(self.source.source_id, section.key, discovery_url, limit, allowed_domains)
+        if section.crawl_strategy == "json_feed":
+            return await self.fetcher.list_json_links(self.source.source_id, section.key, discovery_url, limit, allowed_domains)
+        return await self.fetcher.list_links(self.source.source_id, section.key, discovery_url, limit, allowed_domains)
 
     async def search(self, query: str, limit: int = 10) -> list[RawSearchResult]:
         if not self.source.search.native_search_enabled:

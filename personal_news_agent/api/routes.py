@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from personal_news_agent.api.schemas import (
@@ -19,6 +19,7 @@ from personal_news_agent.api.schemas import (
     NotificationReadRequest,
     OnboardingRequest,
     ProfileRequest,
+    RegistrationCodeRequest,
     RelatedSearchRequest,
     RegisterRequest,
     ReportRequest,
@@ -153,23 +154,53 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     @app.post("/api/auth/register")
     async def register(payload: RegisterRequest) -> dict[str, Any]:
         try:
-            return services["auth"].register_with_realname(
-                username=payload.username,
+            return services["auth"].register_phone(
+                mobile=payload.mobile,
+                challenge_id=payload.challenge_id,
+                verification_code=payload.verification_code,
                 password=payload.password,
                 confirm_password=payload.confirm_password,
-                real_name=payload.real_name,
-                mobile=payload.mobile,
-                id_card=payload.id_card,
             )
         except AuthError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            headers = None
+            if getattr(exc, "retry_after_seconds", None):
+                headers = {"Retry-After": str(max(1, int(exc.retry_after_seconds)))}
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+                headers=headers,
+            ) from exc
+
+    @app.get("/api/auth/config")
+    async def auth_config() -> dict[str, Any]:
+        return services["auth"].phone_registration_status()
+
+    @app.post("/api/auth/registration-code")
+    async def registration_code(payload: RegistrationCodeRequest, request: Request) -> dict[str, Any]:
+        try:
+            return services["auth"].request_registration_code(
+                payload.mobile,
+                remote_addr=(request.client.host if request.client else ""),
+            )
+        except AuthError as exc:
+            headers = None
+            if getattr(exc, "retry_after_seconds", None):
+                headers = {"Retry-After": str(max(1, int(exc.retry_after_seconds)))}
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+                headers=headers,
+            ) from exc
 
     @app.post("/api/auth/login")
     async def login(payload: LoginRequest) -> dict[str, Any]:
         try:
-            return services["auth"].login(payload.username, payload.password)
+            return services["auth"].login(payload.mobile or payload.username or "", payload.password)
         except AuthError as exc:
-            raise HTTPException(status_code=401, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
 
     @app.get("/api/auth/realname/status")
     async def realname_status() -> dict[str, Any]:
@@ -303,6 +334,24 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
                 conversation_id=conversation_id,
             )
         }
+
+    @app.get("/api/topics/recommended")
+    async def recommended_topics(
+        user_id: str = "default",
+        limit: int = Query(default=6, ge=1, le=12),
+        window_hours: int = Query(default=24, ge=3, le=72),
+        refresh_window_hours: int = Query(default=6, ge=1, le=24),
+        use_llm: bool = True,
+    ) -> dict[str, Any]:
+        if refresh_window_hours > window_hours:
+            raise HTTPException(status_code=400, detail="refresh_window_hours cannot exceed window_hours")
+        return await services["trending_topics"].recommend(
+            user_id,
+            limit=limit,
+            window_hours=window_hours,
+            refresh_window_hours=refresh_window_hours,
+            use_llm=use_llm,
+        )
 
     @app.post("/api/topics")
     async def create_topic(payload: TopicCreateRequest) -> dict[str, Any]:

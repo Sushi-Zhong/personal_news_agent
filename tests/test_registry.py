@@ -32,6 +32,19 @@ def test_registry_loads_focused_categories_and_sources():
     assert registry.get_source("sohu_military").sections[0].crawl_enabled
 
 
+def test_registry_keeps_portal_channel_pages_separate_from_discovery_feeds():
+    registry = SourceRegistryService(Path("sources.yaml"))
+    registry.load()
+
+    qq = registry.get_source("qq_news")
+    toutiao = registry.get_source("toutiao")
+
+    assert len(qq.sections) == 11
+    assert len(toutiao.sections) == 9
+    assert all(section.url.startswith("https://news.qq.com/ch/") for section in qq.sections)
+    assert all(section.discovery_url and section.crawl_strategy == "json_feed" for section in (*qq.sections, *toutiao.sections))
+
+
 def test_registry_rejects_invalid_category(tmp_path):
     path = tmp_path / "sources.yaml"
     path.write_text(

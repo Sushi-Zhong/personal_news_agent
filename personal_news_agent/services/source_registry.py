@@ -175,11 +175,17 @@ class SourceRegistryService:
         parsed = urlparse(str(raw["url"]))
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise SourceRegistryError(f"Section {source_id}/{raw['key']} has invalid url: {raw['url']}")
+        discovery_url = str(raw["discovery_url"]) if raw.get("discovery_url") else None
+        if discovery_url:
+            parsed_discovery = urlparse(discovery_url)
+            if parsed_discovery.scheme not in {"http", "https"} or not parsed_discovery.netloc:
+                raise SourceRegistryError(f"Section {source_id}/{raw['key']} has invalid discovery_url: {discovery_url}")
         return SectionConfig(
             key=str(raw["key"]),
             name=str(raw["name"]),
             category=category,
             url=str(raw["url"]),
+            discovery_url=discovery_url,
             crawl_strategy=str(raw.get("crawl_strategy", "list_page")),
             crawl_enabled=bool(raw.get("crawl_enabled", True)),
             tags=tuple(_normalize_tags(raw.get("tags"), (category,), *source_tags)),

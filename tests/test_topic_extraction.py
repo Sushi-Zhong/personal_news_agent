@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from personal_news_agent.core.models import NormalizedArticle
 from personal_news_agent.core.text import content_hash
@@ -82,6 +83,21 @@ def test_topic_extraction_skips_without_configured_llm(tmp_path):
     store = NewsStore(tmp_path / "news.db"); store.init()
     result = asyncio.run(TopicExtractionService(store, llm=UnconfiguredLLM()).process_pending())
     assert result == {"status": "skipped", "reason": "llm_not_configured", "processed": 0, "errors": []}
+
+
+def test_pending_topic_articles_prioritize_latest_and_ignore_future_dates(tmp_path):
+    store = NewsStore(tmp_path / "news.db"); store.init()
+    now = datetime.now(timezone.utc)
+    old = _article("old", "较早报道")
+    latest = _article("latest", "最新报道")
+    future = _article("future", "错误的未来日期报道")
+    store.save_article(replace(old, published_at=now - timedelta(days=2)))
+    store.save_article(replace(latest, published_at=now - timedelta(minutes=5)))
+    store.save_article(replace(future, published_at=now + timedelta(days=30)))
+
+    pending = store.list_unprocessed_topic_articles(limit=10)
+
+    assert [item["id"] for item in pending] == ["latest", "old"]
 
 
 def test_topic_extraction_schema_requires_every_output_field():

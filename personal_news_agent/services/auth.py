@@ -11,12 +11,20 @@ from urllib.parse import urlencode
 import httpx
 
 from personal_news_agent.config import Settings
+from personal_news_agent.services.phone_verification import (
+    PhoneVerificationError,
+    PhoneVerificationService,
+    normalize_mainland_mobile,
+)
 from personal_news_agent.services.realname import RealNameVerificationError, RealNameVerificationService
 from personal_news_agent.services.store import NewsStore
 
 
 class AuthError(ValueError):
-    pass
+    def __init__(self, code: str, message: str | None = None, *, status_code: int = 400) -> None:
+        super().__init__(message or code)
+        self.code = code
+        self.status_code = status_code
 
 
 class AuthService:
@@ -24,6 +32,7 @@ class AuthService:
         self.store = store
         self.settings = settings
         self.realname = RealNameVerificationService(settings)
+        self.phone_verification = PhoneVerificationService(store, settings)
 
     def register(self, display_name: str, email: str | None, password: str | None) -> dict:
         password_hash = _hash_password(password) if password else None
@@ -33,11 +42,74 @@ class AuthService:
         return self._with_session(user)
 
     def login(self, email: str, password: str) -> dict:
-        user = self.store.get_user_by_username(email) or self.store.get_user_by_email(email)
-        if not user or not user.get("password_hash") or not _verify_password(password, user["password_hash"]):
-            raise AuthError("invalid email or password")
+        identifier = str(email or "").strip()
+        user = None
+        try:
+            user = self.store.get_user_by_mobile(normalize_mainland_mobile(identifier))
+        except PhoneVerificationError:
+            pass
+        user = user or self.store.get_user_by_username(identifier) or self.store.get_user_by_email(identifier)
+        stored_password = user.get("password_hash") if user else None
+        password_valid = _verify_password(password, stored_password or _DUMMY_PASSWORD_HASH)
+        if not user or not stored_password or not password_valid:
+            raise AuthError("invalid_credentials", "手机号或密码不正确。", status_code=401)
         public_user = {"id": user["id"], "display_name": user["display_name"], "email": user.get("email"), "username": user.get("username"), "mobile": user.get("mobile")}
         return self._with_session(public_user)
+
+    def phone_registration_status(self) -> dict:
+        return self.phone_verification.status()
+
+    def request_registration_code(self, mobile: str, remote_addr: str = "") -> dict:
+        try:
+            return self.phone_verification.request_code(mobile, remote_addr)
+        except PhoneVerificationError as exc:
+            error = AuthError(exc.code, str(exc), status_code=exc.status_code)
+            error.retry_after_seconds = exc.retry_after_seconds
+            raise error from exc
+
+    def register_phone(
+        self,
+        *,
+        mobile: str,
+        challenge_id: str,
+        verification_code: str,
+        password: str,
+        confirm_password: str,
+    ) -> dict:
+        try:
+            normalized_mobile = normalize_mainland_mobile(mobile)
+        except PhoneVerificationError as exc:
+            raise AuthError(exc.code, str(exc), status_code=exc.status_code) from exc
+        if len(password) < 8:
+            raise AuthError("weak_password", "密码至少需要 8 个字符。")
+        if len(password) > 128:
+            raise AuthError("invalid_password", "密码不能超过 128 个字符。")
+        if password != confirm_password:
+            raise AuthError("password_mismatch", "两次输入的密码不一致。")
+        if self.store.get_user_by_mobile(normalized_mobile):
+            raise AuthError("mobile_already_registered", "该手机号已经注册，请直接登录。", status_code=409)
+        try:
+            proof = self.phone_verification.verify_code(
+                challenge_id,
+                normalized_mobile,
+                verification_code,
+            )
+            user = self.store.create_phone_user(
+                mobile=normalized_mobile,
+                password_hash=_hash_password(password),
+                challenge_id=proof.challenge_id,
+                mobile_hash=proof.mobile_hash,
+                verification_provider=proof.provider,
+            )
+        except PhoneVerificationError as exc:
+            raise AuthError(exc.code, str(exc), status_code=exc.status_code) from exc
+        except ValueError as exc:
+            if str(exc) == "mobile_already_registered":
+                raise AuthError("mobile_already_registered", "该手机号已经注册，请直接登录。", status_code=409) from exc
+            if str(exc) == "phone_code_consumed_or_expired":
+                raise AuthError("phone_code_consumed", "短信验证码已失效或已使用，请重新获取。") from exc
+            raise
+        return self._with_session(user)
 
     def register_with_realname(self, username: str, password: str, confirm_password: str, real_name: str, mobile: str, id_card: str | None = None) -> dict:
         username = username.strip()
@@ -151,21 +223,25 @@ class AuthService:
 
 def _hash_password(password: str) -> str:
     salt = os.urandom(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
-    return "pbkdf2_sha256$200000$" + base64.b64encode(salt).decode("ascii") + "$" + base64.b64encode(digest).decode("ascii")
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310_000)
+    return "pbkdf2_sha256$310000$" + base64.b64encode(salt).decode("ascii") + "$" + base64.b64encode(digest).decode("ascii")
 
 
 def _verify_password(password: str, stored: str) -> bool:
     try:
         algorithm, rounds, salt_b64, digest_b64 = stored.split("$", 3)
-    except ValueError:
+        round_count = int(rounds)
+        if algorithm != "pbkdf2_sha256" or not 100_000 <= round_count <= 2_000_000:
+            return False
+        salt = base64.b64decode(salt_b64, validate=True)
+        expected = base64.b64decode(digest_b64, validate=True)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, round_count)
+        return hmac.compare_digest(actual, expected)
+    except (TypeError, ValueError):
         return False
-    if algorithm != "pbkdf2_sha256":
-        return False
-    salt = base64.b64decode(salt_b64)
-    expected = base64.b64decode(digest_b64)
-    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(rounds))
-    return hmac.compare_digest(actual, expected)
+
+
+_DUMMY_PASSWORD_HASH = _hash_password(secrets.token_urlsafe(24))
 
 
 def _hash_secret(value: str) -> str:

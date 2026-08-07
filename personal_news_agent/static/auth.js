@@ -7,13 +7,15 @@ document.querySelectorAll("[data-auth-mode-target]").forEach((button) => {
   });
 });
 
+bindRegistrationCodeForm("#registerForm", "#registerStatus");
+
 document.querySelector("#registerForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector("button");
+  const button = form.querySelector('button[type="submit"]');
   const status = document.querySelector("#registerStatus");
   if (button) button.disabled = true;
-  if (status) status.textContent = "正在创建账号并进行实名手机号核验。";
+  if (status) status.textContent = "正在验证手机号并创建账号。";
   try {
     const result = await registerFromForm(form);
     document.querySelector("#registerStatus").textContent = `已创建：${result.user.display_name}，进入主界面后请完善个人配置。`;
@@ -28,7 +30,7 @@ document.querySelector("#registerForm").addEventListener("submit", async (event)
 document.querySelector("#loginForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector("button");
+  const button = form.querySelector('button[type="submit"]');
   const status = document.querySelector("#loginStatus");
   if (button) button.disabled = true;
   if (status) status.textContent = "正在登录。";

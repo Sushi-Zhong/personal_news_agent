@@ -116,6 +116,176 @@ sources:
       strategy: native_first
       domain_filters: [chinanews.com.cn, www.chinanews.com.cn]
     rate_limit: {min_interval_seconds: 5, max_pages_per_run: 30}
+  - source_id: qq_news
+    name: 腾讯新闻
+    root_domain: news.qq.com
+    source_type: portal_api
+    priority: 2
+    crawl_enabled: true
+    search_enabled: true
+    categories: [politics, economy, tech, digital, auto, game, entertainment, sports, military]
+    tags: [portal, breaking, qq, tencent]
+    crawl_interval_minutes: 15
+    sections:
+      - key: top
+        name: 腾讯新闻要闻
+        category: politics
+        url: https://news.qq.com/ch/news
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_hot&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [breaking, domestic]
+      - key: world
+        name: 腾讯新闻国际
+        category: politics
+        url: https://news.qq.com/ch/world
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_world&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [world]
+      - key: finance
+        name: 腾讯新闻财经
+        category: economy
+        url: https://news.qq.com/ch/finance
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_finance&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [finance, economy]
+      - key: tech
+        name: 腾讯新闻科技
+        category: tech
+        url: https://news.qq.com/ch/tech
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_tech&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [tech]
+      - key: ai
+        name: 腾讯新闻AI
+        category: tech
+        url: https://news.qq.com/ch/fx
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_fx&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [ai, tech]
+      - key: sports
+        name: 腾讯新闻体育
+        category: sports
+        url: https://news.qq.com/ch/sports
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_sports&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [sports]
+      - key: entertainment
+        name: 腾讯新闻娱乐
+        category: entertainment
+        url: https://news.qq.com/ch/ent
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_ent&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [entertainment]
+      - key: auto
+        name: 腾讯新闻汽车
+        category: auto
+        url: https://news.qq.com/ch/auto
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_auto&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [auto]
+      - key: game
+        name: 腾讯新闻游戏
+        category: game
+        url: https://news.qq.com/ch/games
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_game&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [game]
+      - key: digital
+        name: 腾讯新闻数码
+        category: digital
+        url: https://news.qq.com/ch/digi
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_digi&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [digital]
+      - key: military
+        name: 腾讯新闻军事
+        category: military
+        url: https://news.qq.com/ch/milite
+        discovery_url: "https://i.news.qq.com/web_feed/getPCList?base_req%5Bfrom%5D=pc&forward=2&flush_num=1&channel_id=news_news_mil&item_count=20&is_local_chlid=0"
+        crawl_strategy: json_feed
+        tags: [military]
+    search:
+      strategy: external_first
+      domain_filters: [news.qq.com, view.inews.qq.com, i.news.qq.com, qq.com]
+    rate_limit: {min_interval_seconds: 8, max_pages_per_run: 24}
+  - source_id: toutiao
+    name: 今日头条
+    root_domain: toutiao.com
+    source_type: portal_api
+    priority: 4
+    crawl_enabled: true
+    search_enabled: true
+    categories: [politics, economy, tech, auto, game, anime, entertainment, sports, military]
+    tags: [portal, aggregator, ugc, breaking]
+    crawl_interval_minutes: 15
+    sections:
+      - key: world
+        name: 今日头条国际
+        category: politics
+        url: https://www.toutiao.com/ch/news_world/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_world&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [world]
+      - key: finance
+        name: 今日头条财经
+        category: economy
+        url: https://www.toutiao.com/ch/news_finance/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_finance&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [finance, economy]
+      - key: tech
+        name: 今日头条科技
+        category: tech
+        url: https://www.toutiao.com/ch/news_tech/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_tech&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [tech]
+      - key: sports
+        name: 今日头条体育
+        category: sports
+        url: https://www.toutiao.com/ch/news_sports/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_sports&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [sports]
+      - key: entertainment
+        name: 今日头条娱乐
+        category: entertainment
+        url: https://www.toutiao.com/ch/news_entertainment/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_entertainment&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [entertainment]
+      - key: auto
+        name: 今日头条汽车
+        category: auto
+        url: https://www.toutiao.com/ch/news_car/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_car&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [auto]
+      - key: game
+        name: 今日头条游戏
+        category: game
+        url: https://www.toutiao.com/ch/news_game/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_game&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [game]
+      - key: anime
+        name: 今日头条动漫
+        category: anime
+        url: https://www.toutiao.com/ch/news_comic/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_comic&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [anime, comic]
+      - key: military
+        name: 今日头条军事
+        category: military
+        url: https://www.toutiao.com/ch/news_military/
+        discovery_url: "https://www.toutiao.com/api/pc/feed/?category=news_military&utm_source=toutiao&widen=1&max_behot_time=0"
+        crawl_strategy: json_feed
+        tags: [military]
+    search:
+      strategy: external_first
+      domain_filters: [toutiao.com, www.toutiao.com, m.toutiao.com]
+    rate_limit: {min_interval_seconds: 8, max_pages_per_run: 20}
   - source_id: kr36
     name: 36氪
     root_domain: 36kr.com

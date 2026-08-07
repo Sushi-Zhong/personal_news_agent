@@ -67,6 +67,7 @@ async function formatApiError(response) {
     return detail.map(validationErrorMessage).join("；") || fallback;
   }
   if (typeof detail === "string") return friendlyErrorMessage(detail);
+  if (detail && typeof detail.message === "string") return friendlyErrorMessage(detail.message);
   if (detail) return friendlyErrorMessage(JSON.stringify(detail));
   return fallback;
 }
@@ -79,6 +80,8 @@ function validationErrorMessage(item) {
     confirm_password: "确认密码",
     real_name: "真实姓名",
     mobile: "手机号",
+    challenge_id: "验证码凭据",
+    verification_code: "短信验证码",
   };
   const label = labels[field] || field || "输入";
   if (item.type === "string_too_short" && item.ctx?.min_length) return `${label}至少需要 ${item.ctx.min_length} 个字符`;
@@ -164,11 +167,11 @@ function eventHtml(item) {
 async function registerFromForm(form) {
   const formData = new FormData(form);
   const payload = {
-    username: formData.get("username"),
+    mobile: formData.get("mobile"),
+    challenge_id: formData.get("challenge_id"),
+    verification_code: formData.get("verification_code"),
     password: formData.get("password"),
     confirm_password: formData.get("confirm_password"),
-    real_name: formData.get("real_name"),
-    mobile: formData.get("mobile"),
   };
   const result = await request("/api/auth/register", {
     method: "POST",
@@ -176,6 +179,78 @@ async function registerFromForm(form) {
   });
   saveSession(result);
   return result;
+}
+
+async function requestRegistrationCodeFromForm(form) {
+  const mobile = String(new FormData(form).get("mobile") || "").trim();
+  const result = await request("/api/auth/registration-code", {
+    method: "POST",
+    body: JSON.stringify({ mobile }),
+  });
+  form.elements.challenge_id.value = result.challenge_id || "";
+  form.dataset.challengeMobile = mobile;
+  if (form.elements.verification_code) form.elements.verification_code.value = "";
+  return result;
+}
+
+function bindRegistrationCodeForm(formSelector, statusSelector) {
+  const form = document.querySelector(formSelector);
+  const button = form?.querySelector("[data-send-registration-code]");
+  const submit = form?.querySelector('button[type="submit"]');
+  const mobile = form?.elements.mobile;
+  const status = document.querySelector(statusSelector);
+  if (!form || !button || !mobile) return;
+
+  request("/api/auth/config")
+    .then((config) => {
+      if (config.available) return;
+      button.disabled = true;
+      if (submit) submit.disabled = true;
+      if (status) status.textContent = "短信验证码服务尚未完成配置，暂时无法注册。";
+    })
+    .catch(() => {
+      if (status && !status.textContent) status.textContent = "暂时无法读取注册服务状态。";
+    });
+
+  mobile.addEventListener("input", () => {
+    if (form.dataset.challengeMobile && mobile.value.trim() !== form.dataset.challengeMobile) {
+      form.elements.challenge_id.value = "";
+      form.dataset.challengeMobile = "";
+      if (form.elements.verification_code) form.elements.verification_code.value = "";
+    }
+  });
+  button.addEventListener("click", async () => {
+    if (button.disabled) return;
+    button.disabled = true;
+    if (status) status.textContent = "正在发送短信验证码。";
+    try {
+      const result = await requestRegistrationCodeFromForm(form);
+      const debug = result.debug_code ? `；本地测试验证码：${result.debug_code}` : "";
+      if (status) status.textContent = `验证码已发送至 ${result.mobile_masked || "该手机号"}${debug}`;
+      startRegistrationCodeCountdown(button, result.resend_after_seconds || 60);
+    } catch (error) {
+      if (status) status.textContent = error.message;
+      button.disabled = false;
+    }
+  });
+}
+
+function startRegistrationCodeCountdown(button, seconds) {
+  let remaining = Math.max(1, Number(seconds) || 60);
+  const original = button.dataset.defaultLabel || button.textContent || "发送验证码";
+  button.dataset.defaultLabel = original;
+  button.disabled = true;
+  button.textContent = `${remaining}s 后重发`;
+  const timer = window.setInterval(() => {
+    remaining -= 1;
+    if (remaining <= 0) {
+      window.clearInterval(timer);
+      button.disabled = false;
+      button.textContent = original;
+      return;
+    }
+    button.textContent = `${remaining}s 后重发`;
+  }, 1000);
 }
 
 async function loadOnboardingOptions(formSelector) {
@@ -277,7 +352,7 @@ async function loginFromForm(form) {
   const formData = new FormData(form);
   const result = await request("/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ username: formData.get("username"), password: formData.get("password") }),
+    body: JSON.stringify({ mobile: formData.get("mobile"), password: formData.get("password") }),
   });
   saveSession(result);
   return result;

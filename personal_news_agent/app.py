@@ -50,16 +50,20 @@ def create_app() -> FastAPI:
             store.seed_demo_articles()
         services["topic_agent"].seed_system_topics()
         events.discover(limit=20)
+        app.state.trending_topic_task = asyncio.create_task(
+            _trending_topic_loop(services, settings.trending_topic_refresh_seconds)
+        )
         if settings.background_crawl_enabled:
             app.state.background_crawl_task = asyncio.create_task(_background_crawl_loop(services, settings.background_crawl_interval_seconds))
 
     @app.on_event("shutdown")
     async def shutdown() -> None:
-        task = getattr(app.state, "background_crawl_task", None)
-        if task:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        for task_name in ("background_crawl_task", "trending_topic_task"):
+            task = getattr(app.state, task_name, None)
+            if task:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     return app
 
@@ -85,4 +89,21 @@ async def _background_crawl_loop(services: dict, interval_seconds: int) -> None:
             )
         except Exception as exc:
             store.log("background_crawl", "error", "crawl_due", {"error": str(exc)})
+        await asyncio.sleep(interval)
+
+
+async def _trending_topic_loop(services: dict, interval_seconds: int) -> None:
+    interval = max(60, int(interval_seconds or 900))
+    await asyncio.sleep(8)
+    while True:
+        try:
+            await services["trending_topics"].recommend(
+                "default",
+                limit=12,
+                window_hours=24,
+                refresh_window_hours=6,
+                use_llm=True,
+            )
+        except Exception as exc:
+            services["store"].log("trending_topic_refresh", "error", "default", {"error": str(exc)})
         await asyncio.sleep(interval)

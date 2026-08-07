@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -44,7 +45,21 @@ class ArticleFetchService:
             links.append(RawArticleLink(source_id=source_id, section_key=section_key, url=href, title=title))
             if len(links) >= limit:
                 break
+        if len(links) < limit:
+            for payload in _embedded_json_payloads(soup):
+                for link in _links_from_json_payload(payload, source_id, section_key, url, allowed_domains, limit):
+                    if link.url in seen:
+                        continue
+                    seen.add(link.url)
+                    links.append(link)
+                    if len(links) >= limit:
+                        return links
         return links
+
+    async def list_json_links(self, source_id: str, section_key: str, url: str, limit: int = 30, allowed_domains: list[str] | None = None) -> list[RawArticleLink]:
+        raw = await self._get_text(url, allowed_domains)
+        payload = json.loads(raw)
+        return _links_from_json_payload(payload, source_id, section_key, url, allowed_domains, limit)
 
     async def list_rss_links(self, source_id: str, section_key: str, url: str, limit: int = 30, allowed_domains: list[str] | None = None) -> list[RawArticleLink]:
         xml = await self._get_text(url)
@@ -79,6 +94,16 @@ class ArticleFetchService:
             except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError):
                 pass
 
+        toutiao_api_url = _toutiao_mobile_detail_api_url(url)
+        if toutiao_api_url:
+            try:
+                payload = await self._get_text(toutiao_api_url, ["toutiao.com"])
+                article = _raw_article_from_toutiao_mobile_payload(source_id, url, payload)
+                if article:
+                    return article
+            except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError):
+                pass
+
         html = await self._get_text(url, allowed_domains)
         soup = BeautifulSoup(html, "html.parser")
         for tag in soup(["script", "style", "noscript", "template"]):
@@ -104,16 +129,37 @@ class ArticleFetchService:
         if allowed_domains and not any(_host_allowed(parsed.netloc, domain) for domain in allowed_domains):
             raise ValueError(f"URL host is outside configured source domains: {parsed.netloc}")
         headers = {
-            "User-Agent": "Mozilla/5.0 personal-news-agent/0.1",
-            "Accept": "text/html,application/xhtml+xml,application/json,text/plain,*/*",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/rss+xml,application/atom+xml,application/xml;q=0.9,application/json,text/plain,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
         }
+        response = None
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True, headers=headers, verify=self.verify_ssl) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+            for attempt in range(3):
+                try:
+                    response = await client.get(url)
+                    response.raise_for_status()
+                    break
+                except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(0.35 * (2**attempt))
+                except httpx.HTTPStatusError as exc:
+                    if attempt == 2 or exc.response.status_code not in {429, 500, 502, 503, 504}:
+                        raise
+                    await asyncio.sleep(0.35 * (2**attempt))
+            if response is None:
+                raise RuntimeError("HTTP request completed without a response")
             final_host = response.url.host or ""
             if allowed_domains and not any(_host_allowed(final_host, domain) for domain in allowed_domains):
                 raise ValueError(f"Redirected URL host is outside configured source domains: {final_host}")
-            detected_encoding = BeautifulSoup(response.content, "html.parser").original_encoding
+            content_type = response.headers.get("content-type", "").lower()
+            detected_encoding = response.charset_encoding
+            if not detected_encoding and ("xml" in content_type or response.content.lstrip().startswith(b"<?xml")):
+                match = re.search(br"encoding=[\"']([^\"']+)", response.content[:200], re.IGNORECASE)
+                detected_encoding = match.group(1).decode("ascii", errors="ignore") if match else None
+            if not detected_encoding and "html" in content_type:
+                detected_encoding = BeautifulSoup(response.content, "html.parser").original_encoding
             if detected_encoding:
                 response.encoding = detected_encoding
             return response.text
@@ -132,8 +178,15 @@ def _looks_like_article_url(url: str) -> bool:
         return False
     if any(marker in path for marker in ["/search", "/tag", "/tags", "/video", "/photo", "/special", "/zt/", "/column", "/feedback"]):
         return False
-    article_markers = [".html", ".shtml", ".htm", "/a/", "/n1/", "/c/", "/article/", "/news/", "/20"]
-    return any(marker in path for marker in article_markers)
+    if re.search(r"\.(?:css|js|json|xml|jpg|jpeg|png|gif|webp|svg|ico|mp4|mp3|pdf)$", path):
+        return False
+    article_markers = [".html", ".shtml", ".htm", "/a/", "/n1/", "/c/", "/article/", "/group/", "/news/", "/20"]
+    if any(marker in path for marker in article_markers):
+        return True
+    if re.search(r"/(?:i)?\d{8,}/?$", path):
+        return True
+    query = parse_qs(parsed.query)
+    return any(key.lower() in {"id", "article_id", "cms_id", "item_id"} and any(len(value) >= 8 for value in values) for key, values in query.items())
 
 
 def _unwrap_search_link(url: str) -> str:
@@ -172,6 +225,157 @@ def _raw_article_from_chinanews_mobile_payload(source_id: str, url: str, raw: st
     if not (title or content or published_at):
         return None
     return RawArticle(source_id=source_id, url=url, title=title or url, content=content, summary=summary, published_at=published_at)
+
+
+_JSON_TITLE_KEYS = ("title", "headline", "name", "doc_title")
+_JSON_URL_KEYS = ("url", "share_url", "source_url", "href", "link", "short_url", "org_url")
+_JSON_DATE_KEYS = (
+    "published_at",
+    "publishedAt",
+    "publish_time",
+    "publishTime",
+    "pubtime",
+    "behot_time",
+    "create_time",
+    "created_at",
+    "date",
+)
+_JSON_URL_CONTAINERS = ("link_info", "share_info", "target", "article_info")
+
+
+def _embedded_json_payloads(soup: BeautifulSoup) -> list[object]:
+    """Return parseable JSON scripts without depending on a portal-specific DOM."""
+    payloads: list[object] = []
+    for script in soup.find_all("script"):
+        raw = script.string or script.get_text("", strip=True)
+        text = str(raw or "").strip()
+        if not text.startswith(("{", "[")):
+            continue
+        try:
+            payloads.append(json.loads(text))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+    return payloads
+
+
+def _links_from_json_payload(
+    payload: object,
+    source_id: str,
+    section_key: str,
+    base_url: str,
+    allowed_domains: list[str] | None,
+    limit: int,
+) -> list[RawArticleLink]:
+    """Find article-like records in changing JSON envelopes using common fields."""
+    if limit <= 0:
+        return []
+    domains = allowed_domains or [urlparse(base_url).netloc]
+    links: list[RawArticleLink] = []
+    seen: set[str] = set()
+    stack: list[object] = [payload]
+    while stack and len(links) < limit:
+        item = stack.pop(0)
+        if isinstance(item, list):
+            stack.extend(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+
+        title = _first_json_text(item, _JSON_TITLE_KEYS)
+        raw_url = _first_json_text(item, _JSON_URL_KEYS)
+        if not raw_url:
+            for container_key in _JSON_URL_CONTAINERS:
+                container = item.get(container_key)
+                if isinstance(container, dict):
+                    raw_url = _first_json_text(container, _JSON_URL_KEYS)
+                    if raw_url:
+                        break
+        if title and raw_url:
+            href = canonicalize_url(_unwrap_search_link(urljoin(base_url, raw_url)))
+            parsed = urlparse(href)
+            if (
+                parsed.scheme in {"http", "https"}
+                and parsed.netloc
+                and (not domains or any(_host_allowed(parsed.netloc, domain) for domain in domains))
+                and _looks_like_article_url(href)
+                and href not in seen
+            ):
+                clean_title = _clean_json_title(title)
+                if len(clean_title) >= 8:
+                    published_at = None
+                    for key in _JSON_DATE_KEYS:
+                        if key in item:
+                            published_at = _parse_published_datetime(str(item.get(key) or ""))
+                            if published_at:
+                                break
+                    seen.add(href)
+                    links.append(
+                        RawArticleLink(
+                            source_id=source_id,
+                            section_key=section_key,
+                            url=href,
+                            title=clean_title,
+                            published_at=published_at,
+                        )
+                    )
+
+        stack.extend(value for value in item.values() if isinstance(value, (dict, list)))
+    return links
+
+
+def _first_json_text(item: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def _clean_json_title(value: str) -> str:
+    text = BeautifulSoup(value, "html.parser").get_text(" ", strip=True)
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), text)
+    return " ".join(first_line.split())[:240]
+
+
+def _toutiao_mobile_detail_api_url(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = parsed.netloc.split(":", 1)[0].removeprefix("www.")
+    if host not in {"toutiao.com", "m.toutiao.com"}:
+        return None
+    match = re.search(r"/(?:article|group)/(\d+)(?:/|$)", parsed.path) or re.search(r"/i(\d+)(?:/|$)", parsed.path)
+    if not match:
+        return None
+    return f"https://m.toutiao.com/i{match.group(1)}/info/"
+
+
+def _raw_article_from_toutiao_mobile_payload(source_id: str, url: str, raw: str) -> RawArticle | None:
+    payload = json.loads(raw)
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return None
+    thread = data.get("thread") if isinstance(data.get("thread"), dict) else {}
+    thread_base = thread.get("thread_base") if isinstance(thread.get("thread_base"), dict) else {}
+    content_html = str(data.get("content") or thread_base.get("content") or "").strip()
+    content = BeautifulSoup(content_html, "html.parser").get_text("\n", strip=True)
+    title = str(data.get("title") or thread_base.get("title") or "").strip()
+    if not title and content:
+        title = next((line.strip() for line in content.splitlines() if line.strip()), "")[:240]
+    summary = str(data.get("abstract") or thread_base.get("abstract") or "").strip()
+    published_at = None
+    for value in (data.get("publish_time"), data.get("create_time"), thread_base.get("create_time")):
+        published_at = _parse_published_datetime(str(value or ""))
+        if published_at:
+            break
+    if not (title or content or published_at):
+        return None
+    return RawArticle(
+        source_id=source_id,
+        url=url,
+        title=_clean_json_title(title) or url,
+        content=content,
+        summary=summary,
+        published_at=published_at,
+    )
 
 
 def _rss_item_url(item) -> str:
@@ -270,13 +474,27 @@ def canonicalize_url(url: str) -> str:
         host = host[:-3]
     elif host.endswith(":443") and parsed.scheme == "https":
         host = host[:-4]
+    path = parsed.path or "/"
+    toutiao_match = None
+    if _host_allowed(host, "toutiao.com"):
+        toutiao_match = re.search(r"/(?:article|group)/(\d+)(?:/|$)", path) or re.search(r"/i(\d+)(?:/|$)", path)
+    if toutiao_match:
+        host = "www.toutiao.com"
+        path = f"/article/{toutiao_match.group(1)}/"
+    qq_rain_match = re.fullmatch(r"/rain/a/([^/]+)", path)
+    qq_view_match = re.fullmatch(r"/a/([^/]+)", path)
+    if host.removeprefix("www.") in {"news.qq.com", "new.qq.com"} and qq_rain_match:
+        host = "new.qq.com"
+        path = f"/rain/a/{qq_rain_match.group(1)}"
+    elif host == "view.inews.qq.com" and qq_view_match:
+        host = "new.qq.com"
+        path = f"/rain/a/{qq_view_match.group(1)}"
     query = [
         (key, value)
         for key, values in parse_qs(parsed.query, keep_blank_values=True).items()
         if key.lower() not in _TRACKING_QUERY_KEYS and not key.lower().startswith("utm_")
         for value in values
     ]
-    path = parsed.path or "/"
     return urlunparse((parsed.scheme.lower(), host, path, "", urlencode(sorted(query)), ""))
 
 
@@ -367,6 +585,16 @@ def _parse_published_datetime(value: str, now: datetime | None = None) -> dateti
     text = _normalize_datetime_text(re.sub(r"[*_`]+", "", value or "").strip())
     if not text:
         return None
+    if re.fullmatch(r"\d{10}(?:\.\d+)?", text):
+        try:
+            return datetime.fromtimestamp(float(text), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if re.fullmatch(r"\d{13}", text):
+        try:
+            return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
     relative = _parse_relative_datetime(text, now)
     if relative:
         return relative

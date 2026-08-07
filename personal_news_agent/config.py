@@ -46,8 +46,12 @@ class Settings:
     )
     crawl_interval_min_minutes: int = int(os.getenv("PERSONAL_NEWS_CRAWL_INTERVAL_MINUTES", "10"))
     crawl_interval_max_minutes: int = int(os.getenv("PERSONAL_NEWS_CRAWL_INTERVAL_MAX_MINUTES", "20"))
-    background_crawl_enabled: bool = os.getenv("PERSONAL_NEWS_BACKGROUND_CRAWL", "1") == "1"
+    background_crawl_enabled: bool = (
+        os.getenv("PERSONAL_NEWS_BACKGROUND_CRAWL", "1") == "1"
+        and os.getenv("PNA_WEB_DISABLE_BACKGROUND_CRAWL", "0") != "1"
+    )
     background_crawl_interval_seconds: int = int(os.getenv("PERSONAL_NEWS_BACKGROUND_CRAWL_SECONDS", "10"))
+    trending_topic_refresh_seconds: int = int(os.getenv("PERSONAL_NEWS_TRENDING_REFRESH_SECONDS", "900"))
     external_search_provider: str = os.getenv("EXTERNAL_SEARCH_PROVIDER", "none")
     bing_search_key: str | None = os.getenv("BING_SEARCH_KEY")
     bing_search_endpoint: str = os.getenv("BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")
@@ -55,12 +59,79 @@ class Settings:
     tavily_search_endpoint: str = os.getenv("TAVILY_SEARCH_ENDPOINT", "https://api.tavily.com/search")
     tavily_search_depth: str = os.getenv("TAVILY_SEARCH_DEPTH", "basic")
     tavily_trust_env: bool = os.getenv("TAVILY_TRUST_ENV", "0") == "1"
-    http_verify_ssl: bool = os.getenv("PNA_HTTP_VERIFY_SSL", "0") == "1"
+    http_verify_ssl: bool = os.getenv("PNA_HTTP_VERIFY_SSL", "1") == "1"
     llm_endpoint: str | None = os.getenv("PNA_LLM_ENDPOINT") or os.getenv("LLM_ENDPOINT")
     llm_key: str | None = os.getenv("PNA_LLM_KEY") or os.getenv("LLM_KEY")
     llm_default_model: str = os.getenv("PNA_LLM_DEFAULT_MODEL", "yuanrong-personal-assistant")
     llm_timeout_seconds: int = int(os.getenv("PNA_LLM_TIMEOUT_SECONDS") or os.getenv("LLM_CLIENT_TIMEOUT_SECONDS", "120"))
     stock_agent_db_url: str | None = os.getenv("PNA_USER_DB_URL") or os.getenv("SIMPLE_BI_PLATFORM_DB_URL")
+    phone_challenge_provider: str = os.getenv(
+        "PNA_PHONE_CHALLENGE_PROVIDER",
+        os.getenv("FIN_AGENT_PHONE_CHALLENGE_PROVIDER", "disabled"),
+    )
+    phone_challenge_secret: str | None = os.getenv("PNA_PHONE_CHALLENGE_SECRET") or os.getenv(
+        "FIN_AGENT_PHONE_CHALLENGE_SECRET"
+    )
+    phone_challenge_mock_enabled: bool = (
+        os.getenv(
+            "PNA_PHONE_CHALLENGE_MOCK_ENABLED",
+            os.getenv("FIN_AGENT_PHONE_CHALLENGE_MOCK_ENABLED", "0"),
+        )
+        == "1"
+    )
+    phone_challenge_mock_code: str = os.getenv(
+        "PNA_PHONE_CHALLENGE_MOCK_CODE",
+        os.getenv("FIN_AGENT_PHONE_CHALLENGE_MOCK_CODE", "123456"),
+    )
+    phone_challenge_ttl_seconds: int = int(
+        os.getenv(
+            "PNA_PHONE_CHALLENGE_TTL_SECONDS",
+            os.getenv("FIN_AGENT_PHONE_CHALLENGE_TTL_SECONDS", "600"),
+        )
+    )
+    phone_challenge_resend_seconds: int = int(
+        os.getenv(
+            "PNA_PHONE_CHALLENGE_RESEND_SECONDS",
+            os.getenv("FIN_AGENT_PHONE_CHALLENGE_RESEND_SECONDS", "60"),
+        )
+    )
+    phone_challenge_max_attempts: int = int(
+        os.getenv(
+            "PNA_PHONE_CHALLENGE_MAX_ATTEMPTS",
+            os.getenv("FIN_AGENT_PHONE_CHALLENGE_MAX_ATTEMPTS", "5"),
+        )
+    )
+    phone_challenge_rate_window_seconds: int = int(
+        os.getenv(
+            "PNA_PHONE_CHALLENGE_RATE_WINDOW_SECONDS",
+            os.getenv("FIN_AGENT_PHONE_CHALLENGE_RATE_WINDOW_SECONDS", "3600"),
+        )
+    )
+    phone_challenge_mobile_rate_limit: int = int(
+        os.getenv(
+            "PNA_PHONE_CHALLENGE_MOBILE_RATE_LIMIT",
+            os.getenv("FIN_AGENT_PHONE_CHALLENGE_MOBILE_RATE_LIMIT", "5"),
+        )
+    )
+    phone_challenge_ip_rate_limit: int = int(
+        os.getenv(
+            "PNA_PHONE_CHALLENGE_IP_RATE_LIMIT",
+            os.getenv("FIN_AGENT_PHONE_CHALLENGE_IP_RATE_LIMIT", "20"),
+        )
+    )
+    pnvs_sign_name: str | None = os.getenv("PNA_PNVS_SIGN_NAME") or os.getenv("FIN_AGENT_PNVS_SIGN_NAME")
+    pnvs_template_code: str = os.getenv(
+        "PNA_PNVS_TEMPLATE_CODE",
+        os.getenv("FIN_AGENT_PNVS_TEMPLATE_CODE", "100001"),
+    )
+    pnvs_scheme_name: str = os.getenv(
+        "PNA_PNVS_SCHEME_NAME",
+        os.getenv("FIN_AGENT_PNVS_SCHEME_NAME", "pna-register"),
+    )
+    pnvs_endpoint: str = os.getenv(
+        "PNA_PNVS_ENDPOINT",
+        os.getenv("FIN_AGENT_PNVS_ENDPOINT", "dypnsapi.aliyuncs.com"),
+    )
     realname_provider: str = os.getenv("PNA_REALNAME_PROVIDER", "mock")
     realname_mock_enabled: bool = os.getenv("PNA_REALNAME_MOCK_ENABLED", "1") == "1"
     aliyun_access_key_id: str | None = (

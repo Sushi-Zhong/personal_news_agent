@@ -33,6 +33,8 @@ document.querySelectorAll("[data-auth-mode-target]").forEach((button) => {
   });
 });
 
+bindRegistrationCodeForm("#registerForm", "#registerStatus");
+
 document.querySelector("[data-mobile-brief-toggle]")?.addEventListener("click", () => {
   const card = document.querySelector(".mobile-today-card");
   setMobileBriefExpanded(card?.hidden);
@@ -64,10 +66,10 @@ document.querySelectorAll("#mobileTabs button").forEach((button) => {
 document.querySelector("#registerForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector("button");
+  const button = form.querySelector('button[type="submit"]');
   const status = document.querySelector("#registerStatus");
   if (button) button.disabled = true;
-  if (status) status.textContent = "正在创建账号并进行实名手机号核验。";
+  if (status) status.textContent = "正在验证手机号并创建账号。";
   try {
     const result = await registerFromForm(form);
     document.querySelector("#registerStatus").textContent = `已创建：${result.user.display_name}`;
@@ -86,7 +88,7 @@ document.querySelector("#registerForm").addEventListener("submit", async (event)
 document.querySelector("#onboardingForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector("button");
+  const button = form.querySelector('button[type="submit"]');
   const status = document.querySelector("#registerStatus");
   if (button) button.disabled = true;
   if (status) status.textContent = "正在保存初始化配置。";
@@ -414,17 +416,26 @@ async function loadMobileTopics() {
     const remote = await request(
       `/api/topics?user_id=${encodeURIComponent(userId)}&conversation_id=${encodeURIComponent(topicConversationId)}&limit=10`,
     );
-    const items = mergeMobileTopics([...(remote.items || []), ...mobileBootstrapTopics]).slice(0, 8);
-    target.innerHTML = items
-      .map((item) => `<button type="button" class="${item.topic_type === "system" ? "system-topic" : "user-topic"}" data-mobile-topic="${escapeHtml(item.title)}" data-category-scope="${escapeHtml((item.category_scope || []).join(","))}">${escapeHtml(shortMobileTopic(item.title))}</button>`)
-      .join("");
-    bindMobileTopicButtons();
+    renderMobileTopicRail(target, [...(remote.items || []), ...mobileBootstrapTopics]);
+    try {
+      const recommended = await request(
+        `/api/topics/recommended?user_id=${encodeURIComponent(userId)}&limit=5&window_hours=24&refresh_window_hours=6`,
+      );
+      renderMobileTopicRail(target, [...(remote.items || []), ...(recommended.items || []), ...mobileBootstrapTopics]);
+    } catch (error) {
+      // Keep persisted topics and static fallbacks visible.
+    }
   } catch (error) {
-    target.innerHTML = mobileBootstrapTopics
-      .map((item) => `<button type="button" data-mobile-topic="${escapeHtml(item.title)}" data-category-scope="${escapeHtml((item.category_scope || []).join(","))}">${escapeHtml(shortMobileTopic(item.title))}</button>`)
-      .join("");
-    bindMobileTopicButtons();
+    renderMobileTopicRail(target, mobileBootstrapTopics);
   }
+}
+
+function renderMobileTopicRail(target, items) {
+  const merged = mergeMobileTopics(items).slice(0, 8);
+  target.innerHTML = merged
+    .map((item) => `<button type="button" class="${mobileTopicKind(item)}" data-mobile-topic="${escapeHtml(item.title)}" data-category-scope="${escapeHtml((item.category_scope || []).join(","))}">${escapeHtml(shortMobileTopic(item.title))}</button>`)
+    .join("");
+  bindMobileTopicButtons();
 }
 
 function bindMobileTopicButtons() {
@@ -459,8 +470,23 @@ async function showMobileTopicPopover(anchor) {
   bindMobilePopoverDismiss(popover, anchor);
   popover.querySelector("[data-mobile-topic-new]")?.addEventListener("click", startNewMobileTopicConversation);
   try {
-    const data = await request(`/api/topics?user_id=${encodeURIComponent(activeUserId || "default")}&limit=20`);
-    renderMobileTopicPopoverList(popover.querySelector("[data-mobile-topic-popover-list]"), mergeMobileTopics([...(data.items || []), ...mobileBootstrapTopics]));
+    const userId = activeUserId || "default";
+    const data = await request(`/api/topics?user_id=${encodeURIComponent(userId)}&limit=20`);
+    renderMobileTopicPopoverList(
+      popover.querySelector("[data-mobile-topic-popover-list]"),
+      mergeMobileTopics([...(data.items || []), ...mobileBootstrapTopics]),
+    );
+    try {
+      const recommended = await request(
+        `/api/topics/recommended?user_id=${encodeURIComponent(userId)}&limit=6&window_hours=24&refresh_window_hours=6`,
+      );
+      renderMobileTopicPopoverList(
+        popover.querySelector("[data-mobile-topic-popover-list]"),
+        mergeMobileTopics([...(data.items || []), ...(recommended.items || []), ...mobileBootstrapTopics]),
+      );
+    } catch (error) {
+      // The persisted list is already rendered.
+    }
   } catch (error) {
     renderMobileTopicPopoverList(popover.querySelector("[data-mobile-topic-popover-list]"), mobileBootstrapTopics);
   }
@@ -478,14 +504,22 @@ function renderMobileTopicPopoverList(target, items) {
       const scope = (item.category_scope || []).join(",");
       const conversation = item.conversation_id || "";
       const active = (conversation && conversation === conversationId) || title === mobileState.topic ? " active" : "";
-      const kind = item.topic_type === "system" ? " system-topic" : " user-topic";
-      const meta = scope ? scope.split(",").join(" / ") : (item.topic_type === "system" ? "system" : "all");
+      const kind = ` ${mobileTopicKind(item)}`;
+      const meta = item.topic_type === "recommended"
+        ? `热度 ${Number(item.hot_score || 0).toFixed(2)} · ${item.source_count || 1} 源`
+        : (scope ? scope.split(",").join(" / ") : (item.topic_type === "system" ? "system" : "all"));
       return `<button type="button" class="topic-card${kind}${active}" data-mobile-topic-select="${escapeAttr(title)}" data-conversation-id="${escapeAttr(conversation)}" data-category-scope="${escapeAttr(scope)}"><span>${escapeHtml(shortMobileTopic(title))}</span><small>${escapeHtml(meta)}</small></button>`;
     })
     .join("");
   target.querySelectorAll("[data-mobile-topic-select]").forEach((button) => {
     button.addEventListener("click", () => selectMobileTopicFromPopover(button));
   });
+}
+
+function mobileTopicKind(item) {
+  if (item.topic_type === "system") return "system-topic";
+  if (item.topic_type === "recommended") return "recommended-topic";
+  return "user-topic";
 }
 
 async function selectMobileTopicFromPopover(button) {

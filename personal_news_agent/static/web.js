@@ -438,16 +438,28 @@ async function loadTopics() {
   const userId = activeUserId || "default";
   try {
     const data = await request(`/api/topics?user_id=${encodeURIComponent(userId)}&limit=50`);
-    const items = mergeTopics([...(data.items || []), ...bootstrapTopics]);
-    if (!items.length) {
-      target.innerHTML = '<p class="rail-empty">暂无关注</p>';
-      return;
+    renderTopicList(target, [...(data.items || []), ...bootstrapTopics]);
+    try {
+      const recommended = await request(
+        `/api/topics/recommended?user_id=${encodeURIComponent(userId)}&limit=6&window_hours=24&refresh_window_hours=6`,
+      );
+      renderTopicList(target, [...(data.items || []), ...(recommended.items || []), ...bootstrapTopics]);
+    } catch (error) {
+      setStatus("实时推荐暂不可用，已保留现有关注。");
     }
-    target.innerHTML = items.map((item) => topicButtonHtml(item)).join("");
-    bindTopicCards();
   } catch (error) {
     bindTopicCards();
   }
+}
+
+function renderTopicList(target, items) {
+  const merged = mergeTopics(items);
+  if (!merged.length) {
+    target.innerHTML = '<p class="rail-empty">暂无关注</p>';
+    return;
+  }
+  target.innerHTML = merged.map((item) => topicButtonHtml(item)).join("");
+  bindTopicCards();
 }
 
 function bindRailTooltips() {
@@ -904,9 +916,16 @@ function topicButtonHtml(item) {
   const scope = (item.category_scope || []).join(",");
   const itemConversationId = item.conversation_id || "";
   const active = (itemConversationId && itemConversationId === conversationId) || title === consoleState.topic ? " active" : "";
-  const kind = item.topic_type === "system" ? " system-topic" : " user-topic";
-  const meta = scope ? scope.split(",").join(" / ") : (item.topic_type === "system" ? "system" : "all");
-  return `<button class="topic-card${kind}${active}" type="button" data-topic-title="${escapeAttr(title)}" data-conversation-id="${escapeAttr(itemConversationId)}" data-category-scope="${escapeAttr(scope)}" data-tooltip="${escapeAttr(title)}"><span>${escapeHtml(shortTopicTitle(title))}</span><small>${escapeHtml(meta)}</small></button>`;
+  const kind = item.topic_type === "system"
+    ? " system-topic"
+    : (item.topic_type === "recommended" ? " recommended-topic" : " user-topic");
+  const meta = item.topic_type === "recommended"
+    ? `热度 ${Number(item.hot_score || 0).toFixed(2)} · ${item.source_count || 1} 源`
+    : (scope ? scope.split(",").join(" / ") : (item.topic_type === "system" ? "system" : "all"));
+  const tooltip = item.topic_type === "recommended" && item.recommend_reason
+    ? `${title}｜${item.recommend_reason}`
+    : title;
+  return `<button class="topic-card${kind}${active}" type="button" data-topic-title="${escapeAttr(title)}" data-conversation-id="${escapeAttr(itemConversationId)}" data-category-scope="${escapeAttr(scope)}" data-tooltip="${escapeAttr(tooltip)}"><span>${escapeHtml(shortTopicTitle(title))}</span><small>${escapeHtml(meta)}</small></button>`;
 }
 
 function shortTopicTitle(title) {

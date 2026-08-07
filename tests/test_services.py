@@ -429,6 +429,17 @@ def test_web_regular_chat_does_not_auto_create_topic_card():
     assert "if (!pendingTopicFromNextMessage && options.force !== true) return null;" in source
 
 
+def test_web_and_mobile_load_dynamic_recommended_topics():
+    web_source = Path("personal_news_agent/static/web.js").read_text()
+    mobile_source = Path("personal_news_agent/static/mobile.js").read_text()
+
+    assert "/api/topics/recommended?" in web_source
+    assert "recommended.items || []" in web_source
+    assert "item.hot_score" in web_source
+    assert "/api/topics/recommended?" in mobile_source
+    assert "recommended.items || []" in mobile_source
+
+
 def test_web_chat_response_resets_related_rail_per_query():
     source = Path("personal_news_agent/static/web.js").read_text()
     side_effects = source.split("function handleWebChatResponseSideEffects(response) {", 1)[1].split("function responseScopedArticles", 1)[0]
@@ -485,9 +496,9 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260724-pna-base-1" in home_source
-    assert "20260724-pna-base-1" in home_html
-    assert "shared.js?v=20260724-pna-base-1" in mobile_html
+    assert "20260807-phone-auth-1" in home_source
+    assert "20260807-phone-auth-1" in home_html
+    assert "shared.js?v=20260807-phone-auth-1" in mobile_html
 
 
 def test_time_filter_keeps_current_external_results_without_published_date():
