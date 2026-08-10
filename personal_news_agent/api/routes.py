@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -47,6 +49,30 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     search_index = services["search_index"]
     search_service = services["search"]
     events = services["events"]
+
+    async def run_phone_operation(operation: str, callback: Any) -> Any:
+        timeout_seconds = min(60.0, max(0.1, float(settings.phone_challenge_request_timeout_seconds)))
+        started_at = time.monotonic()
+        provider = services["auth"].phone_registration_status().get("provider") or "unknown"
+        _log_phone_operation(store, operation, "started", provider, 0)
+        try:
+            result = await asyncio.wait_for(asyncio.to_thread(callback), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            _log_phone_operation(store, operation, "timeout", provider, elapsed_ms)
+            raise HTTPException(
+                status_code=504,
+                detail={"code": "phone_code_send_timeout", "message": "短信服务响应超时，请稍后重试。"},
+            ) from exc
+        except AuthError:
+            raise
+        except Exception as exc:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            _log_phone_operation(store, operation, "error", provider, elapsed_ms, code=type(exc).__name__)
+            raise
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        _log_phone_operation(store, operation, "ok", provider, elapsed_ms)
+        return result
 
     @app.get("/")
     async def index() -> FileResponse:
@@ -154,14 +180,25 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     @app.post("/api/auth/register")
     async def register(payload: RegisterRequest) -> dict[str, Any]:
         try:
-            return services["auth"].register_phone(
-                mobile=payload.mobile,
-                challenge_id=payload.challenge_id,
-                verification_code=payload.verification_code,
-                password=payload.password,
-                confirm_password=payload.confirm_password,
+            return await run_phone_operation(
+                "phone_registration",
+                lambda: services["auth"].register_phone(
+                    mobile=payload.mobile,
+                    challenge_id=payload.challenge_id,
+                    verification_code=payload.verification_code,
+                    password=payload.password,
+                    confirm_password=payload.confirm_password,
+                ),
             )
         except AuthError as exc:
+            _log_phone_operation(
+                store,
+                "phone_registration",
+                "rejected",
+                services["auth"].phone_registration_status().get("provider") or "unknown",
+                0,
+                code=exc.code,
+            )
             headers = None
             if getattr(exc, "retry_after_seconds", None):
                 headers = {"Retry-After": str(max(1, int(exc.retry_after_seconds)))}
@@ -178,11 +215,22 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     @app.post("/api/auth/registration-code")
     async def registration_code(payload: RegistrationCodeRequest, request: Request) -> dict[str, Any]:
         try:
-            return services["auth"].request_registration_code(
-                payload.mobile,
-                remote_addr=(request.client.host if request.client else ""),
+            return await run_phone_operation(
+                "phone_registration_code",
+                lambda: services["auth"].request_registration_code(
+                    payload.mobile,
+                    remote_addr=_request_remote_addr(request),
+                ),
             )
         except AuthError as exc:
+            _log_phone_operation(
+                store,
+                "phone_registration_code",
+                "rejected",
+                services["auth"].phone_registration_status().get("provider") or "unknown",
+                0,
+                code=exc.code,
+            )
             headers = None
             if getattr(exc, "retry_after_seconds", None):
                 headers = {"Retry-After": str(max(1, int(exc.retry_after_seconds)))}
@@ -551,6 +599,41 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             return await services["crawl"].crawl_category(category)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _request_remote_addr(request: Request) -> str:
+    peer = request.client.host if request.client else ""
+    if peer in {"127.0.0.1", "::1"}:
+        forwarded = str(request.headers.get("x-real-ip") or "").strip()
+        if forwarded:
+            return forwarded[:64]
+    return str(peer or "unknown")[:64]
+
+
+def _log_phone_operation(
+    store: Any,
+    operation: str,
+    status: str,
+    provider: str,
+    elapsed_ms: int,
+    *,
+    code: str | None = None,
+) -> None:
+    detail = {"provider": provider, "elapsed_ms": max(0, int(elapsed_ms))}
+    if code:
+        detail["code"] = code
+    print(
+        json.dumps(
+            {"event": operation, "status": status, **detail},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
+    try:
+        store.log(operation, status, "sms_otp", detail)
+    except Exception:
+        return
 
 
 def _hydrate_report_for_export(report: dict[str, Any], store: Any) -> dict[str, Any]:

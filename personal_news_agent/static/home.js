@@ -1,5 +1,5 @@
 (function () {
-  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260807-phone-auth-1";
+  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260810-phone-timeout-1";
   const mobileQuery = window.matchMedia("(max-width: 760px)");
   const mode = mobileQuery.matches ? "mobile" : "web";
   const template = document.querySelector(`#${mode}Template`);

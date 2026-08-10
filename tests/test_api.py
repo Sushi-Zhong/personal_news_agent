@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
+import time
 from uuid import uuid4
 import zipfile
 
@@ -104,6 +105,35 @@ def test_auth_register_login_and_realname_status():
         })
         assert mismatch.status_code == 400
         assert mismatch.json()["detail"]["code"] == "password_mismatch"
+
+
+def test_registration_code_provider_timeout_returns_promptly_and_keeps_api_healthy():
+    with TestClient(app) as client:
+        auth = client.app.state.services["auth"]
+        original_request = auth.request_registration_code
+        original_timeout = settings.phone_challenge_request_timeout_seconds
+
+        def slow_request(mobile: str, remote_addr: str = "") -> dict:
+            time.sleep(0.4)
+            return {"challenge_id": "late-result"}
+
+        auth.request_registration_code = slow_request
+        object.__setattr__(settings, "phone_challenge_request_timeout_seconds", 0.1)
+        started_at = time.monotonic()
+        try:
+            response = client.post(
+                "/api/auth/registration-code",
+                json={"mobile": "13800138000"},
+                headers={"X-Real-IP": "203.0.113.8"},
+            )
+        finally:
+            auth.request_registration_code = original_request
+            object.__setattr__(settings, "phone_challenge_request_timeout_seconds", original_timeout)
+
+        assert time.monotonic() - started_at < 1.0
+        assert response.status_code == 504
+        assert response.json()["detail"]["code"] == "phone_code_send_timeout"
+        assert client.get("/api/health").status_code == 200
 
 
 def test_onboarding_generates_profile_prompt_and_model_choice():

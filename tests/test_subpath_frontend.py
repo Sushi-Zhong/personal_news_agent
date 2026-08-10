@@ -20,6 +20,13 @@ def test_shared_client_preserves_pna_prefix_for_api_requests():
     source = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
     assert 'const prefix = "/pna"' in source
     assert "fetch(appUrl(path)" in source
+    assert "timeoutMs: 15000" in source
+    assert "controller.abort()" in source
+    assert "短信服务响应超时" in source
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    auth = (STATIC_DIR / "auth.html").read_text(encoding="utf-8")
+    assert "home.js?v=20260810-phone-timeout-1" in home
+    assert "shared.js?v=20260810-phone-timeout-1" in auth
 
 
 def test_server_templates_keep_nginx_and_web_port_aligned():

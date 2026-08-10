@@ -95,6 +95,12 @@ class Settings:
             os.getenv("FIN_AGENT_PHONE_CHALLENGE_RESEND_SECONDS", "60"),
         )
     )
+    phone_challenge_request_timeout_seconds: float = float(
+        os.getenv(
+            "PNA_PHONE_CHALLENGE_REQUEST_TIMEOUT_SECONDS",
+            os.getenv("FIN_AGENT_PHONE_CHALLENGE_REQUEST_TIMEOUT_SECONDS", "12"),
+        )
+    )
     phone_challenge_max_attempts: int = int(
         os.getenv(
             "PNA_PHONE_CHALLENGE_MAX_ATTEMPTS",

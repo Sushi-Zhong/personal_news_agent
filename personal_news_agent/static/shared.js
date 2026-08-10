@@ -42,12 +42,23 @@ function appUrl(path) {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(appUrl(path), {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
-  if (!response.ok) throw new Error(await formatApiError(response));
-  return response.json();
+  const { timeoutMs = 0, timeoutMessage = "请求超时，请稍后重试。", ...fetchOptions } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller ? window.setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(appUrl(path), {
+      headers: { "Content-Type": "application/json" },
+      ...fetchOptions,
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (!response.ok) throw new Error(await formatApiError(response));
+    return response.json();
+  } catch (error) {
+    if (controller?.signal.aborted) throw new Error(timeoutMessage);
+    throw error;
+  } finally {
+    if (timer !== null) window.clearTimeout(timer);
+  }
 }
 
 async function formatApiError(response) {
@@ -176,6 +187,8 @@ async function registerFromForm(form) {
   const result = await request("/api/auth/register", {
     method: "POST",
     body: JSON.stringify(payload),
+    timeoutMs: 20000,
+    timeoutMessage: "注册服务响应超时，请稍后重试。",
   });
   saveSession(result);
   return result;
@@ -186,6 +199,8 @@ async function requestRegistrationCodeFromForm(form) {
   const result = await request("/api/auth/registration-code", {
     method: "POST",
     body: JSON.stringify({ mobile }),
+    timeoutMs: 15000,
+    timeoutMessage: "短信服务响应超时，请稍后重试。",
   });
   form.elements.challenge_id.value = result.challenge_id || "";
   form.dataset.challengeMobile = mobile;
