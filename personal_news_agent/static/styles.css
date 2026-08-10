@@ -524,16 +524,21 @@ input {
 
 .messages.chat-stream {
   background: #fbfcff;
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
-  align-content: start;
   min-width: 0;
   overflow-x: hidden;
   white-space: normal;
 }
 
+.messages.chat-stream > .chat-turn:first-child {
+  margin-top: auto;
+}
+
 .chat-turn {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
 }
 
@@ -614,6 +619,14 @@ input {
   width: 28px;
 }
 
+.turn-actions .copy-action {
+  font-size: 12px;
+  font-weight: 700;
+  gap: 5px;
+  padding: 0 9px;
+  width: auto;
+}
+
 .turn-actions .relation-toggle {
   color: #667085;
   font-size: 12px;
@@ -640,51 +653,124 @@ input {
   font-size: 14px;
 }
 
-.research-trace {
-  border-bottom: 1px solid #edf1f6;
-  display: grid;
+.agent-run-trace {
+  background: #f8fafc;
+  border: 1px solid #dce5ef;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.agent-run-trace > summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  list-style: none;
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.agent-run-trace > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-run-trace > summary span {
+  align-items: center;
+  color: #1f2937;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 800;
   gap: 8px;
-  padding-bottom: 10px;
+}
+
+.agent-run-trace > summary span i {
+  background: #12b76a;
+  border-radius: 999px;
+  box-shadow: 0 0 0 4px rgba(18, 183, 106, 0.12);
+  height: 7px;
+  width: 7px;
+}
+
+.agent-run-trace > summary em {
+  color: #667085;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.research-trace {
+  border-top: 1px solid #e4eaf1;
+  display: grid;
+  padding: 4px 12px 10px;
 }
 
 .trace-step {
-  align-items: start;
   display: grid;
-  gap: 6px;
-  grid-template-columns: 82px 32px minmax(0, 1fr);
+  gap: 10px;
+  grid-template-columns: 14px minmax(0, 1fr);
+  min-width: 0;
+  padding: 8px 0;
+  position: relative;
 }
 
-.trace-step strong,
-.trace-step span {
-  color: #1e2329;
-  font-size: 12px;
-  line-height: 1.5;
+.trace-step:not(:last-child)::after {
+  background: #d6dee8;
+  content: "";
+  height: calc(100% - 13px);
+  left: 5px;
+  position: absolute;
+  top: 20px;
+  width: 1px;
 }
 
-.trace-step span {
-  background: #edf4ff;
+.trace-step > i {
+  background: #12b76a;
+  border: 2px solid #e7f8ef;
   border-radius: 999px;
-  color: #155eef;
-  text-align: center;
+  height: 10px;
+  margin-top: 3px;
+  width: 10px;
+  z-index: 1;
 }
 
-.trace-step span:empty {
-  background: transparent;
+.trace-step > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.trace-step strong {
+  color: #1f2937;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.trace-step small {
+  color: #667085;
+  font-size: 10px;
 }
 
 .trace-step p {
-  color: #667085;
+  color: #475467;
   font-size: 12px;
-  line-height: 1.5;
-  margin: 0;
+  line-height: 1.55;
+  margin: 2px 0 0;
 }
 
-.trace-step.error strong {
-  color: #b42318;
+.trace-step.error > i,
+.trace-step.fallback > i {
+  background: #f79009;
+  border-color: #fff3dc;
 }
 
-.trace-step.running strong {
-  color: #155eef;
+.trace-step.running > i {
+  animation: agent-trace-pulse 1.25s ease-in-out infinite;
+  background: #2e90fa;
+  border-color: #e5f2ff;
+}
+
+@keyframes agent-trace-pulse {
+  50% { box-shadow: 0 0 0 5px rgba(46, 144, 250, 0.16); }
 }
 
 .stream-status {
@@ -773,14 +859,64 @@ input {
   padding: 8px 10px;
 }
 
-.assistant-markdown h3,
-.assistant-markdown h4,
 .assistant-markdown p,
 .assistant-markdown li,
 .assistant-markdown blockquote,
-.assistant-markdown strong,
-.assistant-markdown a {
+.assistant-markdown td,
+.assistant-markdown th {
   font-size: 14px;
+}
+
+.assistant-markdown h3 {
+  border-bottom: 1px solid #e4e9f0;
+  font-size: 17px;
+  margin-top: 8px;
+  padding-bottom: 7px;
+}
+
+.assistant-markdown h4 {
+  font-size: 15px;
+  margin-top: 5px;
+}
+
+.assistant-markdown ol {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 22px;
+}
+
+.assistant-markdown hr {
+  border: 0;
+  border-top: 1px solid #dfe6ee;
+  margin: 6px 0;
+  width: 100%;
+}
+
+.assistant-markdown code {
+  background: #eef2f6;
+  border-radius: 5px;
+  color: #344054;
+  font: 0.92em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 2px 5px;
+}
+
+.assistant-markdown pre {
+  background: #101828;
+  border: 1px solid #344054;
+  border-radius: 10px;
+  color: #e4e7ec;
+  margin: 2px 0;
+  max-width: 100%;
+  overflow: auto;
+  padding: 12px 14px;
+  white-space: pre;
+}
+
+.assistant-markdown pre code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
 }
 
 .assistant-markdown .markdown-table-wrap {
@@ -3020,7 +3156,8 @@ pre {
   border-color: #c7d4e4;
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.08);
   gap: 12px;
-  grid-template-rows: auto auto auto minmax(390px, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
+  height: calc(100vh - 110px);
   min-width: 0;
   overflow: hidden;
   padding: 20px;
@@ -3160,7 +3297,8 @@ pre {
   border-color: #dbe5f0;
   font-size: 15px;
   line-height: 1.6;
-  min-height: 390px;
+  height: auto;
+  min-height: 0;
 }
 
 .dialog-command {
@@ -3179,9 +3317,9 @@ pre {
 }
 
 .chat-runtime-controls {
-  align-items: flex-end;
+  align-items: center;
   display: flex;
-  gap: 16px;
+  gap: 12px;
   justify-content: space-between;
   margin-top: 2px;
 }
@@ -3192,24 +3330,20 @@ pre {
   display: inline-grid;
   font-size: 12px;
   font-weight: 700;
-  gap: 5px 8px;
-  grid-template-columns: auto minmax(150px, 210px);
+  gap: 6px;
+  grid-template-columns: auto 168px;
 }
 
 .chat-model-control select {
   border: 1px solid #b8c7da;
   border-radius: 9px;
   font-size: 13px;
-  min-height: 36px;
-  padding: 6px 30px 6px 10px;
+  min-height: 32px;
+  padding: 4px 28px 4px 9px;
 }
 
 .chat-model-control small {
-  color: #667085;
-  font-size: 11px;
-  font-weight: 500;
-  grid-column: 2;
-  line-height: 1.3;
+  display: none;
 }
 
 .web-search-control {
@@ -4314,7 +4448,60 @@ body.console-shell {
 }
 
 .console-shell .turn-actions button {
-  color: #91a4ba;
+  background: rgba(20, 48, 72, 0.96);
+  border-color: rgba(125, 211, 252, 0.28);
+  color: #d9f3ff;
+  font-weight: 760;
+}
+
+.console-shell .turn-actions button:hover,
+.console-shell .turn-actions button:focus-visible,
+.console-shell .turn-actions .relation-toggle.active {
+  background: rgba(14, 116, 144, 0.42);
+  border-color: rgba(103, 232, 249, 0.58);
+  color: #ffffff;
+}
+
+.console-shell .agent-run-trace {
+  background: rgba(9, 31, 49, 0.92);
+  border-color: rgba(125, 211, 252, 0.22);
+}
+
+.console-shell .agent-run-trace > summary span,
+.console-shell .trace-step strong {
+  color: #edf8ff;
+}
+
+.console-shell .agent-run-trace > summary em,
+.console-shell .trace-step small,
+.console-shell .trace-step p {
+  color: #9fb8cf;
+}
+
+.console-shell .research-trace {
+  border-top-color: rgba(148, 163, 184, 0.2);
+}
+
+.console-shell .trace-step:not(:last-child)::after {
+  background: rgba(125, 211, 252, 0.2);
+}
+
+.console-shell .assistant-markdown h3 {
+  border-bottom-color: rgba(148, 163, 184, 0.22);
+}
+
+.console-shell .assistant-markdown code {
+  background: rgba(30, 58, 81, 0.95);
+  color: #d9f3ff;
+}
+
+.console-shell .assistant-markdown pre {
+  background: #06111f;
+  border-color: rgba(125, 211, 252, 0.24);
+}
+
+.console-shell .assistant-markdown hr {
+  border-top-color: rgba(148, 163, 184, 0.22);
 }
 
 .console-shell .dialog-command input {
@@ -4615,6 +4802,14 @@ body.console-shell {
 
 .console-shell .chat-model-control small {
   color: #91a9bf;
+}
+
+.legacy-agent-drawer {
+  display: none !important;
+}
+
+.console-shell .console-main {
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .console-shell .evidence-strip article,

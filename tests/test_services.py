@@ -429,7 +429,12 @@ def test_research_does_not_use_external_search_when_web_disabled(services):
 def test_cc_runtime_search_tools_use_existing_local_and_web_services(services):
     _, store, _ = services
     search = RecordingSearchService()
-    context = RuntimeSearchContext(store, search, ["tech"], None, allow_web_search=True)
+    emitted = []
+
+    async def on_trace(item):
+        emitted.append(item)
+
+    context = RuntimeSearchContext(store, search, ["tech"], None, allow_web_search=True, on_trace=on_trace)
 
     local_payload = asyncio.run(context.local_news_search({"query": "AI Agent", "limit": 4}))
     web_payload = asyncio.run(context.web_search({"query": "AI Agent 最新进展", "limit": 3}))
@@ -440,6 +445,7 @@ def test_cc_runtime_search_tools_use_existing_local_and_web_services(services):
     assert search.external_calls
     assert [item.origin for item in context.results] == ["local", "external"]
     assert [item["origin"] for item in context.queries] == ["local", "web"]
+    assert [item["stage"] for item in emitted] == ["CC Runtime 本地搜索", "CC Runtime 联网搜索"]
 
 
 def test_cc_runtime_web_tool_refuses_unapproved_web_search(services):
@@ -549,6 +555,37 @@ def test_research_chat_uses_cc_runtime_without_changing_response_contract(servic
     assert any(item["stage"] == "CC Runtime 主控" for item in response.research_trace)
 
 
+def test_research_chat_stream_emits_public_harness_execution_steps(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    chat = NewsChatService(store, search, llm_client=FakeDisabledLLM(), cc_runtime=FakeCCRuntime())
+
+    async def collect_events():
+        return [
+            event
+            async for event in chat.chat_events(
+                "cc_runtime_stream_conv",
+                "AI Agent 最近有什么变化",
+                category_scope=["tech"],
+                use_llm=True,
+                user_id="default",
+                allow_web_search=True,
+            )
+        ]
+
+    events = asyncio.run(collect_events())
+    trace_items = [event["item"] for event in events if event["type"] == "trace"]
+
+    assert events[0]["type"] == "start"
+    assert any(item["stage"] == "分析计划" for item in trace_items)
+    assert any(item["stage"] == "CC Runtime 主控" and item["status"] == "running" for item in trace_items)
+    assert any(item["stage"] == "证据合并" for item in trace_items)
+    assert events[-1]["type"] == "final"
+    final_trace = events[-1]["response"]["research_trace"]
+    terminal_stages = {item["stage"] for item in final_trace if item["status"] != "running"}
+    assert not any(item["stage"] in terminal_stages and item["status"] == "running" for item in final_trace)
+
+
 def test_research_chat_falls_back_when_cc_runtime_fails(services):
     _, store, _ = services
     search = RecordingSearchService()
@@ -643,8 +680,8 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260810-chat-model-selector-1" in home_source
-    assert "styles.css?v=20260810-chat-model-selector-1" in home_html
+    assert "20260810-harness-run-ui-2" in home_source
+    assert "styles.css?v=20260810-harness-run-ui-2" in home_html
     assert "shared.js?v=20260810-phone-controls-2" in mobile_html
 
 

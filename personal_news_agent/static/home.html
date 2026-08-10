@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260810-chat-model-selector-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260810-harness-run-ui-2" />
   </head>
   <body>
     <template id="webTemplate" data-body-class="web-shell console-shell">
@@ -71,19 +71,18 @@
                   <article class="chat-turn chat-assistant">
                     <div class="chat-bubble">已就绪。</div>
                     <div class="turn-actions" aria-label="消息操作">
-                      <button type="button" data-turn-action="copy" title="复制" aria-label="复制">⧉</button>
+                      <button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答"><span aria-hidden="true">⧉</span> 复制</button>
                     </div>
                   </article>
                 </div>
                 <div class="chat-runtime-controls">
                   <label class="chat-model-control">
-                    <span>对话模型</span>
+                    <span>模型</span>
                     <select data-chat-model-select aria-label="选择对话模型">
                       <option value="yuanrong-personal-assistant">元融大模型</option>
                       <option value="qwen3.6">Qwen 3.6</option>
                       <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
                     </select>
-                    <small data-chat-model-hint>默认 · 个人资讯助理</small>
                   </label>
                   <div class="web-search-control">
                     <label class="web-search-toggle">
@@ -99,7 +98,7 @@
                 </form>
               </section>
       
-              <details class="agent-drawer">
+              <details class="agent-drawer legacy-agent-drawer">
                 <summary>高级操作与偏好</summary>
                 <section class="command-panel">
                   <form id="topicForm" class="topic-command">
@@ -146,7 +145,7 @@
       
               </details>
       
-              <details class="agent-drawer topic-detail-drawer">
+              <details class="agent-drawer topic-detail-drawer legacy-agent-drawer">
                 <summary>专题视图与证据</summary>
                 <section class="topic-workbench">
                   <div class="topic-head">
@@ -338,7 +337,7 @@
                   <article class="chat-turn chat-assistant">
                     <div class="chat-bubble">今日内容已准备，可以点一条资讯继续深挖，或把当前专题加入跟踪。</div>
                     <div class="turn-actions" aria-label="消息操作">
-                      <button type="button" data-turn-action="copy" title="复制" aria-label="复制">⧉</button>
+                      <button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答"><span aria-hidden="true">⧉</span> 复制</button>
                     </div>
                   </article>
                 </div>
@@ -351,7 +350,6 @@
                     <option value="qwen3.6">Qwen 3.6</option>
                     <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
                   </select>
-                  <small data-chat-model-hint>默认 · 个人资讯助理</small>
                 </label>
                 <div class="web-search-control mobile-web-search-control">
                   <label class="web-search-toggle">
@@ -445,6 +443,6 @@
 
     <script src="static/vendor/react.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/react-dom.production.min.js?v=18.3.1"></script>
-    <script src="static/home.js?v=20260810-chat-model-selector-1"></script>
+    <script src="static/home.js?v=20260810-harness-run-ui-2"></script>
   </body>
 </html>

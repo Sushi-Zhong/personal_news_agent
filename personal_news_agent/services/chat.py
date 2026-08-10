@@ -841,6 +841,24 @@ class NewsChatService:
         runtime_fallback_trace: list[dict[str, Any]] = []
         if self.cc_runtime and getattr(self.cc_runtime, "configured", False):
             try:
+                plan_trace = {
+                    "stage": "分析计划",
+                    "status": "completed",
+                    "message": f"围绕【{query}】制定只读检索与证据核验计划"
+                    + (f"，限定近 {time_range.days} 天" if time_range else "")
+                    + (f"，分类 {', '.join(categories)}" if categories else "")
+                    + ("，允许外部搜索。" if allow_web_search else "，仅使用本地资讯库。"),
+                }
+                await _add_trace(trace, plan_trace, on_trace)
+                await _add_trace(
+                    trace,
+                    {
+                        "stage": "CC Runtime 主控",
+                        "status": "running",
+                        "message": "正在选择检索词并调用已授权的只读工具。",
+                    },
+                    on_trace,
+                )
                 history = _conversation_history_text(
                     self._conversation_memory(conversation_id, user_id),
                     turn_limit=6,
@@ -857,7 +875,9 @@ class NewsChatService:
                     allow_web_search=allow_web_search,
                     logical_model_key=selected_model.key,
                     logical_model_name=selected_model.name,
+                    on_trace=on_trace,
                 )
+                trace.extend(runtime_result.trace)
                 runtime_results = _rank_for_chat(
                     _filter_by_time(_enrich_from_store(self.store, runtime_result.results), time_range),
                     message,
@@ -867,14 +887,8 @@ class NewsChatService:
                     event_line = await self._event_line(query, categories, runtime_results)
                     drift_warning = await drift_warning_task
                     answer = _prepend_notice(runtime_result.answer, drift_warning)
-                    trace = [
-                        {
-                            "stage": "理解问题",
-                            "status": "completed",
-                            "message": f"CC Runtime 聚焦【{query}】"
-                            + (f"，限定近 {time_range.days} 天" if time_range else "")
-                            + (f"，分类 {', '.join(categories)}" if categories else ""),
-                        },
+                    final_trace = [
+                        plan_trace,
                         {
                             "stage": "CC Runtime 主控",
                             "status": "completed",
@@ -897,7 +911,7 @@ class NewsChatService:
                         {"stage": "生成回答", "status": "completed", "message": "CC Runtime 已生成 markdown 回答。"},
                     ]
                     if event_line and event_line.get("items"):
-                        trace.insert(
+                        final_trace.insert(
                             -1,
                             {
                                 "stage": "事件线",
@@ -906,6 +920,9 @@ class NewsChatService:
                                 "count": len(event_line.get("items") or []),
                             },
                         )
+                    await _add_trace(trace, final_trace[1], on_trace)
+                    for item in final_trace[2 + len(runtime_result.trace) :]:
+                        await _add_trace(trace, item, on_trace)
                     return ChatResponse(
                         conversation_id=conversation_id,
                         answer=answer,
@@ -916,7 +933,7 @@ class NewsChatService:
                         focus_object=FocusObject(type="topic", text=focus_text),
                         required_context_items=["cc_runtime", "local_news_search", "web_search", "retrieved_evidence", "event_line"],
                         recommendations=runtime_results[:8],
-                        research_trace=trace,
+                        research_trace=final_trace,
                         evidence=evidence,
                         expanded_queries=runtime_result.queries[:8],
                         event_line=event_line,
@@ -1908,7 +1925,25 @@ async def _add_trace(
     item: dict[str, Any],
     on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> None:
-    trace.append(item)
+    stage = str(item.get("stage") or "")
+    status = str(item.get("status") or "completed")
+    replace_index = next(
+        (
+            index
+            for index in range(len(trace) - 1, -1, -1)
+            if trace[index].get("stage") == stage and trace[index].get("status") == "running"
+        ),
+        None,
+    )
+    if status != "running" and replace_index is not None:
+        trace[replace_index] = item
+    elif status == "running" and any(
+        existing.get("stage") == stage and existing.get("status") != "running" for existing in trace
+    ):
+        # An older running snapshot must not supersede a terminal state.
+        pass
+    else:
+        trace.append(item)
     if on_trace:
         await on_trace(item)
 

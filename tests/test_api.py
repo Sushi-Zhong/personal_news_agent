@@ -19,7 +19,7 @@ def test_api_health_and_main_routes():
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
-        assert health.json()["frontend_revision"] == "20260810-chat-model-selector-1"
+        assert health.json()["frontend_revision"] == "20260810-harness-run-ui-2"
         assert health.json()["source_count"] >= 20
 
         feed = client.get("/api/feed?category=tech&limit=5")
@@ -53,7 +53,7 @@ def test_api_health_and_main_routes():
         auth = client.get("/auth")
         assert auth.status_code == 200
         assert auth.headers["cache-control"] == "no-store, max-age=0"
-        assert auth.headers["x-pna-frontend-revision"] == "20260810-chat-model-selector-1"
+        assert auth.headers["x-pna-frontend-revision"] == "20260810-harness-run-ui-2"
         assert 'data-auth-mode-target="login"' in auth.text
         assert "短信验证码仅用于确认你持有该手机号" in auth.text
 

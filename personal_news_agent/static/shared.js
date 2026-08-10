@@ -645,10 +645,19 @@ async function streamChat(payload, assistantNode, targetNode) {
         conversationId = event.conversation_id || conversationId;
         if (conversationId) localStorage.setItem("pna_conversation_id", conversationId);
         state.stream_status = event.message || "开始处理。";
+        upsertResearchTrace(state.research_trace, {
+          stage: "接收任务",
+          status: "completed",
+          message: state.stream_status,
+        });
       } else if (event.type === "trace" && event.item) {
-        state.research_trace.push(event.item);
+        upsertResearchTrace(state.research_trace, event.item);
         state.stream_status = event.item.message || event.item.stage || "执行中。";
       } else if (event.type === "final" && event.response) {
+        event.response.research_trace = mergePublicExecutionTrace(
+          state.research_trace,
+          event.response.research_trace || [],
+        );
         conversationId = event.response.conversation_id || conversationId;
         if (conversationId) localStorage.setItem("pna_conversation_id", conversationId);
         setAssistantResponseHtml(assistantNode, chatResponseHtml(event.response));
@@ -667,13 +676,42 @@ async function streamChat(payload, assistantNode, targetNode) {
 
 function scrollChatToBottom(targetNode, behavior = "smooth") {
   if (!targetNode) return;
-  requestAnimationFrame(() => {
+  const applyScroll = () => {
     if (typeof targetNode.scrollTo === "function") {
       targetNode.scrollTo({ top: targetNode.scrollHeight, behavior });
     } else {
       targetNode.scrollTop = targetNode.scrollHeight;
     }
+  };
+  requestAnimationFrame(() => {
+    applyScroll();
+    requestAnimationFrame(applyScroll);
   });
+}
+
+function upsertResearchTrace(items, nextItem) {
+  const stage = String(nextItem?.stage || "");
+  const replaceIndex = items.findIndex((item) => item.stage === stage && item.status === "running");
+  const isRunning = nextItem?.status === "running";
+  if (isRunning && items.some((item) => item.stage === stage && item.status !== "running")) {
+    return;
+  }
+  if (replaceIndex >= 0) {
+    items.splice(replaceIndex, 1, nextItem);
+    return;
+  }
+  items.push(nextItem);
+}
+
+function mergePublicExecutionTrace(streamItems, responseItems) {
+  const merged = [];
+  [...streamItems, ...responseItems].forEach((item) => {
+    const duplicate = merged.some(
+      (existing) => existing.stage === item.stage && existing.message === item.message && existing.status === item.status,
+    );
+    if (!duplicate) upsertResearchTrace(merged, item);
+  });
+  return merged;
 }
 
 function parseSseEvent(block) {
@@ -709,9 +747,9 @@ function turnActionsHtml(role) {
     ? '<button type="button" data-turn-action="edit" title="编辑并重新发送" aria-label="编辑并重新发送">✎</button>'
     : "";
   const relation = role === "assistant"
-    ? '<button type="button" class="relation-toggle" data-turn-action="mark-related" title="强制标记为有关">有关</button><button type="button" class="relation-toggle" data-turn-action="mark-unrelated" title="强制标记为无关">无关</button>'
+    ? '<button type="button" class="relation-toggle" data-turn-action="mark-related" title="标记为相关">相关</button><button type="button" class="relation-toggle" data-turn-action="mark-unrelated" title="标记为不相关">不相关</button>'
     : "";
-  return `<div class="turn-actions" aria-label="消息操作">${edit}${relation}<button type="button" data-turn-action="copy" title="复制" aria-label="复制">⧉</button></div>`;
+  return `<div class="turn-actions" aria-label="消息操作">${edit}${relation}<button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答"><span aria-hidden="true">⧉</span> 复制</button></div>`;
 }
 
 document.addEventListener("click", async (event) => {
@@ -892,12 +930,29 @@ function chatStreamingHtml(state) {
 
 function renderResearchTrace(items) {
   if (!items.length) return "";
-  return `<div class="research-trace">${items
+  const completed = items.filter((item) => item.status !== "running").length;
+  const running = items.some((item) => item.status === "running");
+  const statusLabel = running ? "执行中" : `${completed}/${items.length} 完成`;
+  return `<details class="agent-run-trace" open>
+    <summary><span><i></i>Agent 执行过程</span><em>${escapeHtml(statusLabel)}</em></summary>
+    <div class="research-trace" role="list">${items
     .map((item) => {
       const count = Number.isFinite(Number(item.count)) ? Number(item.count) : "";
-      return `<div class="trace-step ${escapeAttr(item.status || "")}"><strong>${escapeHtml(item.stage || "")}</strong><span>${escapeHtml(count)}</span><p>${escapeHtml(item.message || "")}</p></div>`;
+      const state = item.status || "completed";
+      const stateText = state === "running"
+        ? "执行中"
+        : state === "error"
+          ? "异常"
+          : state === "fallback"
+            ? "已回退"
+            : state === "skipped"
+              ? "已跳过"
+              : state === "warning"
+                ? "需注意"
+                : "完成";
+      return `<div class="trace-step ${escapeAttr(state)}" role="listitem"><i aria-hidden="true"></i><div><strong>${escapeHtml(item.stage || "执行步骤")}</strong><small>${escapeHtml(stateText)}${count !== "" ? ` · ${escapeHtml(count)} 条` : ""}</small><p>${escapeHtml(item.message || "")}</p></div></div>`;
     })
-    .join("")}</div>`;
+    .join("")}</div></details>`;
 }
 
 function renderChatEventLine(eventLine, evidenceItems = []) {
@@ -1287,11 +1342,11 @@ function truncateText(value, maxLength) {
 function renderMarkdown(markdown) {
   const lines = String(markdown || "").split(/\r?\n/);
   let html = "";
-  let inList = false;
+  let listType = "";
   const closeList = () => {
-    if (inList) {
-      html += "</ul>";
-      inList = false;
+    if (listType) {
+      html += `</${listType}>`;
+      listType = "";
     }
   };
   for (let index = 0; index < lines.length; index += 1) {
@@ -1308,6 +1363,23 @@ function renderMarkdown(markdown) {
       index = table.endIndex;
       continue;
     }
+    if (trimmed.startsWith("```")) {
+      closeList();
+      const language = trimmed.slice(3).replace(/[^a-z0-9_+-]/gi, "").slice(0, 24);
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      html += `<pre${language ? ` data-language="${escapeAttr(language)}"` : ""}><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`;
+      continue;
+    }
+    if (/^(-{3,}|\*{3,})$/.test(trimmed)) {
+      closeList();
+      html += "<hr />";
+      continue;
+    }
     if (trimmed.startsWith("### ")) {
       closeList();
       html += `<h4>${renderInlineMarkdown(trimmed.slice(4))}</h4>`;
@@ -1317,12 +1389,20 @@ function renderMarkdown(markdown) {
     } else if (trimmed.startsWith("# ")) {
       closeList();
       html += `<h3>${renderInlineMarkdown(trimmed.slice(2))}</h3>`;
-    } else if (trimmed.startsWith("- ")) {
-      if (!inList) {
+    } else if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
+      if (listType !== "ul") {
+        closeList();
         html += "<ul>";
-        inList = true;
+        listType = "ul";
       }
       html += `<li>${renderInlineMarkdown(trimmed.slice(2))}</li>`;
+    } else if (/^\d+[.)]\s+/.test(trimmed)) {
+      if (listType !== "ol") {
+        closeList();
+        html += "<ol>";
+        listType = "ol";
+      }
+      html += `<li>${renderInlineMarkdown(trimmed.replace(/^\d+[.)]\s+/, ""))}</li>`;
     } else if (trimmed.startsWith("> ")) {
       closeList();
       html += `<blockquote>${renderInlineMarkdown(trimmed.slice(2))}</blockquote>`;

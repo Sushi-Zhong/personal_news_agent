@@ -6,7 +6,7 @@ from datetime import datetime
 import importlib.util
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from personal_news_agent.config import BASE_DIR, Settings
 from personal_news_agent.core.models import SearchResult, TimeRange
@@ -57,12 +57,14 @@ class RuntimeSearchContext:
         category_scope: list[str] | None,
         time_range: TimeRange | None,
         allow_web_search: bool,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self.store = store
         self.search_service = search_service
         self.category_scope = category_scope or []
         self.time_range = time_range
         self.allow_web_search = allow_web_search
+        self.on_trace = on_trace
         self.results: list[SearchResult] = []
         self.queries: list[dict[str, Any]] = []
         self.trace: list[dict[str, Any]] = []
@@ -81,17 +83,24 @@ class RuntimeSearchContext:
                 include_remote=False,
             )
         except Exception as exc:
-            return self._tool_error("local", query, exc)
+            payload = self._tool_error("local", query, exc)
+            await self._notify_last_trace()
+            return payload
         self._record("local", query, results)
+        await self._notify_last_trace()
         return _tool_success("LOCAL_NEWS_EVIDENCE", query, results, self.store)
 
     async def web_search(self, args: dict[str, Any]) -> dict[str, Any]:
         query = _bounded_query(args.get("query"))
         limit = _bounded_limit(args.get("limit"), maximum=8)
         if not self.allow_web_search:
-            return self._tool_error("web", query, PermissionError("web search is disabled for this request"))
+            payload = self._tool_error("web", query, PermissionError("web search is disabled for this request"))
+            await self._notify_last_trace()
+            return payload
         if not self.search_service.external_configured:
-            return self._tool_error("web", query, RuntimeError("external search provider is not configured"))
+            payload = self._tool_error("web", query, RuntimeError("external search provider is not configured"))
+            await self._notify_last_trace()
+            return payload
         try:
             results = await self.search_service.search_external(
                 query,
@@ -100,8 +109,11 @@ class RuntimeSearchContext:
                 max_results=limit,
             )
         except Exception as exc:
-            return self._tool_error("web", query, exc)
+            payload = self._tool_error("web", query, exc)
+            await self._notify_last_trace()
+            return payload
         self._record("web", query, results)
+        await self._notify_last_trace()
         return _tool_success("UNTRUSTED_WEB_EVIDENCE", query, results, self.store)
 
     def _record(self, origin: str, query: str, results: list[SearchResult]) -> None:
@@ -137,6 +149,15 @@ class RuntimeSearchContext:
             "structuredContent": {"ok": False, "error_type": error_type},
             "isError": True,
         }
+
+    async def _notify_last_trace(self) -> None:
+        if self.on_trace and self.trace:
+            try:
+                await self.on_trace(dict(self.trace[-1]))
+            except Exception:
+                # Observability is best-effort. A disconnected SSE consumer
+                # must not interrupt the read-only research run itself.
+                return
 
 
 class CCRuntimeOrchestrator:
@@ -174,6 +195,7 @@ class CCRuntimeOrchestrator:
         allow_web_search: bool,
         logical_model_key: str = DEFAULT_LOGICAL_MODEL,
         logical_model_name: str = "元融大模型",
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> CCRuntimeResult:
         if not self.configured:
             raise CCRuntimeError("CC Runtime SDK is not configured")
@@ -183,6 +205,7 @@ class CCRuntimeOrchestrator:
             category_scope,
             time_range,
             allow_web_search,
+            on_trace,
         )
         options = self.build_options(context)
         prompt = _runtime_prompt(
