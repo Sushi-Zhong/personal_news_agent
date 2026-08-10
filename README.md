@@ -227,11 +227,21 @@ Web、crawler 和 task runner 都会加载 `.env.ext`，然后使用 `PERSONAL_N
 export PERSONAL_NEWS_EXT_ROOT="/home/che/cyris/personal_news_agent/runtime"
 export PERSONAL_NEWS_VENV="/home/che/cyris/personal_news_agent/.venv"
 export PERSONAL_NEWS_DB="sqlite:////home/che/cyris/personal_news_agent/personal_news.db"
+export PNA_WEB_PORT="22053"
 ```
 
 因此本地 `.env.ext` 的变量名可以保持不变，但 `/Volumes/ext/...` 的变量值不能原样用于服务器。crawler 和 task runner 都只应各运行一个 systemd 实例。可在 `.env.ext` 中调整：
 
 systemd 的 Web unit 会设置 `PNA_WEB_DISABLE_BACKGROUND_CRAWL=1`，避免 Web 内嵌抓取与独立 crawler 重复运行；本地只启动 Web 时仍可用 `PERSONAL_NEWS_BACKGROUND_CRAWL=1` 自动抓取。
+
+通过域名子路径 `/pna/` 部署时，可将 `deploy/nginx/personal-news-location.conf.example` 放入 HTTPS `server` 块。该配置会把 `/pna/` 转发到 `127.0.0.1:22053`；前端静态资源、页面跳转和 API 请求均保留 `/pna` 前缀。修改 `.env.ext` 或 Nginx 后执行：
+
+```bash
+./start_backend.sh restart
+sudo nginx -t && sudo systemctl reload nginx
+curl http://127.0.0.1:22053/api/health
+curl https://你的域名/pna/api/health
+```
 
 ```bash
 export PNA_CRAWL_WORKERS=2
