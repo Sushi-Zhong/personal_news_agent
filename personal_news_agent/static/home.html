@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260810-harness-run-ui-2" />
+    <link rel="stylesheet" href="static/styles.css?v=20260810-cc-skills-1" />
   </head>
   <body>
     <template id="webTemplate" data-body-class="web-shell console-shell">
@@ -15,8 +15,8 @@
               <p><span data-user-name></span></p>
             </div>
             <div class="system-strip" aria-live="polite">
-              <span data-es-status>ES --</span>
-              <span data-mysql-status>MySQL --</span>
+              <span data-es-status>本地新闻引擎 --</span>
+              <span data-mysql-status>外部搜索工具 --</span>
               <span data-source-count>源 --</span>
             </div>
             <nav class="top-actions">
@@ -114,7 +114,7 @@
                     <button>更新</button>
                   </form>
                   <div class="command-actions">
-                    <button id="nativeIngest" class="secondary-button">源搜索入库</button>
+                    <button id="nativeIngest" class="secondary-button">更新新闻源</button>
                     <button id="deepDive" class="secondary-button">深度挖掘</button>
                     <button id="createTopicTask" class="secondary-button">保存跟踪</button>
                     <button id="generateReport" class="secondary-button">专题报告</button>
@@ -443,6 +443,7 @@
 
     <script src="static/vendor/react.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/react-dom.production.min.js?v=18.3.1"></script>
-    <script src="static/home.js?v=20260810-harness-run-ui-2"></script>
+    <script src="static/vendor/mermaid.min.js?v=11.9.0"></script>
+    <script src="static/home.js?v=20260810-cc-skills-1"></script>
   </body>
 </html>

@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
 
 from claude_code_backend.models import ChatRequest as LocalAgentChatRequest
 
 from personal_news_agent.core.models import FactCheckResponse, SearchResult
 from personal_news_agent.core.text import stable_id, summarize
 from personal_news_agent.services.article_fetch import canonicalize_url
+from personal_news_agent.services.cc_runtime import FACTCHECK_SKILL_NAME
 from personal_news_agent.services.llm import LLMClient
 from personal_news_agent.services.search import UnifiedSearchService
 from personal_news_agent.services.store import NewsStore
@@ -24,11 +26,13 @@ class FactCheckService:
         search_service: UnifiedSearchService,
         local_agent: Any | None = None,
         llm_client: LLMClient | None = None,
+        cc_runtime: Any | None = None,
     ):
         self.store = store
         self.search_service = search_service
         self.local_agent = local_agent
         self.llm_client = llm_client
+        self.cc_runtime = cc_runtime
 
     async def run(
         self,
@@ -38,6 +42,7 @@ class FactCheckService:
         max_results: int = 12,
         check_query: str | None = None,
         include_remote: bool = True,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> FactCheckResponse:
         cleaned_claim = " ".join(str(claim or "").split()).strip()
         if not cleaned_claim:
@@ -45,6 +50,66 @@ class FactCheckService:
         cleaned_check_query = " ".join(str(check_query or "").split()).strip()
         categories = category_scope or []
         search_query = f"{cleaned_claim} {cleaned_check_query}".strip()
+        runtime_trace: list[dict[str, Any]] = []
+        if self.cc_runtime and getattr(self.cc_runtime, "configured", False):
+            started = {
+                "stage": "事实核查",
+                "status": "running",
+                "message": "正在拆解说法并规划多源证据核验。",
+            }
+            runtime_trace.append(started)
+            await _notify_trace(on_trace, started)
+            try:
+                runtime_result = await self.cc_runtime.run(
+                    message=f"请对下面的新闻说法执行严格事实核查：{cleaned_claim}",
+                    query=search_query,
+                    topic=cleaned_claim,
+                    category_scope=categories,
+                    time_range=None,
+                    history="",
+                    allow_web_search=include_remote,
+                    skill_names=[FACTCHECK_SKILL_NAME],
+                    on_trace=on_trace,
+                )
+                parsed = _decode_json_object(runtime_result.answer)
+                evidence = self._evidence(runtime_result.results)
+                if int(runtime_result.provider_metadata.get("builtin_web_calls") or 0) > 0:
+                    evidence = _append_declared_external_evidence(evidence, parsed)
+                fallback = _fallback_payload(
+                    cleaned_claim,
+                    categories,
+                    evidence,
+                    include_remote=include_remote,
+                    web_search_available=bool(getattr(self.search_service, "external_configured", False)),
+                    check_query=cleaned_check_query,
+                )
+                payload = _normalize_payload(parsed, fallback, evidence)
+                completed = {
+                    "stage": "事实核查",
+                    "status": "completed",
+                    "message": f"已核对 {len(evidence)} 条去重证据并形成保守结论。",
+                    "count": len(evidence),
+                }
+                runtime_trace.extend([*runtime_result.trace, completed])
+                await _notify_trace(on_trace, completed)
+                return FactCheckResponse(
+                    factcheck_id=stable_id("fact", f"{cleaned_claim}:{datetime.now(timezone.utc).isoformat()}"),
+                    claim=cleaned_claim,
+                    category_scope=categories,
+                    agent_source="cc_runtime",
+                    evidence=evidence,
+                    research_trace=runtime_trace,
+                    **payload,
+                )
+            except Exception as exc:
+                self.store.log("factcheck_cc_runtime", "fallback", search_query, {"error_type": type(exc).__name__})
+                fallback_trace = {
+                    "stage": "事实核查",
+                    "status": "fallback",
+                    "message": "Agent 主控暂不可用，已切换到兼容核查流程。",
+                }
+                runtime_trace.append(fallback_trace)
+                await _notify_trace(on_trace, fallback_trace)
         local_results = await self.search_service.search(
             search_query,
             categories or None,
@@ -94,6 +159,7 @@ class FactCheckService:
             category_scope=categories,
             agent_source=agent_source,
             evidence=evidence,
+            research_trace=runtime_trace,
             **payload,
         )
 
@@ -242,13 +308,13 @@ def _source_note(
     local_count = len(evidence) - remote_count
     suffix = f"；本轮核查点：{check_query}" if check_query else ""
     if not include_remote:
-        remote_note = "未请求外部 Web Search"
+        remote_note = "未请求外部搜索工具"
     elif remote_count:
-        remote_note = f"外部 Web Search 返回 {remote_count} 条"
+        remote_note = f"外部搜索工具返回 {remote_count} 条"
     elif web_search_available:
-        remote_note = "已请求外部 Web Search，但未返回可用结果"
+        remote_note = "已请求外部搜索工具，但未返回可用结果"
     else:
-        remote_note = "已请求外部 Web Search，但服务尚未配置"
+        remote_note = "已请求外部搜索工具，但服务尚未配置"
     return f"本次保留 {local_count} 条本地证据、{remote_count} 条联网证据；{remote_note}{suffix}。"
 
 
@@ -327,14 +393,23 @@ def _evidence_refs(value: Any, evidence: list[dict[str, Any]]) -> list[dict[str,
     if not isinstance(value, list):
         return []
     by_index = {item.get("index"): item for item in evidence}
+    by_url = {
+        canonicalize_url(str(item.get("url") or "")): item
+        for item in evidence
+        if canonicalize_url(str(item.get("url") or ""))
+    }
     refs = []
     for raw in value:
+        item = None
         index = raw.get("index") if isinstance(raw, dict) else raw
-        try:
-            index = int(index)
-        except (TypeError, ValueError):
-            continue
-        item = by_index.get(index)
+        if isinstance(raw, dict) and raw.get("url"):
+            item = by_url.get(canonicalize_url(str(raw.get("url") or "")))
+        if item is None:
+            try:
+                index = int(index)
+            except (TypeError, ValueError):
+                continue
+            item = by_index.get(index)
         if item and item not in refs:
             refs.append(
                 {
@@ -346,6 +421,44 @@ def _evidence_refs(value: Any, evidence: list[dict[str, Any]]) -> list[dict[str,
                 }
             )
     return refs
+
+
+def _append_declared_external_evidence(
+    evidence: list[dict[str, Any]],
+    parsed: dict[str, Any],
+) -> list[dict[str, Any]]:
+    merged = [dict(item) for item in evidence]
+    seen = {canonicalize_url(str(item.get("url") or "")) for item in merged}
+    declared = [
+        *(parsed.get("supporting_evidence") or []),
+        *(parsed.get("contradicting_evidence") or []),
+    ]
+    for raw in declared:
+        if len(merged) >= 12:
+            break
+        if not isinstance(raw, dict):
+            continue
+        url = str(raw.get("url") or "").strip()
+        parsed_url = urlparse(url)
+        canonical_url = canonicalize_url(url) if parsed_url.scheme == "https" and parsed_url.netloc else ""
+        if not canonical_url or canonical_url in seen:
+            continue
+        seen.add(canonical_url)
+        merged.append(
+            {
+                "index": len(merged) + 1,
+                "article_id": None,
+                "source_id": parsed_url.netloc,
+                "title": _clean_text(raw.get("title"), 240) or parsed_url.netloc,
+                "url": url,
+                "category": None,
+                "published_at": None,
+                "summary": "由外部搜索工具返回；请打开原始页面核对全文。",
+                "content_excerpt": "",
+                "origin": "external",
+            }
+        )
+    return merged
 
 
 def _decode_json_object(raw: str) -> dict[str, Any]:
@@ -379,3 +492,15 @@ def _clean_text(value: Any, max_length: int) -> str:
     if not isinstance(value, str):
         return ""
     return " ".join(value.split()).strip()[:max_length]
+
+
+async def _notify_trace(
+    on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    item: dict[str, Any],
+) -> None:
+    if not on_trace:
+        return
+    try:
+        await on_trace(dict(item))
+    except Exception:
+        return

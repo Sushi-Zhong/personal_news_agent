@@ -29,7 +29,7 @@ def test_shared_client_preserves_pna_prefix_for_api_requests():
     auth = (STATIC_DIR / "auth.html").read_text(encoding="utf-8")
     auth_script = (STATIC_DIR / "auth.js").read_text(encoding="utf-8")
     mobile_script = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
-    assert "home.js?v=20260810-harness-run-ui-2" in home
+    assert "home.js?v=20260810-cc-skills-1" in home
     assert "shared.js?v=20260810-phone-controls-2" in auth
     assert "ensureRegistrationChallenge(form, status)" in auth_script
     assert "ensureRegistrationChallenge(form, status)" in mobile_script
@@ -47,7 +47,7 @@ def test_server_templates_keep_nginx_and_web_port_aligned():
 
 def test_html_routes_disable_cache_and_expose_frontend_revision():
     routes = (ROOT / "personal_news_agent" / "api" / "routes.py").read_text(encoding="utf-8")
-    assert 'FRONTEND_REVISION = "20260810-harness-run-ui-2"' in routes
+    assert 'FRONTEND_REVISION = "20260810-cc-skills-1"' in routes
     assert '"Cache-Control": "no-store, max-age=0"' in routes
     assert '"frontend_revision": FRONTEND_REVISION' in routes
 
@@ -55,7 +55,7 @@ def test_html_routes_disable_cache_and_expose_frontend_revision():
 def test_console_theme_has_dark_drawers_readable_content_and_responsive_rails():
     styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
     home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
-    assert "styles.css?v=20260810-harness-run-ui-2" in home
+    assert "styles.css?v=20260810-cc-skills-1" in home
     assert ".console-shell .agent-drawer" in styles
     assert "background: rgba(10, 28, 45, 0.96)" in styles
     assert ".console-shell .assistant-markdown h3" in styles
@@ -82,6 +82,16 @@ def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_lay
     assert 'role="listitem"' in shared
     assert "codeLines.join" in shared
     assert 'html += "<ol>"' in shared
+    assert "static/vendor/mermaid.min.js" in home
+    assert "mountMermaidDiagrams" in shared
+    assert 'language.toLowerCase() === "mermaid"' in shared
+    assert "function sanitizeMermaidSource" in shared
+    assert "click\\s+" in shared
+    assert ".chat-mermaid-canvas" in styles
+    assert "本地新闻引擎 --" in home
+    assert "外部搜索工具 --" in home
+    assert "ES --" not in home
+    assert "MySQL --" not in home
 
 
 def test_chat_model_selector_is_logical_and_sent_with_each_chat_request():

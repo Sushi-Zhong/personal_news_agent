@@ -618,6 +618,7 @@ function setAssistantResponseHtml(node, html) {
   node.innerHTML = `${html}${turnActionsHtml("assistant")}`;
   syncForcedRelationButtons(node);
   mountRelatedMindMaps(node);
+  mountMermaidDiagrams(node);
   scrollChatToBottom(node.closest(".messages"), "auto");
 }
 
@@ -1372,7 +1373,10 @@ function renderMarkdown(markdown) {
         codeLines.push(lines[index]);
         index += 1;
       }
-      html += `<pre${language ? ` data-language="${escapeAttr(language)}"` : ""}><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`;
+      const code = codeLines.join("\n");
+      html += language.toLowerCase() === "mermaid"
+        ? renderMermaidBlock(code)
+        : `<pre${language ? ` data-language="${escapeAttr(language)}"` : ""}><code>${escapeHtml(code)}</code></pre>`;
       continue;
     }
     if (/^(-{3,}|\*{3,})$/.test(trimmed)) {
@@ -1413,6 +1417,71 @@ function renderMarkdown(markdown) {
   }
   closeList();
   return html;
+}
+
+function renderMermaidBlock(code) {
+  const source = sanitizeMermaidSource(code);
+  if (!source || source.length > 8000) {
+    return `<pre data-language="mermaid"><code>${escapeHtml(source || "图谱内容为空")}</code></pre>`;
+  }
+  return `<section class="chat-mermaid" data-mermaid-source="${escapeAttr(source)}">
+    <div class="chat-mermaid-canvas" aria-label="热点事件图谱"></div>
+    <p class="chat-mermaid-status">正在渲染事件图谱…</p>
+    <details class="chat-mermaid-source"><summary>查看图谱源码</summary><pre data-language="mermaid"><code>${escapeHtml(source)}</code></pre></details>
+  </section>`;
+}
+
+function sanitizeMermaidSource(code) {
+  return String(code || "")
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*(click\s+|%%\{)/i.test(line))
+    .map((line) => line.replace(/<br\s*\/?\s*>/gi, " · ").replace(/<[^>]{1,200}>/g, ""))
+    .join("\n")
+    .trim()
+    .slice(0, 8000);
+}
+
+let mermaidInitialized = false;
+let mermaidSequence = 0;
+
+async function mountMermaidDiagrams(root) {
+  if (!root) return;
+  const diagrams = root.querySelectorAll(".chat-mermaid:not([data-rendered])");
+  if (!diagrams.length) return;
+  if (!window.mermaid) {
+    diagrams.forEach((node) => {
+      node.dataset.rendered = "error";
+      const status = node.querySelector(".chat-mermaid-status");
+      if (status) status.textContent = "图谱渲染组件暂不可用，可展开查看源码。";
+    });
+    return;
+  }
+  if (!mermaidInitialized) {
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "dark",
+      flowchart: { htmlLabels: false, curve: "basis" },
+    });
+    mermaidInitialized = true;
+  }
+  for (const node of diagrams) {
+    node.dataset.rendered = "running";
+    const source = node.dataset.mermaidSource || "";
+    const canvas = node.querySelector(".chat-mermaid-canvas");
+    const status = node.querySelector(".chat-mermaid-status");
+    try {
+      mermaidSequence += 1;
+      const result = await window.mermaid.render(`pna_mermaid_${mermaidSequence}`, source);
+      if (canvas) canvas.innerHTML = result.svg;
+      if (typeof result.bindFunctions === "function" && canvas) result.bindFunctions(canvas);
+      node.dataset.rendered = "done";
+      if (status) status.remove();
+    } catch (error) {
+      node.dataset.rendered = "error";
+      if (status) status.textContent = "图谱语法暂时无法渲染，可展开查看源码。";
+    }
+  }
 }
 
 function isMarkdownTableStart(lines, index) {

@@ -331,11 +331,41 @@ class NewsChatService:
             yield {"type": "trace", "item": {"stage": "定时任务", "status": "completed", "message": schedule_response.context_relation}}
             yield {"type": "final", "response": schedule_response.model_dump(mode="json")}
             return
-        skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope, allow_web_search)
-        if skill_response:
-            self._save_response_turn(skill_response, message, user_id, save_topic, category_scope)
-            yield {"type": "trace", "item": {"stage": "Skill 执行", "status": "completed", "message": skill_response.context_relation}}
-            yield {"type": "final", "response": skill_response.model_dump(mode="json")}
+        if message.strip().startswith("/") and self.skill_registry:
+            skill_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+            async def emit_skill_trace(item: dict[str, Any]) -> None:
+                await skill_queue.put({"type": "trace", "item": item})
+
+            async def run_skill() -> None:
+                try:
+                    response = await self._skill_response(
+                        conv_id,
+                        message,
+                        user_id,
+                        topic,
+                        category_scope,
+                        allow_web_search,
+                        emit_skill_trace,
+                    )
+                    if response:
+                        self._save_response_turn(response, message, user_id, save_topic, category_scope)
+                        await skill_queue.put({"type": "final", "response": response.model_dump(mode="json")})
+                    else:
+                        await skill_queue.put({"type": "error", "message": "Skill 未返回结果。"})
+                except Exception as exc:
+                    await skill_queue.put({"type": "error", "message": str(exc)})
+
+            skill_task = asyncio.create_task(run_skill())
+            try:
+                while True:
+                    event = await skill_queue.get()
+                    yield event
+                    if event["type"] in {"final", "error"}:
+                        break
+            finally:
+                if not skill_task.done():
+                    skill_task.cancel()
             return
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         if topic_response:
@@ -405,6 +435,7 @@ class NewsChatService:
         topic: str | None = None,
         category_scope: list[str] | None = None,
         allow_web_search: bool = False,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> ChatResponse | None:
         text = message.strip()
         if not text.startswith("/") or not self.skill_registry:
@@ -420,6 +451,7 @@ class NewsChatService:
                     topic=topic,
                     category_scope=category_scope,
                     allow_web_search=allow_web_search,
+                    on_trace=on_trace,
                 ),
             )
         except ValueError as exc:
@@ -446,6 +478,9 @@ class NewsChatService:
             category_scope=payload.get("category_scope") or [],
             focus_object=FocusObject(type=focus_type, text=focus_text),
             required_context_items=["skill_registry"],
+            research_trace=payload.get("research_trace") or [],
+            evidence=payload.get("evidence") or [],
+            expanded_queries=payload.get("expanded_queries") or [],
             skill_result={
                 "command": result.command,
                 "title": result.title,
@@ -853,7 +888,7 @@ class NewsChatService:
                 await _add_trace(
                     trace,
                     {
-                        "stage": "CC Runtime 主控",
+                        "stage": "Agent 主控",
                         "status": "running",
                         "message": "正在选择检索词并调用已授权的只读工具。",
                     },
@@ -890,7 +925,7 @@ class NewsChatService:
                     final_trace = [
                         plan_trace,
                         {
-                            "stage": "CC Runtime 主控",
+                            "stage": "Agent 主控",
                             "status": "completed",
                             "message": f"自主执行 {len(runtime_result.queries)} 次只读检索并组织回答。",
                             "count": len(runtime_result.queries),
@@ -908,7 +943,7 @@ class NewsChatService:
                             "message": f"去重后保留 {len(evidence)} 条可引用证据。",
                             "count": len(evidence),
                         },
-                        {"stage": "生成回答", "status": "completed", "message": "CC Runtime 已生成 markdown 回答。"},
+                        {"stage": "生成回答", "status": "completed", "message": "Agent 已生成结构化回答。"},
                     ]
                     if event_line and event_line.get("items"):
                         final_trace.insert(
@@ -940,18 +975,18 @@ class NewsChatService:
                     )
                 runtime_fallback_trace.append(
                     {
-                        "stage": "CC Runtime 主控",
+                        "stage": "Agent 主控",
                         "status": "fallback",
-                        "message": "Runtime 未检索到可引用证据，已回落到原研究流水线。",
+                        "message": "Agent 未检索到可引用证据，已切换到兼容研究流程。",
                     }
                 )
             except Exception as exc:
                 self.store.log("cc_runtime_research", "error", query, {"error_type": type(exc).__name__})
                 runtime_fallback_trace.append(
                     {
-                        "stage": "CC Runtime 主控",
+                        "stage": "Agent 主控",
                         "status": "fallback",
-                        "message": f"Runtime 暂不可用（{type(exc).__name__}），已回落到原研究流水线。",
+                        "message": "Agent 主控暂不可用，已切换到兼容研究流程。",
                     }
                 )
         search_plan = await self._plan_search_query(search_message, topic, query, time_range, allow_web_search)
@@ -989,15 +1024,15 @@ class NewsChatService:
                 },
                 on_trace,
             )
-        await _add_trace(trace, {"stage": "本地召回", "status": "running", "message": "正在查询 ES 和本地新闻库。"}, on_trace)
+        await _add_trace(trace, {"stage": "本地新闻引擎", "status": "running", "message": "正在检索本地新闻与已抓取正文。"}, on_trace)
         local_results = await self.search_service.search(search_query, categories, None, time_range, max_results=18, include_remote=False)
         local_results = _rank_for_chat(_filter_by_time(_enrich_from_store(self.store, local_results), time_range), message)
-        await _add_trace(trace, {"stage": "本地召回", "status": "completed", "message": f"ES/本地库召回 {len(local_results)} 条候选。", "count": len(local_results)}, on_trace)
+        await _add_trace(trace, {"stage": "本地新闻引擎", "status": "completed", "message": f"本地新闻引擎返回 {len(local_results)} 条候选。", "count": len(local_results)}, on_trace)
 
         ingest_payload: dict[str, Any] | None = None
         if self.native_ingestion and allow_web_search:
             try:
-                await _add_trace(trace, {"stage": "源搜索入库", "status": "running", "message": "正在搜索新闻源、抓取正文并写入 URL 管理。"}, on_trace)
+                await _add_trace(trace, {"stage": "新闻源更新", "status": "running", "message": "正在发现新报道并读取正文。"}, on_trace)
                 ingest_payload = await self.native_ingestion.ingest(
                     query=search_query,
                     category_scope=categories,
@@ -1012,34 +1047,32 @@ class NewsChatService:
                 await _add_trace(
                     trace,
                     {
-                        "stage": "源搜索入库",
+                        "stage": "新闻源更新",
                         "status": "completed",
-                        "message": "完成源搜索、URL 入库、正文抓取和索引写入。",
+                        "message": "已完成新报道发现、正文读取与内容更新。",
                         "count": ingest_payload.get("discovered_count", 0),
                         "details": {
                             "discovered": ingest_payload.get("discovered_count", 0),
                             "fetched": ingest_payload.get("fetched_count", 0),
-                            "indexed": ingest_payload.get("indexed_count", 0),
-                            "mysql_ready": ingest_payload.get("mysql_ready"),
-                            "elasticsearch_configured": ingest_payload.get("elasticsearch_configured"),
+                            "available": ingest_payload.get("indexed_count", 0),
                         },
                     },
                     on_trace,
                 )
             except Exception as exc:
-                await _add_trace(trace, {"stage": "源搜索入库", "status": "error", "message": f"源搜索入库失败，继续使用已有证据：{exc}"}, on_trace)
+                await _add_trace(trace, {"stage": "新闻源更新", "status": "error", "message": "新闻源更新暂时失败，继续使用已有证据。"}, on_trace)
         elif self.native_ingestion:
             await _add_trace(
                 trace,
                 {
-                    "stage": "源搜索入库",
+                    "stage": "新闻源更新",
                     "status": "skipped",
                     "message": "联网回答已关闭，跳过新闻源搜索和正文抓取。",
                 },
                 on_trace,
             )
         else:
-            await _add_trace(trace, {"stage": "源搜索入库", "status": "skipped", "message": "当前服务未注入源搜索入库模块。"}, on_trace)
+            await _add_trace(trace, {"stage": "新闻源更新", "status": "skipped", "message": "当前未启用新闻源更新能力。"}, on_trace)
 
         await _add_trace(trace, {"stage": "阅读正文", "status": "running", "message": "正在基于新入库内容重新召回。"}, on_trace)
         refreshed_results = await self.search_service.search(search_query, categories, None, time_range, max_results=24, include_remote=False)
@@ -1050,7 +1083,7 @@ class NewsChatService:
         should_search_external = allow_web_search and self.search_service.external_configured
         if should_search_external:
             try:
-                await _add_trace(trace, {"stage": "联网搜索", "status": "running", "message": "正在查询实时全网搜索。"}, on_trace)
+                await _add_trace(trace, {"stage": "外部搜索工具", "status": "running", "message": "正在检索外部实时信息。"}, on_trace)
                 raw_external_results = await self.search_service.search_external(search_query, categories, None, max_results=8)
                 external_results = raw_external_results
                 if search_plan.required_terms:
@@ -1062,10 +1095,10 @@ class NewsChatService:
                 await _add_trace(
                     trace,
                     {
-                        "stage": "联网搜索",
+                        "stage": "外部搜索工具",
                         "status": "completed",
                         "message": (
-                            f"联网搜索返回 {len(raw_external_results)} 条，"
+                            f"外部搜索工具返回 {len(raw_external_results)} 条，"
                             f"按核心对象保留 {len(external_results)} 条候选。"
                         ),
                         "count": len(external_results),
@@ -1073,7 +1106,7 @@ class NewsChatService:
                     on_trace,
                 )
             except Exception as exc:
-                await _add_trace(trace, {"stage": "联网搜索", "status": "error", "message": f"联网搜索失败，继续使用已有证据：{exc}"}, on_trace)
+                await _add_trace(trace, {"stage": "外部搜索工具", "status": "error", "message": "外部搜索暂时失败，继续使用已有证据。"}, on_trace)
 
         expanded_queries: list[dict[str, Any]] = []
         expansion_results: list[SearchResult] = []
@@ -1414,6 +1447,8 @@ def _decode_json_object(raw: str) -> dict[str, Any]:
 
 
 def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
+    if payload.get("markdown"):
+        return str(payload.get("markdown")).strip()
     if payload.get("verdict"):
         lines = [
             f"## {title}",
@@ -1488,7 +1523,7 @@ def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
 def _skill_context_topic(command: str, payload: dict[str, Any]) -> str | None:
     if command == "/factcheck":
         return payload.get("claim") or None
-    if command in {"/report", "/brief"}:
+    if command in {"/report", "/brief", "/map"}:
         return payload.get("topic") or None
     return None
 
@@ -1951,7 +1986,7 @@ async def _add_trace(
 def _grounded_answer(query: str, message: str, results: list[SearchResult], prefix: str | None = None) -> str:
     if not results:
         lead = f"{prefix}\n\n" if prefix else ""
-        return f"{lead}我现在没有在本地新闻库里找到【{query}】的可靠证据。可以先触发源搜索入库，再继续问我。"
+        return f"{lead}我现在没有在本地新闻引擎里找到【{query}】的可靠证据。可以先更新新闻源，再继续问我。"
     top = results[:5]
     dates = sorted({_date_text(item.published_at) for item in top if _date_text(item.published_at)})
     sources = "、".join(sorted({item.source_id for item in top}))
@@ -1964,7 +1999,7 @@ def _grounded_answer(query: str, message: str, results: list[SearchResult], pref
     lead = prefix + "\n\n" if prefix else ""
     return (
         f"{lead}围绕【{query}】，我现在基于 {len(results)} 条本地证据回答。\n"
-        f"时间覆盖：{dates[0] + ' 至 ' + dates[-1] if dates else '部分来源发布时间未知'}；来源：{sources or '本地库'}。\n\n"
+        f"时间覆盖：{dates[0] + ' 至 ' + dates[-1] if dates else '部分来源发布时间未知'}；来源：{sources or '本地新闻引擎'}。\n\n"
         "当前主要变化：\n"
         + "\n".join(bullets)
         + "\n\n可以继续追问：赛事成绩线、商业/上市传闻线、舆论争议线，或让我把它升级为持续跟踪专题。"
@@ -2144,7 +2179,7 @@ def _related_search_answer(
     lines.append("")
     lines.append("## 证据索引")
     if not evidence:
-        lines.append("暂时没有召回可引用证据。可以打开联网搜索或先做一次源搜索入库，再重新执行 /related。")
+        lines.append("暂时没有召回可引用证据。可以打开外部搜索或先更新一次新闻源，再重新执行 /related。")
         return "\n".join(lines)
     for item in evidence:
         date = item.get("published_at") or "日期未知"
@@ -2514,7 +2549,7 @@ def _research_fallback_answer(
         return (
             f"{lead}## {query}\n\n"
             "当前没有召回到可引用证据，因此不生成事实归纳或泛化列表。\n\n"
-            "可以补充更具体的对象、平台、时间范围，或打开联网搜索后重试。"
+            "可以补充更具体的对象、平台、时间范围，或打开外部搜索后重试。"
         )
     dates = [item.get("published_at") for item in evidence if item.get("published_at")]
     sources = sorted({item.get("source_id") for item in evidence if item.get("source_id")})
@@ -2530,7 +2565,7 @@ def _research_fallback_answer(
     expansions = [item.get("query") for item in expanded_queries[:4] if item.get("query")]
     return (
         f"{lead}## {query}\n\n"
-        f"基于当前召回的 {len(evidence)} 条证据，覆盖来源：{', '.join(sources) or '本地库'}；"
+        f"基于当前召回的 {len(evidence)} 条证据，覆盖来源：{', '.join(sources) or '本地新闻引擎'}；"
         f"时间覆盖：{min(dates)} 至 {max(dates)}。\n\n"
         "### 主要线索\n"
         + "\n".join(bullets)

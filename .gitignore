@@ -66,6 +66,7 @@ db.sqlite3-journal
 personal_news.db
 personal_news.db-journal
 runtime/
+data/cc_runtime/
 .devserver.pid
 .devserver.log
 source_smoke_results.json

@@ -7,6 +7,7 @@ import json
 from personal_news_agent.core.models import NormalizedArticle
 from personal_news_agent.core.text import content_hash
 from personal_news_agent.services.store import NewsStore
+from personal_news_agent.services.cc_runtime import CCRuntimeResult
 from personal_news_agent.services.trending_topics import TrendingTopicBatch, TrendingTopicService, _normalize_batch_payload
 
 
@@ -26,6 +27,34 @@ class FakeTrendingLLM:
 
 class DisabledTrendingLLM:
     configured = False
+
+
+class FakeTrendingCCRuntime:
+    configured = True
+
+    def __init__(self):
+        self.calls = []
+
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        return CCRuntimeResult(
+            answer=json.dumps(
+                {
+                    "topics": [
+                        {
+                            "category": "sports",
+                            "title": "国家队公布世界杯预选赛阵容",
+                            "summary": "多家门户持续报道国家队公布世界杯预选赛参赛阵容。",
+                            "keywords": ["国家队", "世界杯预选赛", "阵容"],
+                            "article_ids": ["sport_1", "sport_2", "sport_3"],
+                            "confidence": 0.95,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            results=[],
+        )
 
 
 def _article(article_id: str, source_id: str, title: str, category: str, age_hours: float) -> NormalizedArticle:
@@ -132,6 +161,31 @@ def test_trending_topics_reject_invented_article_ids_and_fall_back(tmp_path):
     assert result["items"]
     assert result["items"][0]["article_ids"] == ["real_1"]
     assert all("invented_article" not in item["article_ids"] for item in result["items"])
+
+
+def test_trending_topics_prefer_cc_runtime_for_title_clustering(tmp_path):
+    store = _store(tmp_path)
+    for article in (
+        _article("sport_1", "sina", "国家队公布世界杯预选赛最新阵容", "sports", 2.5),
+        _article("sport_2", "sohu", "世界杯预选赛：国家队新阵容公布", "sports", 1.5),
+        _article("sport_3", "cctv", "国家队确认世界杯预选赛参赛阵容", "sports", 0.5),
+    ):
+        store.save_article(article)
+    runtime = FakeTrendingCCRuntime()
+
+    result = asyncio.run(
+        TrendingTopicService(store, llm=DisabledTrendingLLM(), cc_runtime=runtime).recommend(
+            "sports_user",
+            limit=2,
+        )
+    )
+
+    assert result["generation_source"] == "cc_runtime"
+    assert result["items"][0]["article_count"] == 3
+    assert runtime.calls[0]["strict_json_output"] is True
+    assert runtime.calls[0]["allow_web_search"] is False
+    assert runtime.calls[0]["allow_local_search"] is False
+    assert runtime.calls[0]["timeout_seconds"] == 60
 
 
 def test_trending_topics_without_llm_returns_recent_article_fallback(tmp_path):

@@ -195,4 +195,5 @@ class FactCheckResponse(BaseModel):
     source_notes: list[str] = []
     next_checks: list[str] = []
     evidence: list[dict[str, Any]] = []
+    research_trace: list[dict[str, Any]] = []
     agent_source: str = "fallback"

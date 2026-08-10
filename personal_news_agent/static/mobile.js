@@ -369,6 +369,13 @@ async function handleMobileAssistantInput(message) {
       const factCommand = ["/factcheck", claim, category ? `--category ${category}` : ""].filter(Boolean).join(" ");
       return sendChatIntoTurn(factCommand, assistantNode);
     }
+    if (["map", "graph"].includes(command.name)) {
+      applyMobileTopicCommand(command);
+      const mapTopic = commandText(command) || mobileState.topic || "";
+      const category = commandArg(command, "category", "cat") || (mobileState.categoryScope || []).join(",");
+      const mapCommand = ["/map", mapTopic, category ? `--category ${category}` : ""].filter(Boolean).join(" ");
+      return sendChatIntoTurn(mapCommand, assistantNode);
+    }
     if (["feed"].includes(command.name)) {
       mobileCategory = commandArg(command, "cat", "category") || commandText(command) || "";
       mobileState.categoryScope = mobileCategory ? [mobileCategory] : [];
@@ -378,7 +385,7 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/map、/report、/brief、/related。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);

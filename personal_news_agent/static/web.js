@@ -246,15 +246,18 @@ async function handleAssistantInput(message) {
       const category = commandArg(command, "category", "cat") || (consoleState.categoryScope || []).join(",");
       const factCommand = ["/factcheck", claim, category ? `--category ${category}` : ""].filter(Boolean).join(" ");
       return sendChatIntoTurn(factCommand, assistantNode);
-      await applyTopicCommand(command);
-      const result = await generateTopicReport({ chatFollowup: false });
-      setAssistantTurnText(assistantNode, result ? `报告已生成：${result.report_id}` : "报告生成失败。");
-      return result;
+    }
+    if (["map", "graph"].includes(command.name)) {
+      await applyTopicCommand(command, { reload: false });
+      const mapTopic = commandText(command) || consoleState.topic || "";
+      const category = commandArg(command, "category", "cat") || (consoleState.categoryScope || []).join(",");
+      const mapCommand = ["/map", mapTopic, category ? `--category ${category}` : ""].filter(Boolean).join(" ");
+      return sendChatIntoTurn(mapCommand, assistantNode);
     }
     if (["ingest", "source"].includes(command.name)) {
       await applyTopicCommand(command);
       const result = await runNativeIngest();
-      setAssistantTurnText(assistantNode, result ? `源搜索入库完成：${consoleState.topic}` : "源搜索入库失败。");
+      setAssistantTurnText(assistantNode, result ? `新闻源更新完成：${consoleState.topic}` : "新闻源更新失败。");
       return result;
     }
     if (["feed"].includes(command.name)) {
@@ -265,7 +268,7 @@ async function handleAssistantInput(message) {
       return null;
     }
 
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/report、/brief、/related。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/map、/report、/brief、/related。");
 
     return null;
   } catch (error) {
@@ -385,13 +388,11 @@ function applyTaskCommand(command) {
 async function loadSystemStatus() {
   try {
     const data = await request("/api/news/search/backend");
-    const es = data.elasticsearch || {};
-    const urlStore = data.crawl_url_store || {};
-    document.querySelector("[data-es-status]").textContent = `ES ${es.ready ? "ready" : "down"} · ${es.cluster_status || "--"}`;
-    document.querySelector("[data-mysql-status]").textContent = `MySQL ${urlStore.mysql_ready ? "ready" : "down"}`;
+    document.querySelector("[data-es-status]").textContent = "本地新闻引擎 可用";
+    document.querySelector("[data-mysql-status]").textContent = `外部搜索工具 ${data.external_search_available ? "可用" : "未配置"}`;
   } catch (error) {
-    document.querySelector("[data-es-status]").textContent = "ES --";
-    document.querySelector("[data-mysql-status]").textContent = "MySQL --";
+    document.querySelector("[data-es-status]").textContent = "本地新闻引擎 暂不可用";
+    document.querySelector("[data-mysql-status]").textContent = "外部搜索工具 暂不可用";
   }
 }
 
@@ -594,7 +595,7 @@ async function loadTopicView() {
 }
 
 async function runNativeIngest() {
-  setStatus("源搜索入库中。");
+  setStatus("正在更新新闻源。");
   const button = document.querySelector("#nativeIngest");
   button.disabled = true;
   try {

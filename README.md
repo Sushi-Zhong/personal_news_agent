@@ -443,7 +443,7 @@ export TAVILY_TRUST_ENV=0
 ```
 
 聊天研究链路会在问题包含“今天、最新、实时、天气”等时效意图，或本地候选少于 3 条时调用一次外部搜索；普通且本地证据充足的问题不会消耗外部搜索额度。
-`/factcheck 待核查说法` 是例外：它每次都会独立调用一次外部 Web Search，并把联网结果与本地新闻证据去重合并后交给大模型统一汇总和判定，不受聊天页“联网回答”开关影响。未配置 provider 或搜索失败时，结果会明确标注联网证据不可用，不会伪装成已完成联网核查。
+`/factcheck 待核查说法` 是例外：它由 CC 加载项目级事实核查 Skill，先查本地新闻引擎，再按需调用外部搜索工具，并将多源结果去重后交给 DeepSeek V4 Flash 统一汇总和判定。未配置独立 provider 时，可由 CC 内置外部搜索能力补位；搜索失败时会明确回退，不会伪装成已完成联网核查。
 `TAVILY_TRUST_ENV=0` 默认忽略系统代理；只有确认本机 HTTP/SOCKS 代理可供 `httpx` 使用时才改为 `1`。
 
 检查后端：
@@ -458,7 +458,16 @@ curl http://127.0.0.1:8000/api/news/search/backend
 
 ## CC Runtime 主控（实验分支）
 
-研究型对话可以由 Claude Agent SDK Runtime 主控。Runtime 不直接访问数据库、文件或 Shell，只能调用应用提供的两个进程内只读工具：`local_news_search` 和 `web_search`。本地搜索始终可用；外部搜索仍同时受用户本轮“联网回答”开关和 `EXTERNAL_SEARCH_PROVIDER` 配置约束。工具结果会回填原有 `recommendations`、`evidence`、`research_trace`、`event_line` 和 Markdown 回答结构，前后端协议不变。
+研究型对话由 Claude Agent SDK Runtime 主控，实际运行模型统一为 DeepSeek V4 Flash。Runtime 不直接访问数据库、文件或 Shell，只能加载白名单内的项目级 Skill，并调用应用提供的只读本地新闻引擎与外部搜索工具。普通对话的外部搜索受本轮“联网回答”开关约束；事实核查默认主动核验。工具结果会回填原有 `recommendations`、`evidence`、`research_trace`、`event_line` 和 Markdown 回答结构，前后端协议不变。
+
+项目级 CC Skill 位于 `.claude/skills/`：
+
+- `news-fact-check`：拆分原子命题、区分直接/间接证据并输出保守判定；
+- `hot-event-map`：检索主体、时间线、因果与影响关系，输出受限且可渲染的 Mermaid 图谱。
+
+前端命令分别为 `/factcheck <说法>` 和 `/map <热点事件>`。用户可见执行过程只展示“本地新闻引擎”和“外部搜索工具”等产品级步骤，不显示具体存储或检索实现。
+
+自动热点聚合也优先由 CC 执行：后台每 15 分钟读取最近 24 小时标题窗口，将同一具体事件按文章 ID 合并，再由系统根据跨来源数量、最近 6 小时刷新次数与时效性计算热度。CC 聚合超时或输出不满足约束时立即退回已有的确定性推荐，不阻塞抓取进程。
 
 该实验分支默认启用 Runtime；缺少 SDK 或凭据时不会发起调用，而是自动使用原流水线。可在 `.env` 显式配置或用 `PNA_CC_RUNTIME_ENABLED=0` 关闭：
 
@@ -469,6 +478,7 @@ PNA_CC_RUNTIME_AUTH_TOKEN=...
 PNA_CC_RUNTIME_MODEL=deepseek-v4-flash
 PNA_CC_RUNTIME_MAX_TURNS=6
 PNA_CC_RUNTIME_TIMEOUT_SECONDS=150
+PNA_CC_RUNTIME_BUILTIN_WEB_SEARCH=1
 ```
 
 当 `PNA_LLM_ENDPOINT` 使用 DashScope 时，Runtime 默认使用对应的 Anthropic 兼容端点，并可安全复用 `PNA_LLM_KEY`；其他 OpenAI-compatible 端点不会被自动当成 Anthropic Runtime 端点。Runtime SDK 缺失、未配置、超时、报错或没有检索到证据时，服务会回落到原研究流水线。

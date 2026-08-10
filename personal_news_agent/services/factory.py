@@ -47,9 +47,15 @@ def build_services(settings: Settings) -> dict[str, Any]:
     llm_client = LLMClient(settings)
     cc_runtime = CCRuntimeOrchestrator(store, search_service, settings)
     reports = ReportGenerationService(store, search_service, local_agent=local_agent)
-    factcheck = FactCheckService(store, search_service, local_agent=local_agent, llm_client=llm_client)
+    factcheck = FactCheckService(
+        store,
+        search_service,
+        local_agent=local_agent,
+        llm_client=llm_client,
+        cc_runtime=cc_runtime,
+    )
     topic_summary = TopicSummaryService(store, search_service)
-    trending_topics = TrendingTopicService(store)
+    trending_topics = TrendingTopicService(store, llm=llm_client, cc_runtime=cc_runtime)
     tasks = ScheduledTaskService(store, reports, search_service=search_service, native_ingestion=native_ingestion)
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
     content_moderation = TextModerationPlusService()

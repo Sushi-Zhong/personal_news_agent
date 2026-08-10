@@ -22,6 +22,7 @@ class FactCheckSkill:
             claim=claim,
             category_scope=_categories(options.get("category")),
             include_remote=True,
+            on_trace=context.on_trace,
         )
         payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else dict(result)
         return SkillResult(

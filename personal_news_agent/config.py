@@ -96,6 +96,7 @@ class Settings:
     )
     cc_runtime_timeout_seconds: float = float(os.getenv("PNA_CC_RUNTIME_TIMEOUT_SECONDS", "150"))
     cc_runtime_allow_existing_login: bool = os.getenv("PNA_CC_RUNTIME_ALLOW_EXISTING_LOGIN", "0") == "1"
+    cc_runtime_builtin_web_search: bool = os.getenv("PNA_CC_RUNTIME_BUILTIN_WEB_SEARCH", "1") == "1"
     cc_runtime_config_dir: Path = Path(
         os.getenv("PNA_CC_RUNTIME_CONFIG_DIR", str(BASE_DIR / "data" / "cc_runtime"))
     ).expanduser()

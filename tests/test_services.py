@@ -51,6 +51,7 @@ from personal_news_agent.services.topic_agent import TopicAgentService
 from personal_news_agent.services.topic_summary import TopicSummaryOutput, TopicSummaryService
 from personal_news_agent.services.topic_views import TopicViewService
 from personal_news_agent.skills.registry import build_default_registry
+from personal_news_agent.skills.hot_event_map import _sanitize_event_map_markdown
 
 
 @pytest.fixture()
@@ -384,7 +385,7 @@ def test_chat_source_ingestion_requires_explicit_permission(services):
     chat = NewsChatService(store, search, llm_client=FakeDisabledLLM(), native_ingestion=ingestion)
     disabled = asyncio.run(chat._research_chat("offline", "上海天气", allow_web_search=False))
     assert ingestion.calls == 0
-    assert any(item["stage"] == "源搜索入库" and item["status"] == "skipped" for item in disabled.research_trace)
+    assert any(item["stage"] == "新闻源更新" and item["status"] == "skipped" for item in disabled.research_trace)
 
     asyncio.run(chat._research_chat("online", "上海天气", allow_web_search=True))
     assert ingestion.calls == 1
@@ -412,7 +413,7 @@ def test_research_always_uses_external_search_when_web_enabled(services):
     response = asyncio.run(chat._research_chat("external_required_conv", "证监会在2026年做了什么事", allow_web_search=True))
 
     assert search.external_calls
-    assert any(item["stage"] == "联网搜索" and item["status"] == "completed" for item in response.research_trace)
+    assert any(item["stage"] == "外部搜索工具" and item["status"] == "completed" for item in response.research_trace)
 
 
 def test_research_does_not_use_external_search_when_web_disabled(services):
@@ -423,7 +424,7 @@ def test_research_does_not_use_external_search_when_web_disabled(services):
     response = asyncio.run(chat._research_chat("external_disabled_conv", "证监会在2026年做了什么事", allow_web_search=False))
 
     assert search.external_calls == []
-    assert not any(item["stage"] == "联网搜索" for item in response.research_trace)
+    assert not any(item["stage"] == "外部搜索工具" for item in response.research_trace)
 
 
 def test_cc_runtime_search_tools_use_existing_local_and_web_services(services):
@@ -445,7 +446,7 @@ def test_cc_runtime_search_tools_use_existing_local_and_web_services(services):
     assert search.external_calls
     assert [item.origin for item in context.results] == ["local", "external"]
     assert [item["origin"] for item in context.queries] == ["local", "web"]
-    assert [item["stage"] for item in emitted] == ["CC Runtime 本地搜索", "CC Runtime 联网搜索"]
+    assert [item["stage"] for item in emitted] == ["本地新闻引擎", "外部搜索工具"]
 
 
 def test_cc_runtime_web_tool_refuses_unapproved_web_search(services):
@@ -479,6 +480,8 @@ def test_cc_runtime_options_expose_only_read_only_news_tools(services, tmp_path)
 
     assert options.tools == []
     assert options.allowed_tools == [LOCAL_TOOL_NAME]
+    assert options.setting_sources == ["project"]
+    assert options.skills == []
     assert WEB_TOOL_NAME not in options.allowed_tools
     assert "Bash" in options.disallowed_tools
     assert "Write" in options.disallowed_tools
@@ -493,6 +496,32 @@ def test_cc_runtime_options_expose_only_read_only_news_tools(services, tmp_path)
         runtime.settings,
     ).build_options(web_context)
     assert web_options.allowed_tools == [LOCAL_TOOL_NAME, WEB_TOOL_NAME]
+
+    skill_options = runtime.build_options(context, ["news-fact-check"])
+    assert skill_options.tools == ["Skill"]
+    assert skill_options.skills == ["news-fact-check"]
+    assert skill_options.allowed_tools == ["Skill", LOCAL_TOOL_NAME]
+    assert "Skill" not in skill_options.disallowed_tools
+
+    builtin_web_context = RuntimeSearchContext(store, search, ["tech"], None, allow_web_search=True)
+    builtin_web_options = runtime.build_options(builtin_web_context, ["news-fact-check"])
+    assert builtin_web_options.tools == ["Skill", "WebSearch"]
+    assert builtin_web_options.allowed_tools == ["Skill", LOCAL_TOOL_NAME, "WebSearch"]
+    assert "WebSearch" not in builtin_web_options.disallowed_tools
+
+    with pytest.raises(ValueError, match="Unsupported project skill"):
+        runtime.build_options(context, ["arbitrary-skill"])
+
+    no_local_context = RuntimeSearchContext(
+        store,
+        search,
+        ["tech"],
+        None,
+        allow_web_search=False,
+        allow_local_search=False,
+    )
+    no_local_options = runtime.build_options(no_local_context)
+    assert no_local_options.allowed_tools == []
 
 
 def test_cc_runtime_run_normalizes_sdk_result_without_changing_business_schema(services, tmp_path):
@@ -552,7 +581,7 @@ def test_research_chat_uses_cc_runtime_without_changing_response_contract(servic
     assert response.recommendations
     assert response.evidence
     assert response.expanded_queries[0]["origin"] == "local"
-    assert any(item["stage"] == "CC Runtime 主控" for item in response.research_trace)
+    assert any(item["stage"] == "Agent 主控" for item in response.research_trace)
 
 
 def test_research_chat_stream_emits_public_harness_execution_steps(services):
@@ -578,7 +607,7 @@ def test_research_chat_stream_emits_public_harness_execution_steps(services):
 
     assert events[0]["type"] == "start"
     assert any(item["stage"] == "分析计划" for item in trace_items)
-    assert any(item["stage"] == "CC Runtime 主控" and item["status"] == "running" for item in trace_items)
+    assert any(item["stage"] == "Agent 主控" and item["status"] == "running" for item in trace_items)
     assert any(item["stage"] == "证据合并" for item in trace_items)
     assert events[-1]["type"] == "final"
     final_trace = events[-1]["response"]["research_trace"]
@@ -601,7 +630,7 @@ def test_research_chat_falls_back_when_cc_runtime_fails(services):
     )
 
     assert response.context_relation != "research_pipeline_cc_runtime"
-    assert any(item["stage"] == "CC Runtime 主控" and item["status"] == "fallback" for item in response.research_trace)
+    assert any(item["stage"] == "Agent 主控" and item["status"] == "fallback" for item in response.research_trace)
 
 
 def test_web_regular_chat_does_not_auto_create_topic_card():
@@ -677,11 +706,12 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     mobile_html = Path("personal_news_agent/static/mobile.html").read_text()
 
     assert "/check" not in commands
+    assert "/map" in commands
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260810-harness-run-ui-2" in home_source
-    assert "styles.css?v=20260810-harness-run-ui-2" in home_html
+    assert "20260810-cc-skills-1" in home_source
+    assert "styles.css?v=20260810-cc-skills-1" in home_html
     assert "shared.js?v=20260810-phone-controls-2" in mobile_html
 
 
@@ -2035,7 +2065,7 @@ def test_factcheck_falls_back_when_agent_fails(services):
     assert result.agent_source == "fallback"
     assert result.verdict == "insufficient"
     assert result.evidence
-    assert any("外部 Web Search" in note for note in result.source_notes)
+    assert any("外部搜索工具" in note for note in result.source_notes)
 
 
 def test_factcheck_falls_back_to_structured_llm_summary(services):
@@ -2153,7 +2183,63 @@ def test_factcheck_skill_always_uses_direct_web_search(services):
     assert response.context_relation == "skill:/factcheck"
     assert search.calls[0]["include_remote"] is False
     assert search.external_calls
-    assert any("外部 Web Search 返回 1 条" in note for note in response.skill_result["data"]["source_notes"])
+    assert any("外部搜索工具返回 1 条" in note for note in response.skill_result["data"]["source_notes"])
+
+
+def test_factcheck_prefers_cc_project_skill_and_maps_url_evidence(services):
+    _, store, search = services
+    runtime = FakeProjectSkillCCRuntime()
+    factcheck = FactCheckService(store, search, cc_runtime=runtime)
+
+    result = asyncio.run(factcheck.run("default", "AI Agent 产品更新带动开发工具竞争", ["tech"]))
+
+    assert result.agent_source == "cc_runtime"
+    assert result.verdict == "supported"
+    assert result.supporting_evidence[0]["url"] == "https://runtime.example/factcheck"
+    assert runtime.skill_names == ["news-fact-check"]
+    assert any(item["stage"] == "事实核查" and item["status"] == "completed" for item in result.research_trace)
+
+
+def test_hot_event_map_skill_returns_mermaid_markdown_and_stream_trace(services):
+    _, store, search = services
+    runtime = FakeProjectSkillCCRuntime()
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"cc_runtime": runtime, "search": search},
+    )
+
+    async def collect_events():
+        return [
+            event
+            async for event in chat.chat_events(
+                "map_skill_conv",
+                "/map AI Agent 产品更新 --category tech",
+                user_id="default",
+                allow_web_search=True,
+            )
+        ]
+
+    events = asyncio.run(collect_events())
+    response = events[-1]["response"]
+
+    assert response["context_relation"] == "skill:/map"
+    assert "```mermaid" in response["markdown"]
+    assert response["skill_result"]["data"]["agent_source"] == "cc_runtime"
+    assert runtime.skill_names == ["hot-event-map"]
+    assert any(event["type"] == "trace" and event["item"]["stage"] == "本地新闻引擎" for event in events)
+
+
+def test_hot_event_map_sanitizes_mermaid_html_and_interaction_directives():
+    markdown = "## 事件图谱\n\n```mermaid\nflowchart LR\nA[\"节点<br/>下一行\"]\nclick A javascript:alert(1)\n```"
+
+    cleaned = _sanitize_event_map_markdown(markdown)
+
+    assert "<br" not in cleaned
+    assert "click A" not in cleaned
+    assert "javascript:" not in cleaned
+    assert "节点 · 下一行" in cleaned
 
 
 def test_report_cleans_polluted_factcheck_title(services):
@@ -2782,12 +2868,70 @@ class FakeCCRuntime:
             queries=[{"query": "AI Agent 最近变化", "origin": "local", "result_count": 1}],
             trace=[
                 {
-                    "stage": "CC Runtime 本地搜索",
+                    "stage": "本地新闻引擎",
                     "status": "completed",
                     "message": "检索返回 1 条候选。",
                     "count": 1,
                 }
             ],
+        )
+
+
+class FakeProjectSkillCCRuntime:
+    configured = True
+
+    def __init__(self):
+        self.skill_names = None
+
+    async def run(self, **kwargs):
+        self.skill_names = kwargs.get("skill_names")
+        trace = {
+            "stage": "本地新闻引擎",
+            "status": "completed",
+            "message": "检索返回 1 条候选。",
+            "count": 1,
+        }
+        if kwargs.get("on_trace"):
+            await kwargs["on_trace"](trace)
+        result = SearchResult(
+            source_id="runtime.local",
+            title="AI Agent 产品更新",
+            url="https://runtime.example/factcheck",
+            summary="产品更新已经发布。",
+            category="tech",
+            published_at=datetime.now(timezone.utc),
+            score=1.0,
+            origin="local",
+        )
+        if self.skill_names == ["news-fact-check"]:
+            answer = json.dumps(
+                {
+                    "verdict": "supported",
+                    "confidence": 0.86,
+                    "summary": "直接报道支持该说法。",
+                    "supporting_evidence": [
+                        {"url": "https://runtime.example/factcheck", "title": "AI Agent 产品更新"}
+                    ],
+                    "contradicting_evidence": [],
+                    "missing_evidence": [],
+                    "source_notes": ["当前保留一条直接报道。"],
+                    "next_checks": ["继续观察后续公告。"],
+                },
+                ensure_ascii=False,
+            )
+        else:
+            answer = (
+                "## 事件图谱\n\n```mermaid\nflowchart LR\n"
+                '  event["AI Agent 产品更新"] --> impact["开发工具竞争"]\n'
+                "```\n\n## 关键解读\n\n- 产品更新推动竞争。\n\n"
+                "## 证据来源\n\n- [AI Agent 产品更新](https://runtime.example/factcheck)\n\n"
+                "## 不确定性\n\n- 后续影响仍待观察。"
+            )
+        return CCRuntimeResult(
+            answer=answer,
+            results=[result],
+            queries=[{"query": kwargs["query"], "origin": "local", "result_count": 1}],
+            trace=[trace],
         )
 
 

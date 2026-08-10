@@ -1,0 +1,4 @@
+interface:
+  display_name: "热点事件图谱"
+  short_description: "检索热点事件的主体、时间线与影响关系，并生成可渲染的证据化图谱"
+  default_prompt: "Use $hot-event-map to research this event and produce an evidence-grounded Mermaid graph."

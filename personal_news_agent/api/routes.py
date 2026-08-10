@@ -43,7 +43,7 @@ from personal_news_agent.services.report_export import export_report
 from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL
 
 
-FRONTEND_REVISION = "20260810-harness-run-ui-2"
+FRONTEND_REVISION = "20260810-cc-skills-1"
 NO_CACHE_PAGE_HEADERS = {
     "Cache-Control": "no-store, max-age=0",
     "X-PNA-Frontend-Revision": FRONTEND_REVISION,
@@ -446,6 +446,13 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             "primary_recall_backend": "elasticsearch" if search_index.configured else "sqlite_fts",
             "external_provider": settings.external_search_provider,
             "external_configured": search_service.external_configured,
+            "external_search_available": bool(
+                search_service.external_configured
+                or (
+                    getattr(services.get("cc_runtime"), "configured", False)
+                    and settings.cc_runtime_builtin_web_search
+                )
+            ),
             "elasticsearch": await search_index.health(),
             "crawl_url_store": {
                 "backend": settings.crawl_url_backend,

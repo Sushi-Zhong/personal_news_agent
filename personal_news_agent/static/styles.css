@@ -919,6 +919,49 @@ input {
   padding: 0;
 }
 
+.chat-mermaid {
+  background: linear-gradient(145deg, rgba(12, 31, 48, 0.98), rgba(8, 24, 38, 0.96));
+  border: 1px solid rgba(69, 190, 232, 0.3);
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+  margin: 4px 0;
+  min-width: 0;
+  overflow: hidden;
+  padding: 14px;
+}
+
+.chat-mermaid-canvas {
+  min-height: 160px;
+  overflow-x: auto;
+  width: 100%;
+}
+
+.chat-mermaid-canvas svg {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+  max-height: 640px;
+  max-width: 100%;
+}
+
+.chat-mermaid-status {
+  color: #9db2c8 !important;
+  font-size: 12px !important;
+}
+
+.chat-mermaid-source {
+  border-top: 1px solid rgba(132, 176, 205, 0.18);
+  color: #9db2c8;
+  font-size: 12px;
+  padding-top: 8px;
+}
+
+.chat-mermaid-source summary {
+  cursor: pointer;
+  user-select: none;
+}
+
 .assistant-markdown .markdown-table-wrap {
   overflow-x: auto;
   width: 100%;

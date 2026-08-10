@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Awaitable, Callable, Protocol
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class SkillContext:
     topic: str | None = None
     category_scope: list[str] | None = None
     allow_web_search: bool = False
+    on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
