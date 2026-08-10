@@ -442,8 +442,8 @@ export TAVILY_SEARCH_DEPTH=basic
 export TAVILY_TRUST_ENV=0
 ```
 
-聊天研究链路会在问题包含“今天、最新、实时、天气”等时效意图，或本地候选少于 3 条时调用一次外部搜索；普通且本地证据充足的问题不会消耗外部搜索额度。
-`/factcheck 待核查说法` 是例外：它由 CC 加载项目级事实核查 Skill，先查本地新闻引擎，再按需调用外部搜索工具，并将多源结果去重后交给 DeepSeek V4 Flash 统一汇总和判定。未配置独立 provider 时，可由 CC 内置外部搜索能力补位；搜索失败时会明确回退，不会伪装成已完成联网核查。
+聊天研究链路默认启用联网：每个普通对话由 CC 加载通用新闻研究 Skill，先检索本地新闻，再至少调用一次 CC 自带 `WebSearch` 核对最新外部信息。若用户手动关闭“联网回答”，本轮严格只使用本地证据；后台自动热点聚合也保持离线，不消耗联网额度。
+`/factcheck 待核查说法` 由 CC 加载项目级事实核查 Skill，先查本地新闻引擎，再用 CC 自带 `WebSearch` 做多源核验，并将结果去重后交给 DeepSeek V4 Flash 统一汇总和判定。搜索失败时会明确回退，不会伪装成已完成联网核查。
 `TAVILY_TRUST_ENV=0` 默认忽略系统代理；只有确认本机 HTTP/SOCKS 代理可供 `httpx` 使用时才改为 `1`。
 
 检查后端：
@@ -458,10 +458,11 @@ curl http://127.0.0.1:8000/api/news/search/backend
 
 ## CC Runtime 主控（实验分支）
 
-研究型对话由 Claude Agent SDK Runtime 主控，实际运行模型统一为 DeepSeek V4 Flash。Runtime 不直接访问数据库、文件或 Shell，只能加载白名单内的项目级 Skill，并调用应用提供的只读本地新闻引擎与外部搜索工具。普通对话的外部搜索受本轮“联网回答”开关约束；事实核查默认主动核验。工具结果会回填原有 `recommendations`、`evidence`、`research_trace`、`event_line` 和 Markdown 回答结构，前后端协议不变。
+研究型对话由 Claude Agent SDK Runtime 主控，实际运行模型统一为 DeepSeek V4 Flash。Runtime 不直接访问数据库、文件或 Shell，只能加载白名单内的项目级 Skill，并调用应用提供的只读本地新闻引擎与外部搜索工具。普通对话默认联网，且完成回答前必须观察到 CC 自带 `WebSearch` 的真实调用；首轮跳过时会自动补充一轮搜索。工具结果会回填原有 `recommendations`、`evidence`、`research_trace`、`event_line` 和 Markdown 回答结构，前后端协议不变。
 
 项目级 CC Skill 位于 `.claude/skills/`：
 
+- `news-conversation-research`：承接每个普通提问和追问，以自然对话开场，并按事件需要组织现状、人物、时间线、争议、影响和后续观察章节；
 - `news-fact-check`：拆分原子命题、区分直接/间接证据并输出保守判定；
 - `hot-event-map`：检索主体、时间线、因果与影响关系，输出受限且可渲染的 Mermaid 图谱。
 

@@ -29,7 +29,7 @@ def test_shared_client_preserves_pna_prefix_for_api_requests():
     auth = (STATIC_DIR / "auth.html").read_text(encoding="utf-8")
     auth_script = (STATIC_DIR / "auth.js").read_text(encoding="utf-8")
     mobile_script = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
-    assert "home.js?v=20260810-cc-skills-1" in home
+    assert "home.js?v=20260810-dialogue-skill-2" in home
     assert "shared.js?v=20260810-phone-controls-2" in auth
     assert "ensureRegistrationChallenge(form, status)" in auth_script
     assert "ensureRegistrationChallenge(form, status)" in mobile_script
@@ -47,7 +47,7 @@ def test_server_templates_keep_nginx_and_web_port_aligned():
 
 def test_html_routes_disable_cache_and_expose_frontend_revision():
     routes = (ROOT / "personal_news_agent" / "api" / "routes.py").read_text(encoding="utf-8")
-    assert 'FRONTEND_REVISION = "20260810-cc-skills-1"' in routes
+    assert 'FRONTEND_REVISION = "20260810-dialogue-skill-2"' in routes
     assert '"Cache-Control": "no-store, max-age=0"' in routes
     assert '"frontend_revision": FRONTEND_REVISION' in routes
 
@@ -55,7 +55,7 @@ def test_html_routes_disable_cache_and_expose_frontend_revision():
 def test_console_theme_has_dark_drawers_readable_content_and_responsive_rails():
     styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
     home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
-    assert "styles.css?v=20260810-cc-skills-1" in home
+    assert "styles.css?v=20260810-dialogue-skill-2" in home
     assert ".console-shell .agent-drawer" in styles
     assert "background: rgba(10, 28, 45, 0.96)" in styles
     assert ".console-shell .assistant-markdown h3" in styles
@@ -76,7 +76,10 @@ def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_lay
     assert "margin-top: auto;" in styles
     assert "grid-template-columns: auto 168px" in styles
     assert ".console-shell .turn-actions button" in styles
-    assert "Agent 执行过程" in shared
+    assert "本轮过程" in shared
+    assert "assistantIdentityHtml" in shared
+    assert "mountAssistantSections" in shared
+    assert ".assistant-markdown > .answer-section" in styles
     assert "mergePublicExecutionTrace" in shared
     assert "upsertResearchTrace" in shared
     assert 'role="listitem"' in shared
@@ -92,6 +95,15 @@ def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_lay
     assert "外部搜索工具 --" in home
     assert "ES --" not in home
     assert "MySQL --" not in home
+
+
+def test_chat_web_search_is_enabled_by_default_but_remains_user_controllable():
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+
+    assert "savedWebSearchPreference === null ? true" in shared
+    assert "localStorage.setItem(webSearchPreferenceKey()" in shared
+    assert home.count("data-web-search-toggle checked") == 2
 
 
 def test_chat_model_selector_is_logical_and_sent_with_each_chat_request():

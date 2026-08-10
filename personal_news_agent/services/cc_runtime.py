@@ -6,6 +6,7 @@ from datetime import datetime
 import importlib.util
 import json
 from pathlib import Path
+import re
 from typing import Any, Awaitable, Callable
 
 from personal_news_agent.config import BASE_DIR, Settings
@@ -20,7 +21,10 @@ LOCAL_TOOL_NAME = "mcp__pna_news__local_news_search"
 WEB_TOOL_NAME = "mcp__pna_news__web_search"
 FACTCHECK_SKILL_NAME = "news-fact-check"
 HOT_EVENT_MAP_SKILL_NAME = "hot-event-map"
-ALLOWED_PROJECT_SKILLS = frozenset({FACTCHECK_SKILL_NAME, HOT_EVENT_MAP_SKILL_NAME})
+NEWS_CONVERSATION_RESEARCH_SKILL_NAME = "news-conversation-research"
+ALLOWED_PROJECT_SKILLS = frozenset(
+    {FACTCHECK_SKILL_NAME, HOT_EVENT_MAP_SKILL_NAME, NEWS_CONVERSATION_RESEARCH_SKILL_NAME}
+)
 DISALLOWED_BUILTIN_TOOLS = [
     "AskUserQuestion",
     "Bash",
@@ -240,55 +244,90 @@ class CCRuntimeOrchestrator:
         answer_parts: list[str] = []
         result_metadata: dict[str, Any] = {}
         builtin_web_calls = 0
+        require_builtin_web_search = bool(
+            allow_web_search and self.settings.cc_runtime_builtin_web_search
+        )
         try:
             async with asyncio.timeout(timeout_seconds or self.settings.cc_runtime_timeout_seconds):
                 async with client_factory(options=options) as client:
-                    await client.query(prompt)
-                    async for sdk_message in client.receive_response():
-                        class_name = type(sdk_message).__name__
-                        if class_name == "AssistantMessage":
-                            for block in getattr(sdk_message, "content", []) or []:
-                                if type(block).__name__ == "TextBlock" and getattr(block, "text", ""):
-                                    answer_parts.append(str(block.text))
-                                elif type(block).__name__ == "ToolUseBlock" and getattr(block, "name", "") == "WebSearch":
-                                    builtin_web_calls += 1
-                                    trace_item = {
-                                        "stage": "外部搜索工具",
-                                        "status": "running",
-                                        "message": "正在检索外部实时信息。",
-                                    }
-                                    context.trace.append(trace_item)
-                                    await context._notify_last_trace()
-                        elif class_name == "ResultMessage":
-                            if bool(getattr(sdk_message, "is_error", False)):
-                                errors = getattr(sdk_message, "errors", None)
-                                error_detail = str(getattr(sdk_message, "result", "") or "").strip()
-                                if not error_detail and isinstance(errors, list):
-                                    error_detail = "; ".join(str(item) for item in errors if item)[:1_000]
-                                if not error_detail:
-                                    status = getattr(sdk_message, "api_error_status", None)
-                                    subtype = str(getattr(sdk_message, "subtype", "") or "")
-                                    error_detail = f"CC Runtime failed ({subtype or 'unknown'}, status={status})"
-                                raise CCRuntimeError(error_detail)
-                            final_text = str(getattr(sdk_message, "result", "") or "").strip()
-                            if final_text:
-                                answer_parts = [final_text]
-                            result_metadata = {
-                                "runtime": "claude-agent-sdk",
-                                "session_id": str(getattr(sdk_message, "session_id", "") or ""),
-                                "num_turns": int(getattr(sdk_message, "num_turns", 0) or 0),
-                                "duration_ms": int(getattr(sdk_message, "duration_ms", 0) or 0),
-                                "total_cost_usd": getattr(sdk_message, "total_cost_usd", None),
+                    attempts = 2 if require_builtin_web_search else 1
+                    source_links_present = False
+                    for attempt in range(attempts):
+                        if attempt == 0:
+                            await client.query(prompt)
+                        else:
+                            retry_trace = {
+                                "stage": "外部搜索工具",
+                                "status": "running",
+                                "message": "首轮未执行实时检索，正在补充外部证据后重新汇总。",
                             }
-                            if builtin_web_calls:
-                                completed = {
-                                    "stage": "外部搜索工具",
-                                    "status": "completed",
-                                    "message": f"已完成 {builtin_web_calls} 次外部证据检索。",
-                                    "count": builtin_web_calls,
+                            context.trace.append(retry_trace)
+                            await context._notify_last_trace()
+                            correction = (
+                                "上一轮没有调用 WebSearch。现在必须先调用 CC 自带的 WebSearch 至少一次，"
+                                "核对最新外部信息，然后重新输出完整最终答案。"
+                            )
+                            await client.query(f"{correction}继续遵守原任务的 Skill 和输出格式。")
+                        attempt_answer_parts: list[str] = []
+                        async for sdk_message in client.receive_response():
+                            class_name = type(sdk_message).__name__
+                            if class_name == "AssistantMessage":
+                                for block in getattr(sdk_message, "content", []) or []:
+                                    if type(block).__name__ == "TextBlock" and getattr(block, "text", ""):
+                                        attempt_answer_parts.append(str(block.text))
+                                    elif type(block).__name__ == "ToolUseBlock" and getattr(block, "name", "") == "WebSearch":
+                                        builtin_web_calls += 1
+                                        trace_item = {
+                                            "stage": "外部搜索工具",
+                                            "status": "running",
+                                            "message": "正在检索外部实时信息。",
+                                        }
+                                        context.trace.append(trace_item)
+                                        await context._notify_last_trace()
+                            elif class_name == "ResultMessage":
+                                if bool(getattr(sdk_message, "is_error", False)):
+                                    errors = getattr(sdk_message, "errors", None)
+                                    error_detail = str(getattr(sdk_message, "result", "") or "").strip()
+                                    if not error_detail and isinstance(errors, list):
+                                        error_detail = "; ".join(str(item) for item in errors if item)[:1_000]
+                                    if not error_detail:
+                                        status = getattr(sdk_message, "api_error_status", None)
+                                        subtype = str(getattr(sdk_message, "subtype", "") or "")
+                                        error_detail = f"CC Runtime failed ({subtype or 'unknown'}, status={status})"
+                                    raise CCRuntimeError(error_detail)
+                                final_text = str(getattr(sdk_message, "result", "") or "").strip()
+                                if final_text:
+                                    attempt_answer_parts = [final_text]
+                                result_metadata = {
+                                    "runtime": "claude-agent-sdk",
+                                    "session_id": str(getattr(sdk_message, "session_id", "") or ""),
+                                    "num_turns": int(getattr(sdk_message, "num_turns", 0) or 0),
+                                    "duration_ms": int(getattr(sdk_message, "duration_ms", 0) or 0),
+                                    "total_cost_usd": getattr(sdk_message, "total_cost_usd", None),
                                 }
-                                context.trace.append(completed)
-                                await context._notify_last_trace()
+                        answer_parts = attempt_answer_parts
+                        source_links_present = _contains_source_url("\n".join(answer_parts))
+                        if not require_builtin_web_search or builtin_web_calls:
+                            break
+                    if require_builtin_web_search and not builtin_web_calls:
+                        raise CCRuntimeError("CC Runtime did not execute the required WebSearch")
+                    if builtin_web_calls:
+                        completed = {
+                            "stage": "外部搜索工具",
+                            "status": "completed",
+                            "message": f"已完成 {builtin_web_calls} 次外部证据检索。",
+                            "count": builtin_web_calls,
+                        }
+                        context.trace.append(completed)
+                        await context._notify_last_trace()
+                    if require_builtin_web_search and not source_links_present:
+                        warning = {
+                            "stage": "来源核对",
+                            "status": "warning",
+                            "message": "已执行外部检索，但外部工具未返回可展示的来源链接。",
+                        }
+                        context.trace.append(warning)
+                        await context._notify_last_trace()
         except TimeoutError as exc:
             raise CCRuntimeError("CC Runtime timed out") from exc
         except CCRuntimeError:
@@ -300,6 +339,7 @@ class CCRuntimeOrchestrator:
         if not answer:
             raise CCRuntimeError("CC Runtime returned an empty answer")
         result_metadata["builtin_web_calls"] = builtin_web_calls
+        result_metadata["source_links_present"] = _contains_source_url(answer)
         self.store.log(
             "cc_runtime_research",
             "ok",
@@ -313,6 +353,7 @@ class CCRuntimeOrchestrator:
                 "runtime_model": self.settings.cc_runtime_model,
                 "skills": selected_skills,
                 "builtin_web_calls": builtin_web_calls,
+                "builtin_web_required": require_builtin_web_search,
                 **result_metadata,
             },
         )
@@ -365,11 +406,7 @@ class CCRuntimeOrchestrator:
 
             sdk_tools.append(web_search)
             allowed_tools.append(WEB_TOOL_NAME)
-        elif (
-            context.allow_web_search
-            and self.settings.cc_runtime_builtin_web_search
-            and not self.search_service.external_configured
-        ):
+        if context.allow_web_search and self.settings.cc_runtime_builtin_web_search:
             builtin_tools.append("WebSearch")
             allowed_tools.append("WebSearch")
 
@@ -429,7 +466,8 @@ def _system_prompt(
     local_search_enabled: bool = True,
 ) -> str:
     web_rule = (
-        "需要最新事实或本地证据不足时，可以调用当前已授权的 web_search 或 WebSearch。"
+        "本轮必须在生成最终答案前调用 CC 自带的 WebSearch 至少一次，核对最新外部信息；"
+        "即使本地证据已经充分也不能跳过。若同时提供 web_search，可把它作为补充来源。"
         if web_enabled
         else "本轮未授权联网搜索，不得尝试任何外部网络工具。"
     )
@@ -532,6 +570,10 @@ def _bounded_query(value: Any) -> str:
     if not query:
         raise ValueError("query is required")
     return query[:500]
+
+
+def _contains_source_url(value: str) -> bool:
+    return bool(re.search(r"https?://[^\s)\]}]+", value or ""))
 
 
 def _bounded_limit(value: Any, maximum: int) -> int:

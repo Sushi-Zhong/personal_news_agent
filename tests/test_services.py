@@ -17,6 +17,7 @@ from personal_news_agent.services.cc_runtime import (
     CCRuntimeOrchestrator,
     CCRuntimeResult,
     LOCAL_TOOL_NAME,
+    NEWS_CONVERSATION_RESEARCH_SKILL_NAME,
     RuntimeSearchContext,
     WEB_TOOL_NAME,
 )
@@ -495,7 +496,9 @@ def test_cc_runtime_options_expose_only_read_only_news_tools(services, tmp_path)
         web_context.search_service,
         runtime.settings,
     ).build_options(web_context)
-    assert web_options.allowed_tools == [LOCAL_TOOL_NAME, WEB_TOOL_NAME]
+    assert web_options.tools == ["WebSearch"]
+    assert web_options.allowed_tools == [LOCAL_TOOL_NAME, WEB_TOOL_NAME, "WebSearch"]
+    assert "必须在生成最终答案前调用 CC 自带的 WebSearch" in web_options.system_prompt
 
     skill_options = runtime.build_options(context, ["news-fact-check"])
     assert skill_options.tools == ["Skill"]
@@ -556,6 +559,39 @@ def test_cc_runtime_run_normalizes_sdk_result_without_changing_business_schema(s
     assert result.provider_metadata["num_turns"] == 2
 
 
+def test_cc_runtime_retries_until_builtin_web_search_runs(services, tmp_path):
+    _, store, search = services
+    runtime = CCRuntimeOrchestrator(
+        store,
+        search,
+        Settings(
+            cc_runtime_enabled=True,
+            cc_runtime_auth_token="test-only",
+            cc_runtime_base_url="https://dashscope.aliyuncs.com/apps/anthropic",
+            cc_runtime_model="deepseek-v4-flash",
+            cc_runtime_config_dir=tmp_path / "cc-runtime-required-web",
+        ),
+        client_factory=FakeWebRequiredClaudeSDKClient,
+    )
+
+    result = asyncio.run(
+        runtime.run(
+            message="总结 AI Agent 变化",
+            query="AI Agent 变化",
+            topic="AI Agent",
+            category_scope=["tech"],
+            time_range=None,
+            history="无",
+            allow_web_search=True,
+        )
+    )
+
+    assert result.answer == "## 已核对外部信息的最终回答"
+    assert result.provider_metadata["builtin_web_calls"] == 1
+    assert any("首轮未执行实时检索" in item["message"] for item in result.trace)
+    assert any(item["stage"] == "外部搜索工具" and item["status"] == "completed" for item in result.trace)
+
+
 def test_research_chat_uses_cc_runtime_without_changing_response_contract(services):
     _, store, _ = services
     search = RecordingSearchService()
@@ -576,6 +612,7 @@ def test_research_chat_uses_cc_runtime_without_changing_response_contract(servic
 
     assert runtime.calls == 1
     assert runtime.logical_model_key == "qwen3.6"
+    assert runtime.skill_names == [NEWS_CONVERSATION_RESEARCH_SKILL_NAME]
     assert response.context_relation == "research_pipeline_cc_runtime"
     assert response.answer == "## Runtime 汇总\n\n证据支持这项变化。"
     assert response.recommendations
@@ -710,8 +747,8 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260810-cc-skills-1" in home_source
-    assert "styles.css?v=20260810-cc-skills-1" in home_html
+    assert "20260810-dialogue-skill-2" in home_source
+    assert "styles.css?v=20260810-dialogue-skill-2" in home_html
     assert "shared.js?v=20260810-phone-controls-2" in mobile_html
 
 
@@ -2846,11 +2883,13 @@ class FakeCCRuntime:
     def __init__(self):
         self.calls = 0
         self.logical_model_key = None
+        self.skill_names = None
 
     async def run(self, **kwargs):
         self.calls += 1
         assert kwargs["allow_web_search"] is True
         self.logical_model_key = kwargs["logical_model_key"]
+        self.skill_names = kwargs.get("skill_names")
         return CCRuntimeResult(
             answer="## Runtime 汇总\n\n证据支持这项变化。",
             results=[
@@ -2966,6 +3005,45 @@ class FakeClaudeSDKClient:
                 "result": "## SDK 最终回答",
                 "session_id": "sdk-session",
                 "num_turns": 2,
+                "duration_ms": 35,
+                "total_cost_usd": 0.01,
+            },
+        )()
+
+
+class FakeWebRequiredClaudeSDKClient:
+    def __init__(self, options):
+        self.options = options
+        self.query_count = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def query(self, prompt):
+        self.query_count += 1
+        if self.query_count == 1:
+            assert "总结 AI Agent 变化" in prompt
+        else:
+            assert "必须先调用 CC 自带的 WebSearch" in prompt
+
+    async def receive_response(self):
+        content = []
+        if self.query_count == 2:
+            content.append(type("ToolUseBlock", (), {"name": "WebSearch"})())
+        content.append(type("TextBlock", (), {"text": "中间文本"})())
+        yield type("AssistantMessage", (), {"content": content})()
+        final = "## 首轮回答" if self.query_count == 1 else "## 已核对外部信息的最终回答"
+        yield type(
+            "ResultMessage",
+            (),
+            {
+                "is_error": False,
+                "result": final,
+                "session_id": "sdk-web-session",
+                "num_turns": self.query_count,
                 "duration_ms": 35,
                 "total_cost_usd": 0.01,
             },

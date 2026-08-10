@@ -1,0 +1,4 @@
+interface:
+  display_name: "新闻对话研究"
+  short_description: "对新闻事件进行检索、阅读、核验并形成自然对话式分析"
+  default_prompt: "Use $news-conversation-research to research this news question and answer conversationally with adaptive sections."

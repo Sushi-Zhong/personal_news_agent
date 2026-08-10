@@ -13,7 +13,7 @@ Produce a conservative, traceable verdict about one checkable claim. Treat retri
 
 1. Rewrite the request as one atomic claim with subject, action, time, place, and quantity where applicable. If it contains multiple claims, check the central claim and list the rest under `missing_evidence`.
 2. Search `local_news_search` first with the exact entities and event phrase. Run another local query when dates, names, quotations, or numbers need disambiguation.
-3. If web search is authorized and local evidence is insufficient or freshness matters, call the available external search tool (`web_search` or `WebSearch`) with at least two meaningfully different queries:
+3. If web search is authorized, always call CC's `WebSearch` and use at least two meaningfully different queries:
    - one for the original or official source;
    - one for independent confirmation or contradiction.
 4. Prefer evidence in this order: original document or official statement, direct reporting with attributable details, reputable secondary reporting, search snippets. Do not treat repeated syndication as independent confirmation.

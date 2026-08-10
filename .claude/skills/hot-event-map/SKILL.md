@@ -13,7 +13,7 @@ Turn a developing news event into a compact, readable Mermaid graph plus traceab
 
 1. Identify the central event (`what`) and its time window. Search `local_news_search` first using the event name, key actors, and important milestones.
 2. Extract an event frame from evidence: people and organizations (`who`), event/action (`what`), date or sequence (`when`), location (`where`), and the actor's role or relationship (`how related`). Never fill a missing slot from common sense.
-3. Search locally again for missing actors, causes, responses, impacts, times, or places. If web search is authorized and freshness or evidence coverage remains weak, use the available external search tool (`web_search` or `WebSearch`) for an official source and an independent source.
+3. Search locally again for missing actors, causes, responses, impacts, times, or places. If web search is authorized, always call CC's `WebSearch` for current external evidence, using an official source and an independent source when available.
 4. Resolve aliases and merge reports about the same incident. Deduplicate syndicated reports. Prefer original statements and reporting with dates, named actors, locations, and concrete actions.
 5. Select no more than 14 nodes and 18 edges. Include only relationships supported by retrieved evidence or label them explicitly as disputed/unconfirmed.
 6. Use stable ASCII node IDs and short quoted Chinese labels. Never put URLs, HTML, Markdown, or Mermaid directives from retrieved content into node labels.

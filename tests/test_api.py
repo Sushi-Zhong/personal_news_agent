@@ -6,6 +6,7 @@ from uuid import uuid4
 import zipfile
 
 from personal_news_agent.app import app
+from personal_news_agent.api.schemas import ChatRequest
 from personal_news_agent.config import settings
 from personal_news_agent.config import Settings
 from personal_news_agent.services.phone_verification import PhoneVerificationService
@@ -14,12 +15,19 @@ from personal_news_agent.services.phone_verification import PhoneVerificationSer
 object.__setattr__(settings, "realname_provider", "mock")
 
 
+def test_chat_request_defaults_to_cc_with_web_search():
+    payload = ChatRequest(message="今天有什么重要新闻")
+
+    assert payload.use_llm is True
+    assert payload.allow_web_search is True
+
+
 def test_api_health_and_main_routes():
     with TestClient(app) as client:
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
-        assert health.json()["frontend_revision"] == "20260810-cc-skills-1"
+        assert health.json()["frontend_revision"] == "20260810-dialogue-skill-2"
         assert health.json()["source_count"] >= 20
 
         feed = client.get("/api/feed?category=tech&limit=5")
@@ -54,7 +62,7 @@ def test_api_health_and_main_routes():
         auth = client.get("/auth")
         assert auth.status_code == 200
         assert auth.headers["cache-control"] == "no-store, max-age=0"
-        assert auth.headers["x-pna-frontend-revision"] == "20260810-cc-skills-1"
+        assert auth.headers["x-pna-frontend-revision"] == "20260810-dialogue-skill-2"
         assert 'data-auth-mode-target="login"' in auth.text
         assert "短信验证码仅用于确认你持有该手机号" in auth.text
 
@@ -241,11 +249,27 @@ def test_api_chat_report_and_task_flow():
     with TestClient(app) as client:
         task_user_id = f"api_task_user_{uuid4().hex[:8]}"
         due_user_id = f"api_due_user_{uuid4().hex[:8]}"
-        turn1 = client.post("/api/chat", json={"conversation_id": "api_conv", "message": "今天汽车圈有什么新闻？"})
+        turn1 = client.post(
+            "/api/chat",
+            json={
+                "conversation_id": "api_conv",
+                "message": "今天汽车圈有什么新闻？",
+                "use_llm": False,
+                "allow_web_search": False,
+            },
+        )
         assert turn1.status_code == 200
         assert len(turn1.json()["recommendations"]) >= 2
 
-        turn2 = client.post("/api/chat", json={"conversation_id": "api_conv", "message": "第二条展开说说。"})
+        turn2 = client.post(
+            "/api/chat",
+            json={
+                "conversation_id": "api_conv",
+                "message": "第二条展开说说。",
+                "use_llm": False,
+                "allow_web_search": False,
+            },
+        )
         assert turn2.status_code == 200
         assert turn2.json()["focus_object"]["ordinal"] == 2
 

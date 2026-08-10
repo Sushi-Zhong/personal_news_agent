@@ -1,6 +1,7 @@
 let activeUserId = localStorage.getItem("pna_user_id") || "default";
 let conversationId = localStorage.getItem("pna_conversation_id") || null;
-let webSearchEnabled = localStorage.getItem(webSearchPreferenceKey()) === "1";
+const savedWebSearchPreference = localStorage.getItem(webSearchPreferenceKey());
+let webSearchEnabled = savedWebSearchPreference === null ? true : savedWebSearchPreference === "1";
 const DEFAULT_CHAT_MODEL_KEY = "yuanrong-personal-assistant";
 const FALLBACK_CHAT_MODELS = [
   { key: DEFAULT_CHAT_MODEL_KEY, name: "元融大模型", description: "默认个人资讯助理角色" },
@@ -617,9 +618,26 @@ function setAssistantResponseHtml(node, html) {
   if (!node) return;
   node.innerHTML = `${html}${turnActionsHtml("assistant")}`;
   syncForcedRelationButtons(node);
+  mountAssistantSections(node);
   mountRelatedMindMaps(node);
   mountMermaidDiagrams(node);
   scrollChatToBottom(node.closest(".messages"), "auto");
+}
+
+function mountAssistantSections(node) {
+  const container = node?.querySelector(".assistant-markdown");
+  if (!container || container.querySelector(":scope > .answer-section")) return;
+  let section = null;
+  [...container.children].forEach((child) => {
+    if (child.tagName === "H3") {
+      section = document.createElement("section");
+      section.className = "answer-section";
+      container.insertBefore(section, child);
+      section.appendChild(child);
+      return;
+    }
+    if (section) section.appendChild(child);
+  });
 }
 
 async function streamChat(payload, assistantNode, targetNode) {
@@ -736,11 +754,16 @@ function chatTurn(role, text, loading = false) {
   const wrapper = document.createElement("article");
   wrapper.className = `chat-turn ${role === "user" ? "chat-user" : "chat-assistant"}`;
   if (loading) {
-    wrapper.innerHTML = `<div class="trace-loading">搜集线索中...</div>`;
+    wrapper.innerHTML = `${assistantIdentityHtml("正在研究")}
+      <div class="trace-loading">正在理解问题并准备检索...</div>`;
   } else {
     wrapper.innerHTML = `<div class="chat-bubble">${escapeHtml(text)}</div>${turnActionsHtml(role)}`;
   }
   return wrapper;
+}
+
+function assistantIdentityHtml(status = "研究完成") {
+  return `<div class="assistant-identity"><span aria-hidden="true">N</span><div><strong>News Agent</strong><small>${escapeHtml(status)}</small></div></div>`;
 }
 
 function turnActionsHtml(role) {
@@ -908,7 +931,7 @@ function chatResponseHtml(data) {
   const responseMeta = data.turn_id
     ? `<span hidden data-response-turn-id="${escapeAttr(data.turn_id)}" data-forced-relation="${escapeAttr(data.forced_relation || "")}"></span>`
     : "";
-  return `${responseMeta}${trace}${mindMap}<div class="assistant-markdown">${answer}</div>${reportDownloads}${evidenceIndex}${factcheckEvidence}${timeline}`;
+  return `${responseMeta}${assistantIdentityHtml("已完成本轮研究")}${mindMap}<div class="assistant-markdown">${answer}</div>${reportDownloads}${evidenceIndex}${factcheckEvidence}${timeline}${trace}`;
 }
 
 function renderReportDownloads(data) {
@@ -926,16 +949,17 @@ function renderReportDownloads(data) {
 
 function chatStreamingHtml(state) {
   const trace = renderResearchTrace(state.research_trace || []);
-  return `${trace}<div class="stream-status">${escapeHtml(state.stream_status || "执行中。")}</div>`;
+  return `${assistantIdentityHtml("正在研究")}${trace}<div class="stream-status">${escapeHtml(state.stream_status || "执行中。")}</div>`;
 }
 
 function renderResearchTrace(items) {
+  items = mergePublicExecutionTrace([], items || []);
   if (!items.length) return "";
   const completed = items.filter((item) => item.status !== "running").length;
   const running = items.some((item) => item.status === "running");
   const statusLabel = running ? "执行中" : `${completed}/${items.length} 完成`;
-  return `<details class="agent-run-trace" open>
-    <summary><span><i></i>Agent 执行过程</span><em>${escapeHtml(statusLabel)}</em></summary>
+  return `<details class="agent-run-trace"${running ? " open" : ""}>
+    <summary><span><i></i>本轮过程</span><em>${escapeHtml(statusLabel)}</em></summary>
     <div class="research-trace" role="list">${items
     .map((item) => {
       const count = Number.isFinite(Number(item.count)) ? Number(item.count) : "";

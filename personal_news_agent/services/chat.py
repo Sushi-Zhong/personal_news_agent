@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import re
 from typing import Any, AsyncIterator, Awaitable, Callable
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from claude_code_backend import LocalAgentService
@@ -21,6 +22,7 @@ from personal_news_agent.services.chat_understanding import (
     time_range_from_message,
 )
 from personal_news_agent.services.llm import LLMClient
+from personal_news_agent.services.cc_runtime import NEWS_CONVERSATION_RESEARCH_SKILL_NAME
 from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL, SHARED_RUNTIME_MODEL, get_model_option
 from personal_news_agent.services.search import (
     UnifiedSearchService,
@@ -910,25 +912,39 @@ class NewsChatService:
                     allow_web_search=allow_web_search,
                     logical_model_key=selected_model.key,
                     logical_model_name=selected_model.name,
+                    skill_names=[NEWS_CONVERSATION_RESEARCH_SKILL_NAME],
                     on_trace=on_trace,
+                )
+                runtime_declared_results = _runtime_declared_link_results(
+                    runtime_result.answer,
+                    categories[0] if categories else "all",
                 )
                 trace.extend(runtime_result.trace)
                 runtime_results = _rank_for_chat(
-                    _filter_by_time(_enrich_from_store(self.store, runtime_result.results), time_range),
+                    _filter_by_time(
+                        _enrich_from_store(
+                            self.store,
+                            [*runtime_result.results, *runtime_declared_results],
+                        ),
+                        time_range,
+                    ),
                     message,
                 )[:12]
-                if runtime_results:
+                runtime_used_web = int(runtime_result.provider_metadata.get("builtin_web_calls") or 0) > 0
+                if runtime_results or runtime_used_web:
                     evidence = _evidence_payload(self.store, runtime_results)
                     event_line = await self._event_line(query, categories, runtime_results)
                     drift_warning = await drift_warning_task
                     answer = _prepend_notice(runtime_result.answer, drift_warning)
+                    builtin_web_calls = int(runtime_result.provider_metadata.get("builtin_web_calls") or 0)
+                    total_tool_calls = len(runtime_result.queries) + builtin_web_calls
                     final_trace = [
                         plan_trace,
                         {
                             "stage": "Agent 主控",
                             "status": "completed",
-                            "message": f"自主执行 {len(runtime_result.queries)} 次只读检索并组织回答。",
-                            "count": len(runtime_result.queries),
+                            "message": f"自主执行 {total_tool_calls} 次只读检索并组织回答。",
+                            "count": total_tool_calls,
                             "logical_model": selected_model.key,
                             "runtime_model": getattr(
                                 getattr(self.cc_runtime, "settings", None),
@@ -2204,6 +2220,33 @@ def _markdown_link_label(value: Any) -> str:
 def _markdown_link_url(value: Any) -> str:
     url = str(value or "").strip()
     return url.replace(")", "%29").replace(" ", "%20") if url.startswith(("http://", "https://")) else ""
+
+
+def _runtime_declared_link_results(answer: str, category: str) -> list[SearchResult]:
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    for label, raw_url in re.findall(r"\[([^\]\n]{1,240})\]\((https?://[^\s)]+)\)", answer or ""):
+        url = raw_url.strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or url in seen:
+            continue
+        seen.add(url)
+        title = re.sub(r"\s+", " ", label).strip() or parsed.netloc
+        results.append(
+            SearchResult(
+                source_id=parsed.netloc.lower(),
+                title=title[:240],
+                url=url,
+                summary="由 CC 外部搜索工具返回；可打开原始页面核对全文。",
+                category=category or "all",
+                published_at=None,
+                score=0.72,
+                origin="external",
+            )
+        )
+        if len(results) >= 12:
+            break
+    return results
 
 
 def _related_mind_map_payload(

@@ -653,6 +653,40 @@ input {
   font-size: 14px;
 }
 
+.assistant-identity {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+}
+
+.assistant-identity > span {
+  align-items: center;
+  background: linear-gradient(145deg, #155eef, #12b8d6);
+  border-radius: 9px;
+  color: #ffffff;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 850;
+  height: 28px;
+  justify-content: center;
+  width: 28px;
+}
+
+.assistant-identity > div {
+  display: grid;
+  gap: 1px;
+}
+
+.assistant-identity strong {
+  color: #172033;
+  font-size: 13px;
+}
+
+.assistant-identity small {
+  color: #7b8794;
+  font-size: 10px;
+}
+
 .agent-run-trace {
   background: #f8fafc;
   border: 1px solid #dce5ef;
@@ -805,6 +839,19 @@ input {
   max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.assistant-markdown > .answer-section {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 11px;
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.assistant-markdown > .answer-section > h3:first-child {
+  margin-top: 0;
 }
 
 .assistant-markdown h3,
@@ -4474,6 +4521,14 @@ body.console-shell {
   border-radius: 18px;
 }
 
+.console-shell .assistant-identity strong {
+  color: #f0f9ff;
+}
+
+.console-shell .assistant-identity small {
+  color: #8ca8c0;
+}
+
 .console-shell .chat-assistant .chat-bubble {
   color: #dbeafe;
 }
@@ -4488,6 +4543,11 @@ body.console-shell {
 
 .console-shell .assistant-markdown a {
   color: #67e8f9;
+}
+
+.console-shell .assistant-markdown > .answer-section {
+  background: rgba(8, 25, 40, 0.66);
+  border-color: rgba(125, 211, 252, 0.16);
 }
 
 .console-shell .turn-actions button {

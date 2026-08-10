@@ -78,8 +78,8 @@ class ChatRequest(BaseModel):
     message: str
     topic: str | None = None
     category_scope: list[str] | None = None
-    use_llm: bool = False
-    allow_web_search: bool = False
+    use_llm: bool = True
+    allow_web_search: bool = True
     model_key: str = Field(default="yuanrong-personal-assistant", min_length=1, max_length=80)
 
 
