@@ -12,7 +12,7 @@ WorkingDirectory=__PROJECT_DIR__
 Environment=PYTHONUNBUFFERED=1
 Environment=PNA_WEB_DISABLE_BACKGROUND_CRAWL=1
 UMask=0027
-ExecStart=__PROJECT_DIR__/scripts/run_web_service.sh
+ExecStart=/bin/bash __PROJECT_DIR__/scripts/run_web_service.sh
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

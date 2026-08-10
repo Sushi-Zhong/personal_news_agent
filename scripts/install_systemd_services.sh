@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+start_services=1
+case "${1:-}" in
+  "") ;;
+  --no-start) start_services=0 ;;
+  -h|--help)
+    echo "Usage: ./scripts/install_systemd_services.sh [--no-start]"
+    exit 0
+    ;;
+  *)
+    echo "Unknown argument: $1" >&2
+    exit 2
+    ;;
+esac
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEMPLATE_DIR="${PROJECT_DIR}/deploy/systemd"
 SYSTEMD_DIR="/etc/systemd/system"
@@ -44,5 +58,12 @@ for unit in personal-news-web.service personal-news-crawler.service personal-new
 done
 
 "${sudo_cmd[@]}" systemctl daemon-reload
-"${sudo_cmd[@]}" systemctl enable --now personal-news.target
-"${sudo_cmd[@]}" systemctl --no-pager --full status personal-news-web.service personal-news-crawler.service personal-news-tasks.service
+"${sudo_cmd[@]}" systemctl enable personal-news.target
+if [[ "${start_services}" -eq 1 ]]; then
+  if "${sudo_cmd[@]}" systemctl is-active --quiet personal-news.target; then
+    "${sudo_cmd[@]}" systemctl restart personal-news-web.service personal-news-crawler.service personal-news-tasks.service
+  else
+    "${sudo_cmd[@]}" systemctl start personal-news.target
+  fi
+  "${sudo_cmd[@]}" systemctl --no-pager --full status personal-news-web.service personal-news-crawler.service personal-news-tasks.service
+fi

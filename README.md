@@ -149,13 +149,56 @@ python3 scripts/run_crawl_loop.py \
   --fetch-articles 5
 ```
 
-生产环境不把爬虫或用户定时任务放入 FastAPI 子线程，而是由 systemd 同时管理 Web、唯一 crawler 和用户级 task runner。在 Linux 服务器的项目目录执行：
+生产环境不把爬虫或用户定时任务放入 FastAPI 子线程，而是由 systemd 同时管理 Web、唯一 crawler 和用户级 task runner。服务器项目目录是 `/home/che/cyris/personal_news_agent`，首次部署建议按下面的顺序执行：
+
+```bash
+cd /home/che/cyris/personal_news_agent
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+# 将 deploy/env.ext.server.example 的 Linux 路径合并到服务器 .env.ext
+chmod 600 .env .env.ext
+./start.sh preflight
+./start.sh install
+```
+
+脚本会从自身位置识别项目目录，不依赖 `/data/...` 等旧路径。以后更新代码或环境配置后，直接统一重启：
+
+```bash
+./start.sh restart
+```
+
+`start.sh` 会校验 `.env`、`.env.ext`、Python 路径、pip 依赖一致性、FastAPI 初始化和 `sources.yaml`，渲染 `deploy/systemd/` 中的 unit 模板，启动服务并检查 `/api/health`。它支持：
+
+```bash
+./start.sh start       # 启动全部服务；不带参数时也是 start
+./start.sh restart     # 更新 unit、重启全部服务并验证
+./start.sh stop        # 停止全部服务
+./start.sh status      # 查看三个服务状态
+./start.sh logs        # 查看最近日志
+./start.sh follow      # 持续跟踪日志
+./start.sh health      # 只检查 Web 健康状态
+./start.sh preflight   # 只检查配置和 Python 运行环境
+```
+
+也可以分别管理后端（Web + 用户定时任务）和抓取进程：
+
+```bash
+./start_backend.sh restart
+./start_backend.sh status
+
+./start_crawler.sh restart
+./start_crawler.sh follow
+```
+
+底层安装脚本仍可单独使用；`--no-start` 只更新 systemd unit，不启动服务：
 
 ```bash
 ./scripts/install_systemd_services.sh
+./scripts/install_systemd_services.sh --no-start
 ```
 
-安装脚本会渲染 `deploy/systemd/` 中的 unit 模板，启用 `personal-news.target`，并立即启动：
+安装后启用 `personal-news.target`，由它管理：
 
 ```text
 personal-news-web.service
@@ -163,7 +206,7 @@ personal-news-crawler.service
 personal-news-tasks.service
 ```
 
-常用运维命令：
+如果需要直接使用 systemctl，常用命令仍然是：
 
 ```bash
 sudo systemctl restart personal-news.target
@@ -178,7 +221,15 @@ systemd 默认使用当前登录用户；通过 `sudo` 运行安装脚本时使�
 PNA_RUN_USER=pna PNA_RUN_GROUP=pna ./scripts/install_systemd_services.sh
 ```
 
-Web、crawler 和 task runner 都会加载 `.env.ext`，然后使用 `PERSONAL_NEWS_VENV` 指向的 Python；该解释器不存在时回退到 `python3`。crawler 和 task runner 都只应各运行一个 systemd 实例。可在 `.env.ext` 中调整：
+Web、crawler 和 task runner 都会加载 `.env.ext`，然后使用 `PERSONAL_NEWS_VENV` 指向的 Python；如果配置了该变量但解释器不存在，预检和服务都会直接报错，避免悄悄回退到依赖不完整的系统 Python。服务器上的绝对路径必须使用 Linux 路径。完整的非敏感模板见 `deploy/env.ext.server.example`，核心路径例如：
+
+```bash
+export PERSONAL_NEWS_EXT_ROOT="/home/che/cyris/personal_news_agent/runtime"
+export PERSONAL_NEWS_VENV="/home/che/cyris/personal_news_agent/.venv"
+export PERSONAL_NEWS_DB="sqlite:////home/che/cyris/personal_news_agent/personal_news.db"
+```
+
+因此本地 `.env.ext` 的变量名可以保持不变，但 `/Volumes/ext/...` 的变量值不能原样用于服务器。crawler 和 task runner 都只应各运行一个 systemd 实例。可在 `.env.ext` 中调整：
 
 systemd 的 Web unit 会设置 `PNA_WEB_DISABLE_BACKGROUND_CRAWL=1`，避免 Web 内嵌抓取与独立 crawler 重复运行；本地只启动 Web 时仍可用 `PERSONAL_NEWS_BACKGROUND_CRAWL=1` 自动抓取。
 
