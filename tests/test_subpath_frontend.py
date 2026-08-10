@@ -47,6 +47,18 @@ def test_server_templates_keep_nginx_and_web_port_aligned():
 
 def test_html_routes_disable_cache_and_expose_frontend_revision():
     routes = (ROOT / "personal_news_agent" / "api" / "routes.py").read_text(encoding="utf-8")
-    assert 'FRONTEND_REVISION = "20260810-phone-controls-2"' in routes
+    assert 'FRONTEND_REVISION = "20260810-console-contrast-1"' in routes
     assert '"Cache-Control": "no-store, max-age=0"' in routes
     assert '"frontend_revision": FRONTEND_REVISION' in routes
+
+
+def test_console_theme_has_dark_drawers_readable_content_and_responsive_rails():
+    styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    assert "styles.css?v=20260810-console-contrast-1" in home
+    assert ".console-shell .agent-drawer" in styles
+    assert "background: rgba(10, 28, 45, 0.96)" in styles
+    assert ".console-shell .assistant-markdown h3" in styles
+    assert ".console-shell .chat-event strong" in styles
+    assert "@media (max-width: 1380px)" in styles
+    assert "position: sticky" in styles

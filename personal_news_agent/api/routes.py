@@ -42,7 +42,7 @@ from personal_news_agent.services.auth import AuthError
 from personal_news_agent.services.report_export import export_report
 
 
-FRONTEND_REVISION = "20260810-phone-controls-2"
+FRONTEND_REVISION = "20260810-console-contrast-1"
 NO_CACHE_PAGE_HEADERS = {
     "Cache-Control": "no-store, max-age=0",
     "X-PNA-Frontend-Revision": FRONTEND_REVISION,

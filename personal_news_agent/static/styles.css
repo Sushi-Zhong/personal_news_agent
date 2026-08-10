@@ -4397,3 +4397,212 @@ body.console-shell {
 .console-shell .feed-panel .panel-head span {
   color: #9fb8cf;
 }
+
+/* Console contrast and layout pass. Keep these rules last: the console was
+   originally light and is now dark, so every legacy light surface needs an
+   explicit console-scoped counterpart. */
+body.console-shell {
+  color-scheme: dark;
+  overflow-x: hidden;
+}
+
+.console-shell .news-console {
+  box-sizing: border-box;
+  gap: 18px;
+  grid-template-columns: 232px minmax(0, 1fr) 304px;
+  margin: 0 auto;
+  max-width: 1920px;
+  width: 100%;
+}
+
+.console-shell .console-rail {
+  align-self: start;
+  padding-top: 0;
+}
+
+.console-shell .rail-sticky-stack {
+  height: calc(100vh - 108px);
+  left: auto;
+  position: sticky;
+  top: 88px;
+  width: auto;
+}
+
+.console-shell .console-rail .rail-panel {
+  background: rgba(10, 31, 49, 0.96);
+  border-color: rgba(103, 232, 249, 0.25);
+}
+
+.console-shell .topic-card.recommended-topic:not(.active) {
+  background: rgba(13, 48, 65, 0.96) !important;
+  border-color: rgba(34, 211, 238, 0.42) !important;
+  color: #f4f8ff;
+}
+
+.console-shell .insight-rail .rail-panel {
+  background: rgba(13, 27, 45, 0.96);
+  border-color: rgba(147, 197, 253, 0.22);
+}
+
+.console-shell .conversation-panel,
+.console-shell .main-dialog {
+  background: rgba(7, 22, 37, 0.96);
+  border-color: rgba(103, 232, 249, 0.28);
+}
+
+.console-shell .agent-drawer {
+  background: rgba(10, 28, 45, 0.96);
+  border-color: rgba(103, 232, 249, 0.2);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.2);
+}
+
+.console-shell .agent-drawer > summary {
+  color: #e6f2ff;
+  letter-spacing: 0.01em;
+  padding: 3px 2px;
+}
+
+.console-shell .agent-drawer > summary:hover,
+.console-shell .agent-drawer > summary:focus-visible {
+  color: #67e8f9;
+  outline: none;
+}
+
+.console-shell .agent-drawer[open] > summary {
+  border-bottom-color: rgba(148, 163, 184, 0.22);
+}
+
+.console-shell .agent-drawer > .rail-panel,
+.console-shell .agent-drawer > .command-panel,
+.console-shell .agent-drawer > .topic-workbench {
+  background: rgba(13, 35, 54, 0.88);
+  border-color: rgba(148, 163, 184, 0.18);
+}
+
+.console-shell .assistant-markdown h3,
+.console-shell .assistant-markdown h4,
+.console-shell .assistant-markdown strong,
+.console-shell .chat-event strong,
+.console-shell .evidence-strip strong,
+.console-shell .due-url-list strong,
+.console-shell .entity-source-grid strong {
+  color: #f4f8ff;
+}
+
+.console-shell .assistant-markdown,
+.console-shell .assistant-markdown p,
+.console-shell .assistant-markdown li,
+.console-shell .assistant-markdown blockquote,
+.console-shell .chat-event p,
+.console-shell .deep-section p {
+  color: #c9d8e8;
+}
+
+.console-shell .assistant-markdown blockquote {
+  background: rgba(15, 40, 61, 0.92);
+  border-left-color: #38bdf8;
+}
+
+.console-shell .assistant-markdown th,
+.console-shell .assistant-markdown td {
+  border-color: rgba(148, 163, 184, 0.24);
+}
+
+.console-shell .assistant-markdown th {
+  background: rgba(15, 40, 61, 0.92);
+  color: #f4f8ff;
+}
+
+.console-shell .chat-event-line {
+  border-top-color: rgba(148, 163, 184, 0.2);
+}
+
+.console-shell .chat-event {
+  border-left-color: #38bdf8;
+  border-radius: 0 8px 8px 0;
+  padding-bottom: 7px;
+  padding-top: 7px;
+}
+
+.console-shell .chat-event[href]:hover {
+  background: rgba(14, 116, 144, 0.2);
+  border-left-color: #67e8f9;
+}
+
+.console-shell .chat-event time,
+.console-shell .evidence-strip span,
+.console-shell .due-url-list span,
+.console-shell .deep-section span {
+  color: #9fb8cf;
+}
+
+.console-shell .web-search-toggle {
+  color: #d6e4f2;
+}
+
+.console-shell .web-search-toggle small {
+  color: #91a9bf;
+}
+
+.console-shell .web-search-toggle input {
+  background: #31475e;
+}
+
+.console-shell .evidence-strip article,
+.console-shell .due-url-list article,
+.console-shell .metric-grid article,
+.console-shell .topic-metrics article {
+  background: rgba(15, 40, 61, 0.82);
+  border-color: rgba(148, 163, 184, 0.18);
+}
+
+.console-shell .event-action-popover,
+.console-shell .slash-command-menu {
+  background: rgba(10, 28, 45, 0.98);
+  border-color: rgba(103, 232, 249, 0.24);
+  color: #e6f2ff;
+}
+
+.console-shell button:focus-visible,
+.console-shell input:focus-visible,
+.console-shell select:focus-visible,
+.console-shell textarea:focus-visible {
+  outline: 2px solid #67e8f9;
+  outline-offset: 2px;
+}
+
+.console-shell * {
+  scrollbar-color: #46637c rgba(8, 24, 40, 0.65);
+  scrollbar-width: thin;
+}
+
+@media (max-width: 1380px) {
+  .console-shell .news-console {
+    grid-template-columns: 224px minmax(0, 1fr);
+  }
+
+  .console-shell .insight-rail {
+    grid-column: 2;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .console-shell .news-console {
+    grid-template-columns: 196px minmax(0, 1fr);
+  }
+
+  .console-shell .insight-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .console-shell .dialog-header {
+    align-items: start;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .console-shell .dialog-header p {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+}
