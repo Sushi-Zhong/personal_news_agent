@@ -16,7 +16,7 @@ from personal_news_agent.services.chat import NewsChatService, _filter_by_time, 
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
-from personal_news_agent.services.factcheck import FactCheckService
+from personal_news_agent.services.factcheck import FactCheckService, _merge_search_results
 from personal_news_agent.services.article_fetch import ArticleFetchService, _extract_published_at, _parse_published_datetime, _unwrap_search_link
 from personal_news_agent.services.chat_understanding import (
     categories_for_message,
@@ -1851,7 +1851,70 @@ def test_factcheck_falls_back_when_agent_fails(services):
     assert result.agent_source == "fallback"
     assert result.verdict == "insufficient"
     assert result.evidence
-    assert "未启用外部实时搜索" in result.source_notes[0]
+    assert any("外部 Web Search" in note for note in result.source_notes)
+
+
+def test_factcheck_falls_back_to_structured_llm_summary(services):
+    _, store, search = services
+    llm = FakeFactCheckLLM()
+    factcheck = FactCheckService(
+        store,
+        search,
+        local_agent=FakeFailingLocalAgent(),
+        llm_client=llm,
+    )
+
+    result = asyncio.run(factcheck.run("default", "AI Agent 产品更新带动开发工具竞争", ["tech"]))
+
+    assert llm.calls == 1
+    assert result.agent_source == "llm"
+    assert result.verdict == "supported"
+    assert result.supporting_evidence
+    assert [item["index"] for item in result.supporting_evidence] == [1]
+
+
+def test_factcheck_merge_reserves_web_results_and_deduplicates_canonical_urls():
+    local = [
+        SearchResult(
+            source_id="local",
+            title=f"本地证据 {index}",
+            url=f"https://example.com/news/{index}?utm_source=feed",
+            summary="本地摘要",
+            category="tech",
+            published_at=datetime.now(timezone.utc),
+            score=1.0,
+            origin="local",
+        )
+        for index in range(1, 5)
+    ]
+    web = [
+        SearchResult(
+            source_id="web",
+            title="重复证据",
+            url="https://example.com/news/1?utm_campaign=search",
+            summary="联网摘要",
+            category="tech",
+            published_at=datetime.now(timezone.utc),
+            score=0.8,
+            origin="external",
+        ),
+        SearchResult(
+            source_id="web",
+            title="独立联网证据",
+            url="https://web.example/factcheck",
+            summary="联网摘要",
+            category="tech",
+            published_at=datetime.now(timezone.utc),
+            score=0.8,
+            origin="external",
+        ),
+    ]
+
+    merged = _merge_search_results(local, web, 4)
+
+    assert len(merged) == 4
+    assert sum(item.origin == "external" for item in merged) == 1
+    assert any(item.url == "https://web.example/factcheck" for item in merged)
 
 
 def test_chat_executes_factcheck_skill_with_local_agent(services):
@@ -1883,7 +1946,7 @@ def test_chat_executes_factcheck_skill_with_local_agent(services):
     assert "下一步核查" not in response.answer
 
 
-def test_factcheck_skill_uses_remote_search_when_enabled(services):
+def test_factcheck_skill_always_uses_direct_web_search(services):
     _, store, _ = services
     search = RecordingSearchService()
     factcheck = FactCheckService(store, search, local_agent=FakeFailingLocalAgent())
@@ -1899,13 +1962,14 @@ def test_factcheck_skill_uses_remote_search_when_enabled(services):
             "factcheck_remote_conv",
             "/factcheck AI Agent 产品更新带动开发工具竞争 --category tech",
             user_id="default",
-            allow_web_search=True,
+            allow_web_search=False,
         )
     )
 
     assert response.context_relation == "skill:/factcheck"
-    assert search.calls[0]["include_remote"] is True
-    assert "已启用外部实时搜索" in response.skill_result["data"]["source_notes"][0]
+    assert search.calls[0]["include_remote"] is False
+    assert search.external_calls
+    assert any("外部 Web Search 返回 1 条" in note for note in response.skill_result["data"]["source_notes"])
 
 
 def test_report_cleans_polluted_factcheck_title(services):
@@ -2406,6 +2470,29 @@ class FakeFactCheckLocalAgent:
         return type("FakeFactCheckResponse", (), {"status": "ok", "message": FakeFactCheckMessage()})()
 
 
+class FakeFactCheckLLM:
+    configured = True
+
+    def __init__(self):
+        self.calls = 0
+
+    async def structured(self, messages, schema_name, schema, model_key=None):
+        self.calls += 1
+        assert schema_name == "factcheck_verdict"
+        assert any("evidence" in message["content"] for message in messages if message["role"] == "user")
+        assert any("不可信" in message["content"] for message in messages if message["role"] == "system")
+        return {
+            "verdict": "supported",
+            "confidence": 0.76,
+            "summary": "本地和联网证据共同支持该说法。",
+            "supporting_evidence": [999, 1],
+            "contradicting_evidence": [],
+            "missing_evidence": ["原始公告"],
+            "source_notes": ["由结构化大模型汇总"],
+            "next_checks": ["继续核对原始公告"],
+        }
+
+
 class FakeFailingLocalAgent:
     async def chat(self, payload):
         raise RuntimeError("agent unavailable")
@@ -2434,7 +2521,8 @@ class FakeRelatedSearchService:
 class RecordingSearchService:
     def __init__(self):
         self.calls = []
-        self.external_configured = False
+        self.external_calls = []
+        self.external_configured = True
 
     async def search(self, query, category_scope, source_scope, time_range, max_results=20, include_remote=False):
         self.calls.append(
@@ -2456,6 +2544,28 @@ class RecordingSearchService:
                 published_at=datetime.now(timezone.utc),
                 score=1.0,
                 origin="local",
+            )
+        ]
+
+    async def search_external(self, query, category_scope, source_scope, max_results=8):
+        self.external_calls.append(
+            {
+                "query": query,
+                "category_scope": category_scope,
+                "source_scope": source_scope,
+                "max_results": max_results,
+            }
+        )
+        return [
+            SearchResult(
+                source_id="web.example",
+                title=f"{query} 联网核查",
+                url="https://web.example/factcheck",
+                summary=f"{query} 的联网证据摘要",
+                category=(category_scope or ["all"])[0],
+                published_at=datetime.now(timezone.utc),
+                score=0.8,
+                origin="external",
             )
         ]
 

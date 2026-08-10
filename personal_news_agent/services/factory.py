@@ -12,6 +12,7 @@ from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
 from personal_news_agent.services.factcheck import FactCheckService
+from personal_news_agent.services.llm import LLMClient
 from personal_news_agent.services.model_config import public_model_options
 from personal_news_agent.services.native_ingestion import NativeSearchIngestionService
 from personal_news_agent.services.onboarding import OnboardingService
@@ -42,8 +43,9 @@ def build_services(settings: Settings) -> dict[str, Any]:
     topic_views = TopicViewService(store, search_service)
     deep_dive = DeepDiveService(search_service)
     local_agent = LocalAgentService()
+    llm_client = LLMClient(settings)
     reports = ReportGenerationService(store, search_service, local_agent=local_agent)
-    factcheck = FactCheckService(store, search_service, local_agent=local_agent)
+    factcheck = FactCheckService(store, search_service, local_agent=local_agent, llm_client=llm_client)
     topic_summary = TopicSummaryService(store, search_service)
     trending_topics = TrendingTopicService(store)
     tasks = ScheduledTaskService(store, reports, search_service=search_service, native_ingestion=native_ingestion)
