@@ -13,6 +13,13 @@ from personal_news_agent.config import Settings
 from personal_news_agent.core.models import NormalizedArticle, RawArticle, RawArticleLink, RawSearchResult, SearchResult, TimeRange
 from personal_news_agent.core.text import content_hash, stable_id
 from personal_news_agent.services.chat import NewsChatService, _filter_by_time, _rank_for_chat, _related_base_query, _related_search_answer, _report_skill_answer
+from personal_news_agent.services.cc_runtime import (
+    CCRuntimeOrchestrator,
+    CCRuntimeResult,
+    LOCAL_TOOL_NAME,
+    RuntimeSearchContext,
+    WEB_TOOL_NAME,
+)
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
@@ -20,7 +27,6 @@ from personal_news_agent.services.factcheck import FactCheckService, _merge_sear
 from personal_news_agent.services.article_fetch import ArticleFetchService, _extract_published_at, _parse_published_datetime, _unwrap_search_link
 from personal_news_agent.services.chat_understanding import (
     categories_for_message,
-    is_contextual_followup,
     query_from_message,
 )
 from personal_news_agent.services.native_ingestion import NativeSearchIngestionService
@@ -418,6 +424,145 @@ def test_research_does_not_use_external_search_when_web_disabled(services):
 
     assert search.external_calls == []
     assert not any(item["stage"] == "联网搜索" for item in response.research_trace)
+
+
+def test_cc_runtime_search_tools_use_existing_local_and_web_services(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    context = RuntimeSearchContext(store, search, ["tech"], None, allow_web_search=True)
+
+    local_payload = asyncio.run(context.local_news_search({"query": "AI Agent", "limit": 4}))
+    web_payload = asyncio.run(context.web_search({"query": "AI Agent 最新进展", "limit": 3}))
+
+    assert local_payload["structuredContent"]["ok"] is True
+    assert web_payload["structuredContent"]["ok"] is True
+    assert search.calls[0]["include_remote"] is False
+    assert search.external_calls
+    assert [item.origin for item in context.results] == ["local", "external"]
+    assert [item["origin"] for item in context.queries] == ["local", "web"]
+
+
+def test_cc_runtime_web_tool_refuses_unapproved_web_search(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    context = RuntimeSearchContext(store, search, ["tech"], None, allow_web_search=False)
+
+    payload = asyncio.run(context.web_search({"query": "越权联网", "limit": 3}))
+
+    assert payload["isError"] is True
+    assert payload["structuredContent"]["error_type"] == "PermissionError"
+    assert search.external_calls == []
+
+
+def test_cc_runtime_options_expose_only_read_only_news_tools(services, tmp_path):
+    _, store, search = services
+    runtime = CCRuntimeOrchestrator(
+        store,
+        search,
+        Settings(
+            cc_runtime_enabled=True,
+            cc_runtime_auth_token="test-only",
+            cc_runtime_base_url="https://dashscope.aliyuncs.com/apps/anthropic",
+            cc_runtime_model="qwen3.5-plus",
+            cc_runtime_config_dir=tmp_path / "cc-runtime",
+        ),
+    )
+    context = RuntimeSearchContext(store, search, ["tech"], None, allow_web_search=False)
+
+    options = runtime.build_options(context)
+
+    assert options.tools == []
+    assert options.allowed_tools == [LOCAL_TOOL_NAME]
+    assert WEB_TOOL_NAME not in options.allowed_tools
+    assert "Bash" in options.disallowed_tools
+    assert "Write" in options.disallowed_tools
+    assert options.permission_mode == "dontAsk"
+    assert options.strict_mcp_config is True
+    assert "test-only" not in repr(runtime.settings)
+
+    web_context = RuntimeSearchContext(store, RecordingSearchService(), ["tech"], None, allow_web_search=True)
+    web_options = CCRuntimeOrchestrator(
+        store,
+        web_context.search_service,
+        runtime.settings,
+    ).build_options(web_context)
+    assert web_options.allowed_tools == [LOCAL_TOOL_NAME, WEB_TOOL_NAME]
+
+
+def test_cc_runtime_run_normalizes_sdk_result_without_changing_business_schema(services, tmp_path):
+    _, store, search = services
+    runtime = CCRuntimeOrchestrator(
+        store,
+        search,
+        Settings(
+            cc_runtime_enabled=True,
+            cc_runtime_auth_token="test-only",
+            cc_runtime_base_url="https://dashscope.aliyuncs.com/apps/anthropic",
+            cc_runtime_model="qwen3.5-plus",
+            cc_runtime_config_dir=tmp_path / "cc-runtime-run",
+        ),
+        client_factory=FakeClaudeSDKClient,
+    )
+
+    result = asyncio.run(
+        runtime.run(
+            message="总结 AI Agent 变化",
+            query="AI Agent 变化",
+            topic="AI Agent",
+            category_scope=["tech"],
+            time_range=None,
+            history="无",
+            allow_web_search=False,
+        )
+    )
+
+    assert result.answer == "## SDK 最终回答"
+    assert result.provider_metadata["runtime"] == "claude-agent-sdk"
+    assert result.provider_metadata["num_turns"] == 2
+
+
+def test_research_chat_uses_cc_runtime_without_changing_response_contract(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    runtime = FakeCCRuntime()
+    chat = NewsChatService(store, search, llm_client=FakeDisabledLLM(), cc_runtime=runtime)
+
+    response = asyncio.run(
+        chat.chat(
+            "cc_runtime_conv",
+            "AI Agent 最近有什么变化",
+            category_scope=["tech"],
+            use_llm=True,
+            user_id="default",
+            allow_web_search=True,
+        )
+    )
+
+    assert runtime.calls == 1
+    assert response.context_relation == "research_pipeline_cc_runtime"
+    assert response.answer == "## Runtime 汇总\n\n证据支持这项变化。"
+    assert response.recommendations
+    assert response.evidence
+    assert response.expanded_queries[0]["origin"] == "local"
+    assert any(item["stage"] == "CC Runtime 主控" for item in response.research_trace)
+
+
+def test_research_chat_falls_back_when_cc_runtime_fails(services):
+    _, store, _ = services
+    search = RecordingSearchService()
+    chat = NewsChatService(store, search, llm_client=FakeDisabledLLM(), cc_runtime=FakeFailingCCRuntime())
+
+    response = asyncio.run(
+        chat._research_chat(
+            "cc_runtime_fallback_conv",
+            "AI Agent 最近有什么变化",
+            category_scope=["tech"],
+            allow_web_search=False,
+        )
+    )
+
+    assert response.context_relation != "research_pipeline_cc_runtime"
+    assert any(item["stage"] == "CC Runtime 主控" and item["status"] == "fallback" for item in response.research_trace)
 
 
 def test_web_regular_chat_does_not_auto_create_topic_card():
@@ -2568,6 +2713,78 @@ class RecordingSearchService:
                 origin="external",
             )
         ]
+
+
+class FakeCCRuntime:
+    configured = True
+
+    def __init__(self):
+        self.calls = 0
+
+    async def run(self, **kwargs):
+        self.calls += 1
+        assert kwargs["allow_web_search"] is True
+        return CCRuntimeResult(
+            answer="## Runtime 汇总\n\n证据支持这项变化。",
+            results=[
+                SearchResult(
+                    source_id="runtime.local",
+                    title="AI Agent 最近变化",
+                    url="https://runtime.example/ai-agent",
+                    summary="Runtime 检索到的证据摘要。",
+                    category="tech",
+                    published_at=datetime.now(timezone.utc),
+                    score=1.0,
+                    origin="local",
+                )
+            ],
+            queries=[{"query": "AI Agent 最近变化", "origin": "local", "result_count": 1}],
+            trace=[
+                {
+                    "stage": "CC Runtime 本地搜索",
+                    "status": "completed",
+                    "message": "检索返回 1 条候选。",
+                    "count": 1,
+                }
+            ],
+        )
+
+
+class FakeFailingCCRuntime:
+    configured = True
+
+    async def run(self, **kwargs):
+        raise RuntimeError("runtime unavailable")
+
+
+class FakeClaudeSDKClient:
+    def __init__(self, options):
+        self.options = options
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def query(self, prompt):
+        assert "总结 AI Agent 变化" in prompt
+
+    async def receive_response(self):
+        text_block = type("TextBlock", (), {"text": "中间文本"})()
+        yield type("AssistantMessage", (), {"content": [text_block]})()
+        yield type(
+            "ResultMessage",
+            (),
+            {
+                "is_error": False,
+                "result": "## SDK 最终回答",
+                "session_id": "sdk-session",
+                "num_turns": 2,
+                "duration_ms": 35,
+                "total_cost_usd": 0.01,
+            },
+        )()
 
 
 class FakeLinkFetcher:

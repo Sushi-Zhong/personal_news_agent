@@ -122,6 +122,7 @@ class NewsChatService:
         scheduled_tasks: Any | None = None,
         content_moderation: Any | None = None,
         local_agent: LocalAgentService | None = None,
+        cc_runtime: Any | None = None,
         skill_registry: Any | None = None,
         services: dict[str, Any] | None = None,
     ):
@@ -135,6 +136,7 @@ class NewsChatService:
         self.scheduled_tasks = scheduled_tasks
         self.content_moderation = content_moderation
         self.local_agent = local_agent or LocalAgentService()
+        self.cc_runtime = cc_runtime
         self.skill_registry = skill_registry
         self.services = services or {}
         self.topic_drift_notice = TOPIC_DRIFT_NOTICE
@@ -825,6 +827,97 @@ class NewsChatService:
         rule_drift_warning = _topic_drift_warning(topic, query, search_message)
         drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, search_message, rule_drift_warning))
         time_range = time_range_from_message(search_message)
+        runtime_fallback_trace: list[dict[str, Any]] = []
+        if self.cc_runtime and getattr(self.cc_runtime, "configured", False):
+            try:
+                history = _conversation_history_text(
+                    self._conversation_memory(conversation_id, user_id),
+                    turn_limit=6,
+                    question_limit=500,
+                    answer_limit=1_500,
+                )
+                runtime_result = await self.cc_runtime.run(
+                    message=message,
+                    query=query,
+                    topic=topic,
+                    category_scope=categories,
+                    time_range=time_range,
+                    history=history,
+                    allow_web_search=allow_web_search,
+                )
+                runtime_results = _rank_for_chat(
+                    _filter_by_time(_enrich_from_store(self.store, runtime_result.results), time_range),
+                    message,
+                )[:12]
+                if runtime_results:
+                    evidence = _evidence_payload(self.store, runtime_results)
+                    event_line = await self._event_line(query, categories, runtime_results)
+                    drift_warning = await drift_warning_task
+                    answer = _prepend_notice(runtime_result.answer, drift_warning)
+                    trace = [
+                        {
+                            "stage": "理解问题",
+                            "status": "completed",
+                            "message": f"CC Runtime 聚焦【{query}】"
+                            + (f"，限定近 {time_range.days} 天" if time_range else "")
+                            + (f"，分类 {', '.join(categories)}" if categories else ""),
+                        },
+                        {
+                            "stage": "CC Runtime 主控",
+                            "status": "completed",
+                            "message": f"自主执行 {len(runtime_result.queries)} 次只读检索并组织回答。",
+                            "count": len(runtime_result.queries),
+                        },
+                        *runtime_result.trace,
+                        {
+                            "stage": "证据合并",
+                            "status": "completed",
+                            "message": f"去重后保留 {len(evidence)} 条可引用证据。",
+                            "count": len(evidence),
+                        },
+                        {"stage": "生成回答", "status": "completed", "message": "CC Runtime 已生成 markdown 回答。"},
+                    ]
+                    if event_line and event_line.get("items"):
+                        trace.insert(
+                            -1,
+                            {
+                                "stage": "事件线",
+                                "status": "completed",
+                                "message": f"生成 {len(event_line.get('items') or [])} 个时间节点。",
+                                "count": len(event_line.get("items") or []),
+                            },
+                        )
+                    return ChatResponse(
+                        conversation_id=conversation_id,
+                        answer=answer,
+                        markdown=answer,
+                        context_relation="research_pipeline_cc_runtime",
+                        topic=response_topic,
+                        category_scope=categories or [],
+                        focus_object=FocusObject(type="topic", text=focus_text),
+                        required_context_items=["cc_runtime", "local_news_search", "web_search", "retrieved_evidence", "event_line"],
+                        recommendations=runtime_results[:8],
+                        research_trace=trace,
+                        evidence=evidence,
+                        expanded_queries=runtime_result.queries[:8],
+                        event_line=event_line,
+                    )
+                runtime_fallback_trace.append(
+                    {
+                        "stage": "CC Runtime 主控",
+                        "status": "fallback",
+                        "message": "Runtime 未检索到可引用证据，已回落到原研究流水线。",
+                    }
+                )
+            except Exception as exc:
+                self.store.log("cc_runtime_research", "error", query, {"error_type": type(exc).__name__})
+                runtime_fallback_trace.append(
+                    {
+                        "stage": "CC Runtime 主控",
+                        "status": "fallback",
+                        "message": f"Runtime 暂不可用（{type(exc).__name__}），已回落到原研究流水线。",
+                    }
+                )
         search_plan = await self._plan_search_query(search_message, topic, query, time_range, allow_web_search)
         search_query = search_plan.query
         await _add_trace(
@@ -838,6 +931,8 @@ class NewsChatService:
             },
             on_trace,
         )
+        for item in runtime_fallback_trace:
+            await _add_trace(trace, item, on_trace)
         if search_message != message:
             await _add_trace(
                 trace,

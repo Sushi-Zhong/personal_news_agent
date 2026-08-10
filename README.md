@@ -454,6 +454,23 @@ curl http://127.0.0.1:8000/api/news/search/backend
 
 深度挖掘：`/api/news/deep-dive` 会先做起始召回，再从证据中抽取关键词和实体，生成垂直扩展查询与水平扩展查询并继续召回。LLM planner 的接入点已保留，后续可以由模型决定新事件、新主体、新搜索词和停止条件。
 
+## CC Runtime 主控（实验分支）
+
+研究型对话可以由 Claude Agent SDK Runtime 主控。Runtime 不直接访问数据库、文件或 Shell，只能调用应用提供的两个进程内只读工具：`local_news_search` 和 `web_search`。本地搜索始终可用；外部搜索仍同时受用户本轮“联网回答”开关和 `EXTERNAL_SEARCH_PROVIDER` 配置约束。工具结果会回填原有 `recommendations`、`evidence`、`research_trace`、`event_line` 和 Markdown 回答结构，前后端协议不变。
+
+该实验分支默认启用 Runtime；缺少 SDK 或凭据时不会发起调用，而是自动使用原流水线。可在 `.env` 显式配置或用 `PNA_CC_RUNTIME_ENABLED=0` 关闭：
+
+```bash
+PNA_CC_RUNTIME_ENABLED=1
+PNA_CC_RUNTIME_BASE_URL=https://dashscope.aliyuncs.com/apps/anthropic
+PNA_CC_RUNTIME_AUTH_TOKEN=...
+PNA_CC_RUNTIME_MODEL=qwen3.5-plus
+PNA_CC_RUNTIME_MAX_TURNS=6
+PNA_CC_RUNTIME_TIMEOUT_SECONDS=150
+```
+
+当 `PNA_LLM_ENDPOINT` 使用 DashScope 时，Runtime 默认使用对应的 Anthropic 兼容端点，并可安全复用 `PNA_LLM_KEY`；其他 OpenAI-compatible 端点不会被自动当成 Anthropic Runtime 端点。Runtime SDK 缺失、未配置、超时、报错或没有检索到证据时，服务会回落到原研究流水线。
+
 ## 常用 API
 
 ```bash

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -64,6 +64,54 @@ class Settings:
     llm_key: str | None = os.getenv("PNA_LLM_KEY") or os.getenv("LLM_KEY")
     llm_default_model: str = os.getenv("PNA_LLM_DEFAULT_MODEL", "yuanrong-personal-assistant")
     llm_timeout_seconds: int = int(os.getenv("PNA_LLM_TIMEOUT_SECONDS") or os.getenv("LLM_CLIENT_TIMEOUT_SECONDS", "120"))
+    cc_runtime_enabled: bool = os.getenv("PNA_CC_RUNTIME_ENABLED", "1") == "1"
+    cc_runtime_base_url: str = os.getenv(
+        "PNA_CC_RUNTIME_BASE_URL",
+        (
+            "https://dashscope.aliyuncs.com/apps/anthropic"
+            if "dashscope.aliyuncs.com" in (os.getenv("PNA_LLM_ENDPOINT") or os.getenv("LLM_ENDPOINT") or "")
+            else ""
+        ),
+    ).rstrip("/")
+    cc_runtime_auth_token: str | None = field(
+        default=(
+            os.getenv("PNA_CC_RUNTIME_AUTH_TOKEN")
+            or (
+                (os.getenv("PNA_LLM_KEY") or os.getenv("LLM_KEY"))
+                if "dashscope.aliyuncs.com"
+                in (os.getenv("PNA_LLM_ENDPOINT") or os.getenv("LLM_ENDPOINT") or "")
+                else None
+            )
+        ),
+        repr=False,
+    )
+    cc_runtime_api_key: str | None = field(default=os.getenv("PNA_CC_RUNTIME_API_KEY"), repr=False)
+    cc_runtime_model: str = os.getenv(
+        "PNA_CC_RUNTIME_MODEL",
+        (
+            "qwen3.5-plus"
+            if "dashscope.aliyuncs.com"
+            in (
+                os.getenv("PNA_CC_RUNTIME_BASE_URL")
+                or os.getenv("PNA_LLM_ENDPOINT")
+                or os.getenv("LLM_ENDPOINT")
+                or ""
+            )
+            else "sonnet"
+        ),
+    )
+    cc_runtime_effort: str | None = os.getenv("PNA_CC_RUNTIME_EFFORT") or None
+    cc_runtime_max_turns: int = int(os.getenv("PNA_CC_RUNTIME_MAX_TURNS", "6"))
+    cc_runtime_max_budget_usd: float | None = (
+        float(os.environ["PNA_CC_RUNTIME_MAX_BUDGET_USD"])
+        if os.getenv("PNA_CC_RUNTIME_MAX_BUDGET_USD")
+        else None
+    )
+    cc_runtime_timeout_seconds: float = float(os.getenv("PNA_CC_RUNTIME_TIMEOUT_SECONDS", "150"))
+    cc_runtime_allow_existing_login: bool = os.getenv("PNA_CC_RUNTIME_ALLOW_EXISTING_LOGIN", "0") == "1"
+    cc_runtime_config_dir: Path = Path(
+        os.getenv("PNA_CC_RUNTIME_CONFIG_DIR", str(BASE_DIR / "data" / "cc_runtime"))
+    ).expanduser()
     stock_agent_db_url: str | None = os.getenv("PNA_USER_DB_URL") or os.getenv("SIMPLE_BI_PLATFORM_DB_URL")
     phone_challenge_provider: str = os.getenv(
         "PNA_PHONE_CHALLENGE_PROVIDER",

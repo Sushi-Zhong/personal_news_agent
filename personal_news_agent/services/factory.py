@@ -7,6 +7,7 @@ from claude_code_backend import LocalAgentService
 from personal_news_agent.config import Settings
 from personal_news_agent.services.auth import AuthService
 from personal_news_agent.services.chat import NewsChatService
+from personal_news_agent.services.cc_runtime import CCRuntimeOrchestrator
 from personal_news_agent.services.content_moderation import TextModerationPlusService
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
@@ -44,6 +45,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
     deep_dive = DeepDiveService(search_service)
     local_agent = LocalAgentService()
     llm_client = LLMClient(settings)
+    cc_runtime = CCRuntimeOrchestrator(store, search_service, settings)
     reports = ReportGenerationService(store, search_service, local_agent=local_agent)
     factcheck = FactCheckService(store, search_service, local_agent=local_agent, llm_client=llm_client)
     topic_summary = TopicSummaryService(store, search_service)
@@ -78,6 +80,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
         "topic_extraction": topic_extraction,
         "content_moderation": content_moderation,
         "local_agent": local_agent,
+        "cc_runtime": cc_runtime,
         "skill_registry": skill_registry,
         "crawl": CrawlScheduler(registry, store, url_store, search_index),
     }
@@ -91,6 +94,7 @@ def build_services(settings: Settings) -> dict[str, Any]:
         scheduled_tasks=tasks,
         content_moderation=content_moderation,
         local_agent=local_agent,
+        cc_runtime=cc_runtime,
         skill_registry=skill_registry,
         services=services,
     )
