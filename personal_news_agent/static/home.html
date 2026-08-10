@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260810-console-contrast-1" />
+    <link rel="stylesheet" href="static/styles.css?v=20260810-chat-model-selector-1" />
   </head>
   <body>
     <template id="webTemplate" data-body-class="web-shell console-shell">
@@ -75,12 +75,23 @@
                     </div>
                   </article>
                 </div>
-                <div class="web-search-control">
-                  <label class="web-search-toggle">
-                    <input type="checkbox" role="switch" data-web-search-toggle />
-                    <span>联网回答</span>
-                    <small>开启后使用搜索额度</small>
+                <div class="chat-runtime-controls">
+                  <label class="chat-model-control">
+                    <span>对话模型</span>
+                    <select data-chat-model-select aria-label="选择对话模型">
+                      <option value="yuanrong-personal-assistant">元融大模型</option>
+                      <option value="qwen3.6">Qwen 3.6</option>
+                      <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+                    </select>
+                    <small data-chat-model-hint>默认 · 个人资讯助理</small>
                   </label>
+                  <div class="web-search-control">
+                    <label class="web-search-toggle">
+                      <input type="checkbox" role="switch" data-web-search-toggle />
+                      <span>联网回答</span>
+                      <small>开启后使用搜索额度</small>
+                    </label>
+                  </div>
                 </div>
                 <form id="chatForm" class="command-bar dialog-command">
                   <input id="message" placeholder="继续问..." />
@@ -332,12 +343,23 @@
                   </article>
                 </div>
               </div>
-              <div class="web-search-control mobile-web-search-control">
-                <label class="web-search-toggle">
-                  <input type="checkbox" role="switch" data-web-search-toggle />
-                  <span>联网回答</span>
-                  <small>使用搜索额度</small>
+              <div class="chat-runtime-controls mobile-runtime-controls">
+                <label class="chat-model-control">
+                  <span>模型</span>
+                  <select data-chat-model-select aria-label="选择对话模型">
+                    <option value="yuanrong-personal-assistant">元融大模型</option>
+                    <option value="qwen3.6">Qwen 3.6</option>
+                    <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+                  </select>
+                  <small data-chat-model-hint>默认 · 个人资讯助理</small>
                 </label>
+                <div class="web-search-control mobile-web-search-control">
+                  <label class="web-search-toggle">
+                    <input type="checkbox" role="switch" data-web-search-toggle />
+                    <span>联网回答</span>
+                    <small>使用搜索额度</small>
+                  </label>
+                </div>
               </div>
               <form id="chatForm" class="mobile-chat">
                 <input id="message" placeholder="继续问：影响谁？后续看什么？" />
@@ -423,6 +445,6 @@
 
     <script src="static/vendor/react.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/react-dom.production.min.js?v=18.3.1"></script>
-    <script src="static/home.js?v=20260810-phone-controls-2"></script>
+    <script src="static/home.js?v=20260810-chat-model-selector-1"></script>
   </body>
 </html>

@@ -395,9 +395,11 @@ curl -X POST http://127.0.0.1:8000/api/onboarding/complete \
 
 模型选择：
 
-- `yuanrong-personal-assistant`：展示名“元融个人助理大模型”，底层 `qwen3.5-plus`，绑定一个很短的固定系统提示词。
-- `qwen3.5-flash`：直接接入的轻量模型。
-- `qwen3.5-plus`：直接接入的增强模型。
+- `yuanrong-personal-assistant`：展示名“元融大模型”，默认的个人资讯助理角色。
+- `qwen3.6`：偏向层次清楚、覆盖完整的通用分析角色。
+- `deepseek-v4-flash`：偏向快速、直接的新闻摘要角色。
+
+以上是面向用户的逻辑模型角色，用于控制交互风格和产品概念；当前三个选项实际统一运行在 `deepseek-v4-flash`，不会因前端切换而改变工具权限、搜索范围或接口协议。
 
 初始化完成后会生成个性化 assistant prompt，并保存到 `pna_users.assistant_prompt`。
 
@@ -464,7 +466,7 @@ curl http://127.0.0.1:8000/api/news/search/backend
 PNA_CC_RUNTIME_ENABLED=1
 PNA_CC_RUNTIME_BASE_URL=https://dashscope.aliyuncs.com/apps/anthropic
 PNA_CC_RUNTIME_AUTH_TOKEN=...
-PNA_CC_RUNTIME_MODEL=qwen3.5-plus
+PNA_CC_RUNTIME_MODEL=deepseek-v4-flash
 PNA_CC_RUNTIME_MAX_TURNS=6
 PNA_CC_RUNTIME_TIMEOUT_SECONDS=150
 ```

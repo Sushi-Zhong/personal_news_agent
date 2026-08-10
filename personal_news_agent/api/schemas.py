@@ -80,6 +80,7 @@ class ChatRequest(BaseModel):
     category_scope: list[str] | None = None
     use_llm: bool = False
     allow_web_search: bool = False
+    model_key: str = Field(default="yuanrong-personal-assistant", min_length=1, max_length=80)
 
 
 class ReportRequest(BaseModel):

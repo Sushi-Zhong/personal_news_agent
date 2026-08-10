@@ -3178,6 +3178,40 @@ pre {
   min-height: 52px;
 }
 
+.chat-runtime-controls {
+  align-items: flex-end;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+
+.chat-model-control {
+  align-items: center;
+  color: #344054;
+  display: inline-grid;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 5px 8px;
+  grid-template-columns: auto minmax(150px, 210px);
+}
+
+.chat-model-control select {
+  border: 1px solid #b8c7da;
+  border-radius: 9px;
+  font-size: 13px;
+  min-height: 36px;
+  padding: 6px 30px 6px 10px;
+}
+
+.chat-model-control small {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 500;
+  grid-column: 2;
+  line-height: 1.3;
+}
+
 .web-search-control {
   display: flex;
   justify-content: flex-end;
@@ -3234,7 +3268,28 @@ pre {
 }
 
 .mobile-web-search-control {
-  margin-top: 8px;
+  margin-top: 0;
+}
+
+@media (max-width: 760px) {
+  .chat-runtime-controls {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .chat-model-control {
+    grid-template-columns: 54px minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .chat-model-control select {
+    width: 100%;
+  }
+
+  .mobile-runtime-controls .web-search-control {
+    justify-content: flex-start;
+  }
 }
 
 .feed-panel,
@@ -4546,6 +4601,20 @@ body.console-shell {
 
 .console-shell .web-search-toggle input {
   background: #31475e;
+}
+
+.console-shell .chat-model-control {
+  color: #d6e4f2;
+}
+
+.console-shell .chat-model-control select {
+  background: rgba(15, 32, 50, 0.96);
+  border-color: rgba(103, 232, 249, 0.3);
+  color: #f1f7fd;
+}
+
+.console-shell .chat-model-control small {
+  color: #91a9bf;
 }
 
 .console-shell .evidence-strip article,

@@ -604,6 +604,7 @@ function syncMobileChatContext() {
     category_scope: mobileState.categoryScope,
     use_llm: true,
     allow_web_search: isWebSearchEnabled(),
+    model_key: getChatModelKey(),
   };
   updateMobileBrief();
 }

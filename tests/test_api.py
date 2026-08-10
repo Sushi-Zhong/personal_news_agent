@@ -19,7 +19,7 @@ def test_api_health_and_main_routes():
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
-        assert health.json()["frontend_revision"] == "20260810-console-contrast-1"
+        assert health.json()["frontend_revision"] == "20260810-chat-model-selector-1"
         assert health.json()["source_count"] >= 20
 
         feed = client.get("/api/feed?category=tech&limit=5")
@@ -53,7 +53,7 @@ def test_api_health_and_main_routes():
         auth = client.get("/auth")
         assert auth.status_code == 200
         assert auth.headers["cache-control"] == "no-store, max-age=0"
-        assert auth.headers["x-pna-frontend-revision"] == "20260810-console-contrast-1"
+        assert auth.headers["x-pna-frontend-revision"] == "20260810-chat-model-selector-1"
         assert 'data-auth-mode-target="login"' in auth.text
         assert "短信验证码仅用于确认你持有该手机号" in auth.text
 
@@ -143,7 +143,15 @@ def test_onboarding_generates_profile_prompt_and_model_choice():
     with TestClient(app) as client:
         models = client.get("/api/models")
         assert models.status_code == 200
-        assert any(item["key"] == "yuanrong-personal-assistant" for item in models.json()["items"])
+        model_payload = models.json()
+        assert model_payload["default_model"] == "yuanrong-personal-assistant"
+        assert {item["key"] for item in model_payload["items"]} == {
+            "yuanrong-personal-assistant",
+            "qwen3.6",
+            "deepseek-v4-flash",
+        }
+        assert {item["provider_model"] for item in model_payload["items"]} == {"deepseek-v4-flash"}
+        assert all(item["logical_only"] is True for item in model_payload["items"])
 
         options = client.get("/api/onboarding/options")
         assert options.status_code == 200
@@ -185,7 +193,7 @@ def test_onboarding_generates_profile_prompt_and_model_choice():
         )
         assert completed.status_code == 200
         body = completed.json()
-        assert body["model"]["provider_model"] == "qwen3.5-plus"
+        assert body["model"]["provider_model"] == "deepseek-v4-flash"
         assert body["model"]["has_fixed_system_prompt"] is True
         assert any(item["key"] == "assistant_prompt_saved" for item in body["preparation"])
         assert "元融个人助理大模型" in body["assistant_prompt"]

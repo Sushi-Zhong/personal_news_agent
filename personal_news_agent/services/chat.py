@@ -21,6 +21,7 @@ from personal_news_agent.services.chat_understanding import (
     time_range_from_message,
 )
 from personal_news_agent.services.llm import LLMClient
+from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL, SHARED_RUNTIME_MODEL, get_model_option
 from personal_news_agent.services.search import (
     UnifiedSearchService,
     search_result_matches_subject,
@@ -150,6 +151,7 @@ class NewsChatService:
         use_llm: bool = False,
         user_id: str = "default",
         allow_web_search: bool = False,
+        model_key: str = DEFAULT_LOGICAL_MODEL,
     ) -> ChatResponse:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
         topic, category_scope = self._resolve_conversation_context(conv_id, message, topic, category_scope, user_id)
@@ -180,6 +182,7 @@ class NewsChatService:
                 category_scope,
                 user_id=user_id,
                 allow_web_search=allow_web_search,
+                model_key=model_key,
             )
         else:
             response = await self._news_search(
@@ -190,6 +193,7 @@ class NewsChatService:
                 use_llm,
                 user_id,
                 allow_web_search,
+                model_key,
             )
         self._save_response_turn(response, message, user_id, save_topic, category_scope)
         return response
@@ -310,6 +314,7 @@ class NewsChatService:
         use_llm: bool = False,
         user_id: str = "default",
         allow_web_search: bool = False,
+        model_key: str = DEFAULT_LOGICAL_MODEL,
     ) -> AsyncIterator[dict[str, Any]]:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
         topic, category_scope = self._resolve_conversation_context(conv_id, message, topic, category_scope, user_id)
@@ -352,6 +357,7 @@ class NewsChatService:
                     use_llm,
                     user_id,
                     allow_web_search,
+                    model_key,
                 )
             )
             self._save_response_turn(response, message, user_id, save_topic, category_scope)
@@ -373,6 +379,7 @@ class NewsChatService:
                     emit_trace,
                     user_id,
                     allow_web_search,
+                    model_key,
                 )
                 self._save_response_turn(response, message, user_id, save_topic, category_scope)
                 await queue.put({"type": "final", "response": response.model_dump(mode="json")})
@@ -764,6 +771,7 @@ class NewsChatService:
         use_llm: bool = False,
         user_id: str = "default",
         allow_web_search: bool = False,
+        model_key: str = DEFAULT_LOGICAL_MODEL,
     ) -> ChatResponse:
         explicit_query = _explicit_focus_from_message(message)
         search_message = await self._resolve_contextual_search_message(conversation_id, user_id, message, topic)
@@ -771,6 +779,7 @@ class NewsChatService:
         response_topic = topic or query
         focus_text = query if explicit_query else response_topic
         categories = categories_for_message(search_message, topic, category_scope)
+        selected_model = get_model_option(model_key, getattr(self.llm_client, "settings", None))
         rule_drift_warning = _topic_drift_warning(topic, query, search_message)
         drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, search_message, rule_drift_warning))
         results = await self.search_service.search(
@@ -816,11 +825,13 @@ class NewsChatService:
         on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         user_id: str = "default",
         allow_web_search: bool = False,
+        model_key: str = DEFAULT_LOGICAL_MODEL,
     ) -> ChatResponse:
         trace: list[dict[str, Any]] = []
         explicit_query = _explicit_focus_from_message(message)
         search_message = await self._resolve_contextual_search_message(conversation_id, user_id, message, topic)
         query = explicit_query or query_from_message(search_message, topic)
+        selected_model = get_model_option(model_key, getattr(self.llm_client, "settings", None))
         response_topic = topic or query
         focus_text = query if explicit_query else response_topic
         categories = categories_for_message(search_message, topic, category_scope)
@@ -844,6 +855,8 @@ class NewsChatService:
                     time_range=time_range,
                     history=history,
                     allow_web_search=allow_web_search,
+                    logical_model_key=selected_model.key,
+                    logical_model_name=selected_model.name,
                 )
                 runtime_results = _rank_for_chat(
                     _filter_by_time(_enrich_from_store(self.store, runtime_result.results), time_range),
@@ -867,6 +880,12 @@ class NewsChatService:
                             "status": "completed",
                             "message": f"自主执行 {len(runtime_result.queries)} 次只读检索并组织回答。",
                             "count": len(runtime_result.queries),
+                            "logical_model": selected_model.key,
+                            "runtime_model": getattr(
+                                getattr(self.cc_runtime, "settings", None),
+                                "cc_runtime_model",
+                                SHARED_RUNTIME_MODEL,
+                            ),
                         },
                         *runtime_result.trace,
                         {
@@ -1092,7 +1111,10 @@ class NewsChatService:
             try:
                 await _add_trace(trace, {"stage": "生成回答", "status": "running", "message": "正在组织 markdown 回答。"}, on_trace)
                 history = self._conversation_memory(conversation_id, user_id)
-                answer = await self.llm_client.chat(_research_messages(message, query, categories, time_range, evidence, expanded_queries, event_line, trace, history))
+                answer = await self.llm_client.chat(
+                    _research_messages(message, query, categories, time_range, evidence, expanded_queries, event_line, trace, history),
+                    model_key=selected_model.key,
+                )
                 answer = _prepend_notice(answer, drift_warning)
                 context_relation = "research_pipeline_llm"
             except Exception as exc:

@@ -40,9 +40,10 @@ from personal_news_agent.config import Settings
 from personal_news_agent.core.categories import CATEGORIES
 from personal_news_agent.services.auth import AuthError
 from personal_news_agent.services.report_export import export_report
+from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL
 
 
-FRONTEND_REVISION = "20260810-console-contrast-1"
+FRONTEND_REVISION = "20260810-chat-model-selector-1"
 NO_CACHE_PAGE_HEADERS = {
     "Cache-Control": "no-store, max-age=0",
     "X-PNA-Frontend-Revision": FRONTEND_REVISION,
@@ -110,7 +111,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
     async def models() -> dict[str, Any]:
         return {
             "items": services["model_options"](),
-            "default_model": settings.llm_default_model,
+            "default_model": DEFAULT_LOGICAL_MODEL,
             "endpoint_configured": bool(settings.llm_endpoint),
         }
 
@@ -479,6 +480,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             payload.use_llm,
             user_id=payload.user_id,
             allow_web_search=payload.allow_web_search,
+            model_key=payload.model_key,
         )
 
     @app.get("/api/chat/conversations")
@@ -517,6 +519,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
                 payload.use_llm,
                 user_id=payload.user_id,
                 allow_web_search=payload.allow_web_search,
+                model_key=payload.model_key,
             ):
                 event_type = event.get("type", "message")
                 data = json.dumps(event, ensure_ascii=False, default=str)

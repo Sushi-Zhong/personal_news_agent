@@ -1,6 +1,13 @@
 let activeUserId = localStorage.getItem("pna_user_id") || "default";
 let conversationId = localStorage.getItem("pna_conversation_id") || null;
 let webSearchEnabled = localStorage.getItem(webSearchPreferenceKey()) === "1";
+const DEFAULT_CHAT_MODEL_KEY = "yuanrong-personal-assistant";
+const FALLBACK_CHAT_MODELS = [
+  { key: DEFAULT_CHAT_MODEL_KEY, name: "元融大模型", description: "默认个人资讯助理角色" },
+  { key: "qwen3.6", name: "Qwen 3.6", description: "层次清楚的通用分析角色" },
+  { key: "deepseek-v4-flash", name: "DeepSeek V4 Flash", description: "快速直接的资讯问答角色" },
+];
+let chatModelOptions = FALLBACK_CHAT_MODELS;
 const APP_BASE_PATH = (() => {
   const prefix = "/pna";
   return window.location.pathname === prefix || window.location.pathname.startsWith(`${prefix}/`) ? prefix : "";
@@ -33,7 +40,51 @@ function bindWebSearchToggles() {
   });
 }
 
+function chatModelPreferenceKey() {
+  return `pna_chat_model:${activeUserId || "default"}`;
+}
+
+function getChatModelKey() {
+  const saved = localStorage.getItem(chatModelPreferenceKey());
+  return chatModelOptions.some((item) => item.key === saved) ? saved : DEFAULT_CHAT_MODEL_KEY;
+}
+
+function setChatModelKey(modelKey) {
+  const resolved = chatModelOptions.some((item) => item.key === modelKey) ? modelKey : DEFAULT_CHAT_MODEL_KEY;
+  localStorage.setItem(chatModelPreferenceKey(), resolved);
+  document.querySelectorAll("[data-chat-model-select]").forEach((select) => {
+    select.value = resolved;
+  });
+  const selected = chatModelOptions.find((item) => item.key === resolved) || chatModelOptions[0];
+  document.querySelectorAll("[data-chat-model-hint]").forEach((node) => {
+    node.textContent = resolved === DEFAULT_CHAT_MODEL_KEY
+      ? `默认 · ${selected?.description || "个人资讯助理"}`
+      : selected?.description || "对话角色";
+  });
+  if (window.currentChatContext) window.currentChatContext.model_key = resolved;
+  return resolved;
+}
+
+async function loadChatModelSelectors() {
+  try {
+    const data = await request("/api/models");
+    if (Array.isArray(data.items) && data.items.length) chatModelOptions = data.items;
+  } catch (error) {
+    chatModelOptions = FALLBACK_CHAT_MODELS;
+  }
+  const selectedKey = getChatModelKey();
+  document.querySelectorAll("[data-chat-model-select]").forEach((select) => {
+    select.innerHTML = chatModelOptions
+      .map((item) => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.name)}</option>`)
+      .join("");
+    select.value = selectedKey;
+    select.addEventListener("change", () => setChatModelKey(select.value));
+  });
+  setChatModelKey(selectedKey);
+}
+
 bindWebSearchToggles();
+loadChatModelSelectors();
 
 function appUrl(path) {
   if (!path || !path.startsWith("/") || path.startsWith("//") || !APP_BASE_PATH) return path;
@@ -139,6 +190,7 @@ function saveSession(authResult) {
     localStorage.setItem("pna_session_token", authResult.session.token);
   }
   renderUser();
+  loadChatModelSelectors();
 }
 
 function renderUser() {
@@ -290,7 +342,7 @@ async function loadOnboardingOptions(formSelector) {
   const modelSelect = form.querySelector("[name=model_key]");
   if (modelSelect) {
     modelSelect.innerHTML = data.models
-      .map((item) => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.name)} · ${escapeHtml(item.provider_model)}</option>`)
+      .map((item) => `<option value="${escapeAttr(item.key)}">${escapeHtml(item.name)}</option>`)
       .join("");
     modelSelect.value = data.default_model;
   }
@@ -343,6 +395,7 @@ async function completeOnboardingFromForm(form) {
     localStorage.setItem("pna_user_name", payload.display_name);
     renderUser();
   }
+  setChatModelKey(payload.model_key);
   return result;
 }
 
@@ -437,6 +490,7 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
     category_scope: chatContext.category_scope || null,
     use_llm: Boolean(chatContext.use_llm),
     allow_web_search: Boolean(chatContext.allow_web_search),
+    model_key: chatContext.model_key || getChatModelKey(),
   };
   try {
     const streamed = await streamChat(payload, assistantNode, targetNode);

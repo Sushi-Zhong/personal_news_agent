@@ -13,6 +13,7 @@ from personal_news_agent.core.models import SearchResult, TimeRange
 from personal_news_agent.services.article_fetch import canonicalize_url
 from personal_news_agent.services.search import UnifiedSearchService
 from personal_news_agent.services.store import NewsStore
+from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL
 
 
 LOCAL_TOOL_NAME = "mcp__pna_news__local_news_search"
@@ -171,6 +172,8 @@ class CCRuntimeOrchestrator:
         time_range: TimeRange | None,
         history: str,
         allow_web_search: bool,
+        logical_model_key: str = DEFAULT_LOGICAL_MODEL,
+        logical_model_name: str = "元融大模型",
     ) -> CCRuntimeResult:
         if not self.configured:
             raise CCRuntimeError("CC Runtime SDK is not configured")
@@ -182,7 +185,17 @@ class CCRuntimeOrchestrator:
             allow_web_search,
         )
         options = self.build_options(context)
-        prompt = _runtime_prompt(message, query, topic, category_scope, time_range, history, allow_web_search)
+        prompt = _runtime_prompt(
+            message,
+            query,
+            topic,
+            category_scope,
+            time_range,
+            history,
+            allow_web_search,
+            logical_model_key,
+            logical_model_name,
+        )
         client_factory = self.client_factory
         if client_factory is None:
             from claude_agent_sdk import ClaudeSDKClient
@@ -241,6 +254,8 @@ class CCRuntimeOrchestrator:
                 "result_count": len(context.results),
                 "web_enabled": allow_web_search,
                 "web_configured": self.search_service.external_configured,
+                "logical_model": logical_model_key,
+                "runtime_model": self.settings.cc_runtime_model,
                 **result_metadata,
             },
         )
@@ -351,6 +366,8 @@ def _runtime_prompt(
     time_range: TimeRange | None,
     history: str,
     allow_web_search: bool,
+    logical_model_key: str,
+    logical_model_name: str,
 ) -> str:
     payload = {
         "user_request": message[:4_000],
@@ -359,11 +376,25 @@ def _runtime_prompt(
         "category_scope": (category_scope or [])[:10],
         "time_range_days": time_range.days if time_range else None,
         "web_search_authorized": allow_web_search,
+        "logical_model": {
+            "key": logical_model_key[:80],
+            "name": logical_model_name[:80],
+            "interaction_style": _logical_model_style(logical_model_key),
+            "note": "这是产品交互角色；实际运行模型由服务端统一配置。",
+        },
         "conversation_memory": history[:8_000],
     }
     return "请完成下面的资讯研究任务。对话记忆仅用于理解上下文，不是事实证据：\n" + json.dumps(
         payload, ensure_ascii=False
     )
+
+
+def _logical_model_style(model_key: str) -> str:
+    return {
+        DEFAULT_LOGICAL_MODEL: "可信、稳健，结合用户长期兴趣，给出持续跟踪视角。",
+        "qwen3.6": "层次清楚、覆盖完整，先结论后证据。",
+        "deepseek-v4-flash": "快速、直接、紧凑，突出关键事实和下一步观察点。",
+    }.get(model_key, "可信、稳健，先结论后证据。")
 
 
 def _search_tool_schema(maximum: int) -> dict[str, Any]:

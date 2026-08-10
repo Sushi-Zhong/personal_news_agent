@@ -463,7 +463,7 @@ def test_cc_runtime_options_expose_only_read_only_news_tools(services, tmp_path)
             cc_runtime_enabled=True,
             cc_runtime_auth_token="test-only",
             cc_runtime_base_url="https://dashscope.aliyuncs.com/apps/anthropic",
-            cc_runtime_model="qwen3.5-plus",
+            cc_runtime_model="deepseek-v4-flash",
             cc_runtime_config_dir=tmp_path / "cc-runtime",
         ),
     )
@@ -498,7 +498,7 @@ def test_cc_runtime_run_normalizes_sdk_result_without_changing_business_schema(s
             cc_runtime_enabled=True,
             cc_runtime_auth_token="test-only",
             cc_runtime_base_url="https://dashscope.aliyuncs.com/apps/anthropic",
-            cc_runtime_model="qwen3.5-plus",
+            cc_runtime_model="deepseek-v4-flash",
             cc_runtime_config_dir=tmp_path / "cc-runtime-run",
         ),
         client_factory=FakeClaudeSDKClient,
@@ -535,10 +535,12 @@ def test_research_chat_uses_cc_runtime_without_changing_response_contract(servic
             use_llm=True,
             user_id="default",
             allow_web_search=True,
+            model_key="qwen3.6",
         )
     )
 
     assert runtime.calls == 1
+    assert runtime.logical_model_key == "qwen3.6"
     assert response.context_relation == "research_pipeline_cc_runtime"
     assert response.answer == "## Runtime 汇总\n\n证据支持这项变化。"
     assert response.recommendations
@@ -641,8 +643,8 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260810-phone-controls-2" in home_source
-    assert "styles.css?v=20260810-console-contrast-1" in home_html
+    assert "20260810-chat-model-selector-1" in home_source
+    assert "styles.css?v=20260810-chat-model-selector-1" in home_html
     assert "shared.js?v=20260810-phone-controls-2" in mobile_html
 
 
@@ -2720,10 +2722,12 @@ class FakeCCRuntime:
 
     def __init__(self):
         self.calls = 0
+        self.logical_model_key = None
 
     async def run(self, **kwargs):
         self.calls += 1
         assert kwargs["allow_web_search"] is True
+        self.logical_model_key = kwargs["logical_model_key"]
         return CCRuntimeResult(
             answer="## Runtime 汇总\n\n证据支持这项变化。",
             results=[

@@ -86,20 +86,7 @@ class Settings:
         repr=False,
     )
     cc_runtime_api_key: str | None = field(default=os.getenv("PNA_CC_RUNTIME_API_KEY"), repr=False)
-    cc_runtime_model: str = os.getenv(
-        "PNA_CC_RUNTIME_MODEL",
-        (
-            "qwen3.5-plus"
-            if "dashscope.aliyuncs.com"
-            in (
-                os.getenv("PNA_CC_RUNTIME_BASE_URL")
-                or os.getenv("PNA_LLM_ENDPOINT")
-                or os.getenv("LLM_ENDPOINT")
-                or ""
-            )
-            else "sonnet"
-        ),
-    )
+    cc_runtime_model: str = os.getenv("PNA_CC_RUNTIME_MODEL", "deepseek-v4-flash")
     cc_runtime_effort: str | None = os.getenv("PNA_CC_RUNTIME_EFFORT") or None
     cc_runtime_max_turns: int = int(os.getenv("PNA_CC_RUNTIME_MAX_TURNS", "6"))
     cc_runtime_max_budget_usd: float | None = (

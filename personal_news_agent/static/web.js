@@ -1292,6 +1292,7 @@ function syncChatContext() {
     category_scope: consoleState.categoryScope,
     use_llm: true,
     allow_web_search: isWebSearchEnabled(),
+    model_key: getChatModelKey(),
   };
 }
 

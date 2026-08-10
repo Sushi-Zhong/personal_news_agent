@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from personal_news_agent.config import Settings
 from personal_news_agent.core.categories import CATEGORIES
-from personal_news_agent.services.model_config import get_model_option, public_model_options
+from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL, get_model_option, public_model_options
 from personal_news_agent.services.store import NewsStore
 
 
@@ -48,7 +48,7 @@ class OnboardingService:
             "default_categories": ["tech", "game", "auto"],
             "output_styles": OUTPUT_STYLE_OPTIONS,
             "models": public_model_options(),
-            "default_model": self.settings.llm_default_model,
+            "default_model": DEFAULT_LOGICAL_MODEL,
         }
 
     def complete(self, user_id: str, payload: dict) -> dict:
@@ -97,7 +97,7 @@ class OnboardingService:
             "preferred_categories": preferred,
             "watch_keywords": watch_keywords,
             "negative_keywords": negative_keywords,
-            "model_key": payload.get("model_key") or self.settings.llm_default_model,
+            "model_key": payload.get("model_key") or DEFAULT_LOGICAL_MODEL,
             "output_style": self._normalize_output_style(payload.get("output_style")),
         }
 
