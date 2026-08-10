@@ -194,6 +194,12 @@ async function registerFromForm(form) {
   return result;
 }
 
+function ensureRegistrationChallenge(form, status) {
+  if (String(form?.elements.challenge_id?.value || "").trim()) return true;
+  if (status) status.textContent = "请先获取短信验证码。";
+  return false;
+}
+
 async function requestRegistrationCodeFromForm(form) {
   const mobile = String(new FormData(form).get("mobile") || "").trim();
   const result = await request("/api/auth/registration-code", {
@@ -211,20 +217,19 @@ async function requestRegistrationCodeFromForm(form) {
 function bindRegistrationCodeForm(formSelector, statusSelector) {
   const form = document.querySelector(formSelector);
   const button = form?.querySelector("[data-send-registration-code]");
-  const submit = form?.querySelector('button[type="submit"]');
   const mobile = form?.elements.mobile;
   const status = document.querySelector(statusSelector);
   if (!form || !button || !mobile) return;
 
   request("/api/auth/config")
     .then((config) => {
+      form.dataset.phoneRegistrationAvailable = config.available ? "1" : "0";
       if (config.available) return;
-      button.disabled = true;
-      if (submit) submit.disabled = true;
-      if (status) status.textContent = "短信验证码服务尚未完成配置，暂时无法注册。";
+      if (status) status.textContent = "短信服务暂时不可用，你仍可点击发送重试；如持续失败请联系管理员。";
     })
     .catch(() => {
-      if (status && !status.textContent) status.textContent = "暂时无法读取注册服务状态。";
+      form.dataset.phoneRegistrationAvailable = "unknown";
+      if (status && !status.textContent) status.textContent = "暂时无法读取短信服务状态，你可以点击发送重试。";
     });
 
   mobile.addEventListener("input", () => {

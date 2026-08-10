@@ -68,6 +68,7 @@ document.querySelector("#registerForm").addEventListener("submit", async (event)
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
   const status = document.querySelector("#registerStatus");
+  if (!ensureRegistrationChallenge(form, status)) return;
   if (button) button.disabled = true;
   if (status) status.textContent = "正在验证手机号并创建账号。";
   try {
