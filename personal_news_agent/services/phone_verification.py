@@ -100,6 +100,12 @@ class PhoneVerificationService:
             ],
         }
 
+    def mobile_hash(self, mobile: Any) -> str:
+        """Return the same non-reversible mobile key used by stored challenges."""
+
+        normalized_mobile = normalize_mainland_mobile(mobile)
+        return self._hmac(f"mobile:{normalized_mobile}")
+
     def request_code(self, mobile: Any, remote_addr: str = "") -> dict[str, Any]:
         self._require_operational()
         normalized_mobile = normalize_mainland_mobile(mobile)
@@ -114,7 +120,7 @@ class PhoneVerificationService:
         now_text = now.isoformat()
         rate_cutoff = (now - timedelta(seconds=self.rate_window_seconds)).isoformat()
         challenge_id = f"pvc_{secrets.token_urlsafe(24)}"
-        mobile_hash = self._hmac(f"mobile:{normalized_mobile}")
+        mobile_hash = self.mobile_hash(normalized_mobile)
         ip_hash = self._hmac(f"ip:{str(remote_addr or 'unknown')[:64]}")
         code = self.settings.phone_challenge_mock_code if self.provider == "mock" else ""
         code_hash = self._code_hash(challenge_id, mobile_hash, code) if code else "provider-managed"

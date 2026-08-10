@@ -140,3 +140,9 @@ def test_server_web_launcher_defaults_to_nginx_upstream_port():
     controls = (ROOT / "scripts" / "service_control_lib.sh").read_text(encoding="utf-8")
     assert '${PNA_WEB_PORT:-22053}' in launcher
     assert '${PNA_WEB_PORT:-22053}' in controls
+
+
+def test_delete_phone_user_script_has_valid_python_syntax():
+    for name in ("delete_phone_user.py", "change_phone_user.py"):
+        script = ROOT / "scripts" / name
+        compile(script.read_text(encoding="utf-8"), str(script), "exec")

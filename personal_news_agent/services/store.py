@@ -1056,6 +1056,123 @@ class NewsStore:
             row = conn.execute("SELECT * FROM pna_users WHERE mobile = ?", (mobile,)).fetchone()
         return _row(row) if row else None
 
+    def delete_phone_user(self, mobile: str, mobile_hash: str, *, confirm: bool = False) -> dict[str, Any]:
+        """Preview or atomically delete one phone account and its user-owned records."""
+
+        user_tables = (
+            "pna_user_profiles",
+            "user_profiles",
+            "pna_auth_identities",
+            "pna_auth_sessions",
+            "user_feedback",
+            "scheduled_tasks",
+            "notifications",
+            "pna_topics",
+            "reports",
+            "conversation_turns",
+            "conversations",
+        )
+        with self.connect() as conn:
+            users = conn.execute("SELECT id FROM pna_users WHERE mobile = ?", (mobile,)).fetchall()
+            user_ids = [row["id"] for row in users]
+            counts: dict[str, int] = {}
+            for table in user_tables:
+                if user_ids:
+                    placeholders = ",".join("?" for _ in user_ids)
+                    counts[table] = int(
+                        conn.execute(
+                            f"SELECT COUNT(*) AS count FROM {table} WHERE user_id IN ({placeholders})",
+                            user_ids,
+                        ).fetchone()["count"]
+                    )
+                else:
+                    counts[table] = 0
+            counts["pna_users"] = len(user_ids)
+            counts["pna_phone_verification_challenges"] = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS count FROM pna_phone_verification_challenges WHERE mobile_hash = ?",
+                    (mobile_hash,),
+                ).fetchone()["count"]
+            )
+            result = {
+                "mobile_masked": f"{mobile[:3]}****{mobile[-4:]}",
+                "user_ids": user_ids,
+                "counts": counts,
+                "deleted": False,
+            }
+            if not confirm:
+                return result
+
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if user_ids:
+                    placeholders = ",".join("?" for _ in user_ids)
+                    for table in user_tables:
+                        conn.execute(f"DELETE FROM {table} WHERE user_id IN ({placeholders})", user_ids)
+                    conn.execute(f"DELETE FROM pna_users WHERE id IN ({placeholders})", user_ids)
+                conn.execute(
+                    "DELETE FROM pna_phone_verification_challenges WHERE mobile_hash = ?",
+                    (mobile_hash,),
+                )
+            except Exception:
+                conn.rollback()
+                raise
+            result["deleted"] = True
+            return result
+
+    def change_phone_user(
+        self,
+        old_mobile: str,
+        new_mobile: str,
+        old_mobile_hash: str,
+        new_mobile_hash: str,
+        *,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Preview or change a phone login while preserving the account user id and password."""
+
+        with self.connect() as conn:
+            user = conn.execute("SELECT * FROM pna_users WHERE mobile = ? LIMIT 1", (old_mobile,)).fetchone()
+            if not user:
+                raise ValueError("source_mobile_not_registered")
+            conflict = conn.execute("SELECT id FROM pna_users WHERE mobile = ? LIMIT 1", (new_mobile,)).fetchone()
+            if conflict and conflict["id"] != user["id"]:
+                raise ValueError("target_mobile_already_registered")
+
+            result = {
+                "user_id": user["id"],
+                "old_mobile_masked": f"{old_mobile[:3]}****{old_mobile[-4:]}",
+                "new_mobile_masked": f"{new_mobile[:3]}****{new_mobile[-4:]}",
+                "password_preserved": True,
+                "changed": False,
+            }
+            if not confirm:
+                return result
+
+            now = _now()
+            username = new_mobile if user["username"] == old_mobile else user["username"]
+            old_default_name = f"用户 {old_mobile[:3]}****{old_mobile[-4:]}"
+            display_name = (
+                f"用户 {new_mobile[:3]}****{new_mobile[-4:]}"
+                if user["display_name"] == old_default_name
+                else user["display_name"]
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "UPDATE pna_users SET username = ?, display_name = ?, mobile = ?, updated_at = ? WHERE id = ?",
+                    (username, display_name, new_mobile, now, user["id"]),
+                )
+                conn.execute(
+                    "DELETE FROM pna_phone_verification_challenges WHERE mobile_hash IN (?, ?)",
+                    (old_mobile_hash, new_mobile_hash),
+                )
+            except Exception:
+                conn.rollback()
+                raise
+            result["changed"] = True
+            return result
+
     def get_user_by_email(self, email: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM pna_users WHERE email = ?", (email,)).fetchone()

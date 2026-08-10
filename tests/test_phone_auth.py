@@ -68,6 +68,88 @@ def test_phone_code_registration_login_and_one_time_consumption(tmp_path: Path) 
     assert reused.value.code == "mobile_already_registered"
 
 
+def test_delete_phone_user_previews_then_removes_account_sessions_and_challenges(tmp_path: Path) -> None:
+    auth = _auth(tmp_path)
+    mobile = "13800138000"
+    challenge = auth.request_registration_code(mobile, "127.0.0.1")
+    registered = auth.register_phone(
+        mobile=mobile,
+        challenge_id=challenge["challenge_id"],
+        verification_code="123456",
+        password="12345678",
+        confirm_password="12345678",
+    )
+    user_id = registered["user"]["id"]
+    mobile_hash = auth.phone_verification.mobile_hash(mobile)
+
+    preview = auth.store.delete_phone_user(mobile, mobile_hash)
+    assert preview["deleted"] is False
+    assert preview["counts"]["pna_users"] == 1
+    assert preview["counts"]["pna_auth_sessions"] == 1
+    assert preview["counts"]["pna_phone_verification_challenges"] == 1
+    assert auth.store.get_user(user_id) is not None
+
+    deleted = auth.store.delete_phone_user(mobile, mobile_hash, confirm=True)
+    assert deleted["deleted"] is True
+    assert auth.store.get_user(user_id) is None
+    with auth.store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pna_auth_sessions WHERE user_id = ?", (user_id,)).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM pna_phone_verification_challenges WHERE mobile_hash = ?",
+            (mobile_hash,),
+        ).fetchone()[0] == 0
+
+
+def test_change_phone_user_preserves_identity_password_session_and_owned_data(tmp_path: Path) -> None:
+    auth = _auth(tmp_path)
+    old_mobile = "13800138000"
+    new_mobile = "13900139000"
+    challenge = auth.request_registration_code(old_mobile, "127.0.0.1")
+    registered = auth.register_phone(
+        mobile=old_mobile,
+        challenge_id=challenge["challenge_id"],
+        verification_code="123456",
+        password="12345678",
+        confirm_password="12345678",
+    )
+    user_id = registered["user"]["id"]
+    before = auth.store.get_user(user_id)
+    with auth.store.connect() as conn:
+        conn.execute(
+            "INSERT INTO conversations(id, user_id, title, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("conv-change-phone", user_id, "保留的对话", "chat", "now", "now"),
+        )
+
+    preview = auth.store.change_phone_user(
+        old_mobile,
+        new_mobile,
+        auth.phone_verification.mobile_hash(old_mobile),
+        auth.phone_verification.mobile_hash(new_mobile),
+    )
+    assert preview["changed"] is False
+    assert auth.store.get_user_by_mobile(old_mobile)["id"] == user_id
+
+    changed = auth.store.change_phone_user(
+        old_mobile,
+        new_mobile,
+        auth.phone_verification.mobile_hash(old_mobile),
+        auth.phone_verification.mobile_hash(new_mobile),
+        confirm=True,
+    )
+    assert changed["changed"] is True
+    assert auth.store.get_user_by_mobile(old_mobile) is None
+    after = auth.store.get_user_by_mobile(new_mobile)
+    assert after["id"] == user_id
+    assert after["password_hash"] == before["password_hash"]
+    assert auth.login(new_mobile, "12345678")["user"]["id"] == user_id
+    with auth.store.connect() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM conversations WHERE id = ? AND user_id = ?",
+            ("conv-change-phone", user_id),
+        ).fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM pna_auth_sessions WHERE user_id = ?", (user_id,)).fetchone()[0] >= 1
+
+
 def test_phone_code_rejects_wrong_code_and_resend_during_cooldown(tmp_path: Path) -> None:
     auth = _auth(tmp_path)
     mobile = "13900139000"
