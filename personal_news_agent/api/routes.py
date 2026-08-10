@@ -42,6 +42,13 @@ from personal_news_agent.services.auth import AuthError
 from personal_news_agent.services.report_export import export_report
 
 
+FRONTEND_REVISION = "20260810-phone-controls-2"
+NO_CACHE_PAGE_HEADERS = {
+    "Cache-Control": "no-store, max-age=0",
+    "X-PNA-Frontend-Revision": FRONTEND_REVISION,
+}
+
+
 def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, settings: Settings) -> None:
     registry = services["registry"]
     store = services["store"]
@@ -76,23 +83,28 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
 
     @app.get("/")
     async def index() -> FileResponse:
-        return FileResponse(static_dir / "landing.html")
+        return FileResponse(static_dir / "landing.html", headers=NO_CACHE_PAGE_HEADERS)
 
     @app.get("/web")
     async def web_app() -> FileResponse:
-        return FileResponse(static_dir / "home.html")
+        return FileResponse(static_dir / "home.html", headers=NO_CACHE_PAGE_HEADERS)
 
     @app.get("/auth")
     async def auth_app() -> FileResponse:
-        return FileResponse(static_dir / "auth.html")
+        return FileResponse(static_dir / "auth.html", headers=NO_CACHE_PAGE_HEADERS)
 
     @app.get("/mobile")
     async def mobile_app() -> FileResponse:
-        return FileResponse(static_dir / "home.html")
+        return FileResponse(static_dir / "home.html", headers=NO_CACHE_PAGE_HEADERS)
 
     @app.get("/api/health")
     async def health() -> dict[str, Any]:
-        return {"status": "ok", "categories": CATEGORIES, "source_count": len(registry.all_sources())}
+        return {
+            "status": "ok",
+            "frontend_revision": FRONTEND_REVISION,
+            "categories": CATEGORIES,
+            "source_count": len(registry.all_sources()),
+        }
 
     @app.get("/api/models")
     async def models() -> dict[str, Any]:

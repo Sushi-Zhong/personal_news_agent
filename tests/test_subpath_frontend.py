@@ -29,8 +29,8 @@ def test_shared_client_preserves_pna_prefix_for_api_requests():
     auth = (STATIC_DIR / "auth.html").read_text(encoding="utf-8")
     auth_script = (STATIC_DIR / "auth.js").read_text(encoding="utf-8")
     mobile_script = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
-    assert "home.js?v=20260810-phone-controls-1" in home
-    assert "shared.js?v=20260810-phone-controls-1" in auth
+    assert "home.js?v=20260810-phone-controls-2" in home
+    assert "shared.js?v=20260810-phone-controls-2" in auth
     assert "ensureRegistrationChallenge(form, status)" in auth_script
     assert "ensureRegistrationChallenge(form, status)" in mobile_script
     assert "function ensureRegistrationChallenge" in source
@@ -43,3 +43,10 @@ def test_server_templates_keep_nginx_and_web_port_aligned():
     assert "location /pna/" in nginx
     assert "proxy_pass http://127.0.0.1:22053/;" in nginx
     assert "X-Forwarded-Prefix /pna" in nginx
+
+
+def test_html_routes_disable_cache_and_expose_frontend_revision():
+    routes = (ROOT / "personal_news_agent" / "api" / "routes.py").read_text(encoding="utf-8")
+    assert 'FRONTEND_REVISION = "20260810-phone-controls-2"' in routes
+    assert '"Cache-Control": "no-store, max-age=0"' in routes
+    assert '"frontend_revision": FRONTEND_REVISION' in routes

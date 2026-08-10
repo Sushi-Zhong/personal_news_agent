@@ -160,7 +160,7 @@ pna_wait_units() {
 }
 
 pna_health_url() {
-  local port="${PNA_WEB_PORT:-8000}"
+  local port="${PNA_WEB_PORT:-22053}"
   printf '%s\n' "${PNA_HEALTH_URL:-http://127.0.0.1:${port}/api/health}"
 }
 

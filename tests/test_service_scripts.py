@@ -133,3 +133,10 @@ def test_server_runtime_template_uses_deployment_root_and_contains_no_credential
     assert "PERSONAL_NEWS_VENV" in source
     assert "ACCESS_KEY" not in source
     assert "PASSWORD" not in source
+
+
+def test_server_web_launcher_defaults_to_nginx_upstream_port():
+    launcher = (ROOT / "scripts" / "run_web_service.sh").read_text(encoding="utf-8")
+    controls = (ROOT / "scripts" / "service_control_lib.sh").read_text(encoding="utf-8")
+    assert '${PNA_WEB_PORT:-22053}' in launcher
+    assert '${PNA_WEB_PORT:-22053}' in controls

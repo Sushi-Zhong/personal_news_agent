@@ -12,5 +12,5 @@ PYTHON_BIN="$(pna_python_bin)"
 
 exec "${PYTHON_BIN}" -m uvicorn personal_news_agent.app:app \
   --host "${PNA_WEB_HOST:-127.0.0.1}" \
-  --port "${PNA_WEB_PORT:-8000}" \
+  --port "${PNA_WEB_PORT:-22053}" \
   --workers "${PNA_WEB_WORKERS:-1}"
