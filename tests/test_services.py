@@ -12,19 +12,36 @@ from bs4 import BeautifulSoup
 from personal_news_agent.config import Settings
 from personal_news_agent.core.models import NormalizedArticle, RawArticle, RawArticleLink, RawSearchResult, SearchResult, TimeRange
 from personal_news_agent.core.text import content_hash, stable_id
-from personal_news_agent.services.chat import NewsChatService, _filter_by_time, _rank_for_chat, _related_base_query, _related_search_answer, _report_skill_answer
+from personal_news_agent.services.chat import (
+    NewsChatService,
+    SearchQueryPlan,
+    _filter_by_time,
+    _filter_research_results,
+    _filter_related_runtime_results,
+    _rank_for_chat,
+    _related_base_query,
+    _related_context_query,
+    _related_search_answer,
+    _report_skill_answer,
+)
 from personal_news_agent.services.cc_runtime import (
     CCRuntimeOrchestrator,
     CCRuntimeResult,
     LOCAL_TOOL_NAME,
+    NEWS_DAILY_BRIEF_SKILL_NAME,
     NEWS_CONVERSATION_RESEARCH_SKILL_NAME,
+    NEWS_RELATED_EXPLORATION_SKILL_NAME,
+    NEWS_SOURCE_AUDIT_SKILL_NAME,
+    NEWS_TOPIC_REPORT_SKILL_NAME,
+    SCHEDULED_NEWS_TASK_SKILL_NAME,
     RuntimeSearchContext,
     WEB_TOOL_NAME,
+    _system_prompt,
 )
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
-from personal_news_agent.services.events import EventDiscoveryService
-from personal_news_agent.services.factcheck import FactCheckService, _merge_search_results
+from personal_news_agent.services.events import EventDiscoveryService, _cluster_title
+from personal_news_agent.services.factcheck import FactCheckService, _merge_search_results, _normalize_payload
 from personal_news_agent.services.article_fetch import ArticleFetchService, _extract_published_at, _parse_published_datetime, _unwrap_search_link
 from personal_news_agent.services.chat_understanding import (
     categories_for_message,
@@ -182,6 +199,42 @@ def test_planner_terms_filter_broad_background_results():
     assert search_result_matches_terms(required_terms, related)
 
 
+def test_research_evidence_gate_rejects_same_city_but_unrelated_pages():
+    plan = SearchQueryPlan(
+        query="北京天津 防汛 应急响应",
+        primary_subject="北京天津防汛应急响应",
+        required_terms=["防汛", "暴雨", "应急响应"],
+        keywords=["北京", "天津"],
+        source="llm",
+    )
+    relevant = SearchResult(
+        source_id="weather",
+        title="中央气象台继续发布暴雨橙色预警",
+        url="https://example.com/rain",
+        summary="北京、天津启动防汛应急响应并关注强降雨。",
+        category="politics",
+        origin="external",
+    )
+    same_city_unrelated = SearchResult(
+        source_id="tech",
+        title="树科技已在北京天津布局合作项目",
+        url="https://example.com/tree-tech",
+        summary="企业在多地设立机构。",
+        category="tech",
+        origin="local",
+    )
+    unrelated = SearchResult(
+        source_id="world",
+        title="哥伦比亚发生地震",
+        url="https://example.com/quake",
+        summary="当地发布地震消息。",
+        category="politics",
+        origin="external",
+    )
+
+    assert _filter_research_results([same_city_unrelated, relevant, unrelated], plan) == [relevant]
+
+
 def test_search_query_plan_is_generated_from_user_input(services):
     _, store, search = services
     llm = FakeSearchPlannerLLM()
@@ -262,7 +315,10 @@ def test_related_search_uses_local_agent_queries_and_saves_turn(services):
     assert response.context_relation == "related_search"
     assert [item["query"] for item in response.expanded_queries] == ["AI Agent 最新进展", "AI Agent 产业影响", "AI Agent 背景 脉络"]
     assert response.mind_map
+    assert response.mind_map["type"] == "related_research_path_v2"
     assert response.mind_map["topic"] == "AI Agent"
+    assert [step["kind"] for step in response.mind_map["steps"][:2]] == ["context", "resolution"]
+    assert response.mind_map["steps"][-1]["kind"] == "conclusion"
     assert [branch["title"] for branch in response.mind_map["branches"]] == ["AI Agent 最新进展", "AI Agent 产业影响", "AI Agent 背景 脉络"]
     assert response.mind_map["branches"][0]["relation_label"] == "最新进展"
     assert response.mind_map["branches"][0]["edge_reason"] == "查看近期变化"
@@ -282,6 +338,78 @@ def test_related_base_query_prefers_latest_hot_event_title():
         "发生了什么、为什么重要、后续看什么。"
     )
     assert _related_base_query(raw, raw) == "强化问题导向推进作风建设"
+
+
+def test_related_context_query_keeps_previous_topic_as_anchor():
+    assert _related_context_query("dota2 TI 上海", "ame") == "dota2 TI 上海 中的 ame"
+    assert _related_context_query("dota2 TI 上海", "dota2") == "dota2 TI 上海"
+
+
+def test_related_result_filter_rejects_latin_substring_coincidences():
+    unrelated = SearchResult(
+        source_id="gamersky",
+        title="沈腾新片 _ GamerSky.com",
+        url="https://example.com/movie",
+        summary="上海暑期档电影资讯",
+        category="entertainment",
+        origin="local",
+    )
+    related = SearchResult(
+        source_id="esports",
+        title="Dota 2 选手 Ame 备战 TI",
+        url="https://example.com/ame-ti",
+        summary="Ame 与中国战队参加上海赛事的动态。",
+        category="game",
+        origin="local",
+    )
+
+    filtered = _filter_related_runtime_results([unrelated, related], "dota2 TI 上海", "ame")
+
+    assert filtered == [related]
+
+
+def test_related_search_uses_cc_context_and_web_for_ambiguous_player_name(services):
+    _, store, search = services
+    store.save_turn(
+        "dota_related_conv",
+        "dota2 TI 上海",
+        "上一轮讨论了 TI 上海赛事。",
+        [],
+        {"type": "topic", "text": "dota2 TI 上海"},
+        user_id="related_user",
+        topic="dota2 TI 上海",
+        category_scope=["game"],
+    )
+    runtime = FakeRelatedCCRuntime()
+    chat = NewsChatService(store, search, cc_runtime=runtime)
+
+    response = asyncio.run(
+        chat.related_search(
+            "dota_related_conv",
+            "ame",
+            user_id="related_user",
+            allow_web_search=True,
+        )
+    )
+
+    assert runtime.kwargs["query"] == "dota2 TI 上海 中的 ame"
+    assert runtime.kwargs["topic"] == "dota2 TI 上海"
+    assert "上一轮讨论了 TI 上海赛事" in runtime.kwargs["history"]
+    assert runtime.kwargs["skill_names"] == [NEWS_RELATED_EXPLORATION_SKILL_NAME]
+    assert runtime.kwargs["allow_web_search"] is True
+    assert runtime.kwargs["max_turns"] == 10
+    assert runtime.kwargs["timeout_seconds"] == 180.0
+    assert runtime.kwargs["builtin_web_search_limit"] == 3
+    assert response.context_relation == "related_search_cc_runtime"
+    assert response.topic == "dota2 TI 上海"
+    assert response.focus_object.text == "dota2 TI 上海 中的 ame"
+    assert [item.url for item in response.recommendations] == ["https://example.com/ame-ti"]
+    assert "关联较弱" not in response.answer
+    assert response.mind_map["type"] == "related_research_path_v2"
+    assert response.mind_map["active_topic"] == "dota2 TI 上海"
+    assert response.mind_map["requested_focus"] == "ame"
+    assert response.mind_map["steps"][0]["label"] == "语境锚点"
+    assert any(step["kind"] == "web_search" for step in response.mind_map["steps"])
 
 
 def test_related_search_uses_clean_hot_event_topic(services):
@@ -447,6 +575,8 @@ def test_cc_runtime_search_tools_use_existing_local_and_web_services(services):
     assert search.external_calls
     assert [item.origin for item in context.results] == ["local", "external"]
     assert [item["origin"] for item in context.queries] == ["local", "web"]
+    assert context.queries[0]["result_urls"] == ["https://example.com/unrelated"]
+    assert context.queries[1]["result_urls"] == ["https://web.example/factcheck"]
     assert [item["stage"] for item in emitted] == ["本地新闻引擎", "外部搜索工具"]
 
 
@@ -499,12 +629,33 @@ def test_cc_runtime_options_expose_only_read_only_news_tools(services, tmp_path)
     assert web_options.tools == ["WebSearch"]
     assert web_options.allowed_tools == [LOCAL_TOOL_NAME, WEB_TOOL_NAME, "WebSearch"]
     assert "必须在生成最终答案前调用 CC 自带的 WebSearch" in web_options.system_prompt
+    assert "News Agent（元融个人资讯助手）" in web_options.system_prompt
+    assert "不得提及 Claude" in web_options.system_prompt
+    assert "本地新闻引擎" in web_options.system_prompt
+    assert "外部搜索工具" in web_options.system_prompt
 
     skill_options = runtime.build_options(context, ["news-fact-check"])
     assert skill_options.tools == ["Skill"]
     assert skill_options.skills == ["news-fact-check"]
     assert skill_options.allowed_tools == ["Skill", LOCAL_TOOL_NAME]
     assert "Skill" not in skill_options.disallowed_tools
+
+    related_skill_options = runtime.build_options(context, [NEWS_RELATED_EXPLORATION_SKILL_NAME])
+    assert related_skill_options.skills == [NEWS_RELATED_EXPLORATION_SKILL_NAME]
+
+    limited_web_options = runtime.build_options(web_context, builtin_web_search_limit=3)
+    assert limited_web_options.hooks["PreToolUse"][0].matcher == "WebSearch"
+    web_hook = limited_web_options.hooks["PreToolUse"][0].hooks[0]
+    hook_results = [
+        asyncio.run(web_hook({"tool_name": "WebSearch"}, None, {}))
+        for _ in range(4)
+    ]
+    assert [item["hookSpecificOutput"]["permissionDecision"] for item in hook_results] == [
+        "allow",
+        "allow",
+        "allow",
+        "deny",
+    ]
 
     builtin_web_context = RuntimeSearchContext(store, search, ["tech"], None, allow_web_search=True)
     builtin_web_options = runtime.build_options(builtin_web_context, ["news-fact-check"])
@@ -525,6 +676,15 @@ def test_cc_runtime_options_expose_only_read_only_news_tools(services, tmp_path)
     )
     no_local_options = runtime.build_options(no_local_context)
     assert no_local_options.allowed_tools == []
+
+
+def test_cc_runtime_product_identity_hides_internal_runtime_names():
+    prompt = _system_prompt(web_enabled=True)
+
+    assert "只介绍 News Agent" in prompt
+    assert "实际模型供应商" in prompt
+    assert "面向用户只使用“本地新闻引擎”和“外部搜索工具”" in prompt
+    assert "不得把公开抓取或检索到的新闻网站称为合作方" in prompt
 
 
 def test_cc_runtime_run_normalizes_sdk_result_without_changing_business_schema(services, tmp_path):
@@ -652,6 +812,109 @@ def test_research_chat_stream_emits_public_harness_execution_steps(services):
     assert not any(item["stage"] in terminal_stages and item["status"] == "running" for item in final_trace)
 
 
+def test_general_chat_uses_cc_without_business_skill_or_local_search(services):
+    _, store, _ = services
+    runtime = FakeCCRuntime()
+    chat = NewsChatService(store, RecordingSearchService(), llm_client=FakeDisabledLLM(), cc_runtime=runtime)
+
+    response = asyncio.run(
+        chat.chat(
+            "general_cc_conv",
+            "你好",
+            use_llm=True,
+            user_id="general_cc_user",
+            allow_web_search=True,
+        )
+    )
+
+    assert response.context_relation == "general_conversation_cc_runtime"
+    assert runtime.skill_names == []
+    assert runtime.last_kwargs["allow_local_search"] is False
+    assert any("不加载业务 Skill" in item["message"] for item in response.research_trace)
+
+
+def test_general_knowledge_uses_no_skill_but_current_news_uses_research_skill(services):
+    _, store, _ = services
+    general_runtime = FakeCCRuntime()
+    general_chat = NewsChatService(store, RecordingSearchService(), llm_client=FakeDisabledLLM(), cc_runtime=general_runtime)
+    general = asyncio.run(
+        general_chat.chat(
+            "general_knowledge_conv",
+            "什么是向量数据库？",
+            use_llm=True,
+            user_id="general_knowledge_user",
+            allow_web_search=True,
+        )
+    )
+    assert general.context_relation == "general_conversation_cc_runtime"
+    assert general_runtime.skill_names == []
+
+    news_runtime = FakeCCRuntime()
+    news_chat = NewsChatService(store, RecordingSearchService(), llm_client=FakeDisabledLLM(), cc_runtime=news_runtime)
+    current_news = asyncio.run(
+        news_chat.chat(
+            "current_news_conv",
+            "AI Agent 今天有什么最新进展？",
+            use_llm=True,
+            user_id="current_news_user",
+            allow_web_search=True,
+        )
+    )
+    assert current_news.context_relation == "research_pipeline_cc_runtime"
+    assert news_runtime.skill_names == [NEWS_CONVERSATION_RESEARCH_SKILL_NAME]
+
+
+def test_weather_and_route_queries_use_general_cc_with_web_search_guidance(services):
+    _, store, _ = services
+    for index, (question, expected_hint) in enumerate(
+        [
+            ("今天上海天气怎么样，出门需要带伞吗？", "天气查询"),
+            ("从上海虹桥火车站到西湖景区怎么走？", "路线查询"),
+        ]
+    ):
+        runtime = FakeCCRuntime()
+        chat = NewsChatService(store, RecordingSearchService(), llm_client=FakeDisabledLLM(), cc_runtime=runtime)
+        response = asyncio.run(
+            chat.chat(
+                f"general_live_info_{index}",
+                question,
+                use_llm=True,
+                user_id=f"general_live_info_user_{index}",
+                allow_web_search=True,
+            )
+        )
+
+        assert response.context_relation == "general_conversation_cc_runtime"
+        assert runtime.skill_names == []
+        assert runtime.last_kwargs["allow_web_search"] is True
+        assert runtime.last_kwargs["allow_local_search"] is False
+        assert expected_hint in runtime.last_kwargs["message"]
+        if expected_hint == "天气查询":
+            assert "暂未取得可核验的实时天气来源" in response.answer
+            assert "历史气候数据猜测" in response.answer
+        else:
+            assert "不能视为实时班次、票价、限行或路况" in response.answer
+
+
+def test_current_news_wording_is_not_misrouted_as_general_knowledge(services):
+    _, store, _ = services
+    runtime = FakeCCRuntime()
+    chat = NewsChatService(store, RecordingSearchService(), llm_client=FakeDisabledLLM(), cc_runtime=runtime)
+
+    response = asyncio.run(
+        chat.chat(
+            "current_news_how_conv",
+            "如何看待今天最新的电影票房新闻？",
+            use_llm=True,
+            user_id="current_news_how_user",
+            allow_web_search=True,
+        )
+    )
+
+    assert response.context_relation == "research_pipeline_cc_runtime"
+    assert runtime.skill_names == [NEWS_CONVERSATION_RESEARCH_SKILL_NAME]
+
+
 def test_research_chat_falls_back_when_cc_runtime_fails(services):
     _, store, _ = services
     search = RecordingSearchService()
@@ -744,12 +1007,25 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
 
     assert "/check" not in commands
     assert "/map" in commands
+    assert "/related" in commands
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260810-dialogue-skill-2" in home_source
-    assert "styles.css?v=20260810-dialogue-skill-2" in home_html
+    assert "20260811-topic-pulse-6" in home_source
+    assert "styles.css?v=20260811-topic-pulse-6" in home_html
     assert "shared.js?v=20260810-phone-controls-2" in mobile_html
+
+
+def test_related_command_uses_streaming_chat_skill_on_web_and_mobile():
+    web_source = Path("personal_news_agent/static/web.js").read_text()
+    mobile_source = Path("personal_news_agent/static/mobile.js").read_text()
+
+    web_related = web_source.split("async function runRelatedSearchIntoTurn", 1)[1].split("async function", 1)[0]
+    mobile_related = mobile_source.split("async function runMobileRelatedSearchIntoTurn", 1)[1].split("async function", 1)[0]
+    assert 'sendChatIntoTurn(relatedCommand, assistantNode)' in web_related
+    assert 'sendChatIntoTurn(relatedCommand, assistantNode)' in mobile_related
+    assert 'request("/api/news/related"' not in web_related
+    assert 'request("/api/news/related"' not in mobile_related
 
 
 def test_time_filter_keeps_current_external_results_without_published_date():
@@ -1374,6 +1650,20 @@ def test_event_discovery_generates_required_fields(services):
     assert cluster.article_count >= 1
     assert cluster.source_count >= 1
     assert cluster.hot_score > 0
+
+
+def test_event_cluster_title_uses_real_clean_headline_instead_of_weak_keyword():
+    title = _cluster_title(
+        "10",
+        [
+            {"title": "[流言板] WTT欧洲大满贯迎来关键比赛-腾讯新闻"},
+            {"title": "另一条较长的体育新闻标题用于测试聚合标题展示-虎扑"},
+        ],
+    )
+
+    assert "相关热点" not in title
+    assert "流言板" not in title
+    assert not title.endswith("腾讯新闻")
 
 
 def test_personalized_feed_changes_with_profile(services):
@@ -2168,6 +2458,43 @@ def test_factcheck_merge_reserves_web_results_and_deduplicates_canonical_urls():
     assert any(item.url == "https://web.example/factcheck" for item in merged)
 
 
+def test_factcheck_contradicted_verdict_does_not_repeat_same_source_as_supporting():
+    evidence = [
+        {
+            "index": 1,
+            "title": "IPO仍在推介阶段",
+            "source_id": "source",
+            "url": "https://example.com/ipo-stage",
+            "summary": "尚未完成上市。",
+        }
+    ]
+    parsed = {
+        "verdict": "contradicted",
+        "confidence": 0.9,
+        "summary": "该说法与现有流程状态矛盾。",
+        "supporting_evidence": [1],
+        "contradicting_evidence": [1],
+        "missing_evidence": [],
+        "source_notes": [],
+        "next_checks": [],
+    }
+    fallback = {
+        "verdict": "insufficient",
+        "confidence": 0.2,
+        "summary": "证据不足。",
+        "supporting_evidence": [],
+        "contradicting_evidence": [],
+        "missing_evidence": ["官方公告"],
+        "source_notes": ["本地证据。"],
+        "next_checks": ["查官方公告"],
+    }
+
+    normalized = _normalize_payload(parsed, fallback, evidence)
+
+    assert normalized["supporting_evidence"] == []
+    assert normalized["contradicting_evidence"][0]["url"] == "https://example.com/ipo-stage"
+
+
 def test_chat_executes_factcheck_skill_with_local_agent(services):
     registry, store, search = services
     local_agent = FakeFactCheckLocalAgent()
@@ -2194,7 +2521,7 @@ def test_chat_executes_factcheck_skill_with_local_agent(services):
     assert response.skill_result["data"]["verdict"] == "supported"
     assert "结论：supported" in response.answer
     assert "支持证据" in response.answer
-    assert "下一步核查" not in response.answer
+    assert "下一步核查" in response.answer
 
 
 def test_factcheck_skill_always_uses_direct_web_search(services):
@@ -2277,6 +2604,19 @@ def test_hot_event_map_sanitizes_mermaid_html_and_interaction_directives():
     assert "click A" not in cleaned
     assert "javascript:" not in cleaned
     assert "节点 · 下一行" in cleaned
+
+
+def test_hot_event_map_repairs_transposed_quoted_edge_label_from_cc():
+    markdown = (
+        '## 事件图谱\n\n```mermaid\nflowchart LR\n'
+        'VALVE["Valve"]\nTI14["TI14"]\n'
+        'VALVE -->|"未公布举办地|" TI14\n```'
+    )
+
+    cleaned = _sanitize_event_map_markdown(markdown)
+
+    assert 'VALVE -->|"未公布举办地"| TI14' in cleaned
+    assert '|"未公布举办地|"' not in cleaned
 
 
 def test_report_cleans_polluted_factcheck_title(services):
@@ -2438,6 +2778,60 @@ def test_schedule_command_creates_push_and_appends_conversation(services):
     assert result["evidence_count"] >= 1
     push_turns = store.list_turns(created["conversation"]["id"], user_id="schedule_user")
     assert any(turn["payload"].get("type") == "scheduled_push_result" for turn in push_turns)
+
+
+def test_schedule_chat_runs_cc_project_skill_before_persisting(services):
+    registry, store, search = services
+    reports = ReportGenerationService(store, search)
+    runtime = FakeScenarioCCRuntime()
+    tasks = ScheduledTaskService(store, reports, llm_client=FakeDisabledLLM(), cc_runtime=runtime)
+    chat = NewsChatService(
+        store,
+        search,
+        scheduled_tasks=tasks,
+        cc_runtime=runtime,
+        skill_registry=build_default_registry(),
+        services={"tasks": tasks, "reports": reports, "registry": registry, "cc_runtime": runtime, "search": search},
+    )
+
+    response = asyncio.run(
+        chat.chat(
+            "schedule_cc_skill_conv",
+            "/schedule 每周一上午8点汇总周末AI芯片热点并生成专题报告",
+            user_id="schedule_cc_skill_user",
+            allow_web_search=True,
+        )
+    )
+
+    assert response.context_relation == "scheduled_push_created"
+    assert response.skill_result["command"] == "/schedule"
+    assert runtime.skill_names[-1] == [SCHEDULED_NEWS_TASK_SKILL_NAME]
+    assert response.skill_result["data"]["task"]["schedule"] == "0 8 * * 1"
+    assert any(item["stage"] == "定时任务 Skill" for item in response.research_trace)
+
+
+def test_report_brief_and_sources_use_dedicated_cc_project_skills(services):
+    registry, store, search = services
+    reports = ReportGenerationService(store, search)
+    runtime = FakeScenarioCCRuntime()
+    chat = NewsChatService(
+        store,
+        search,
+        cc_runtime=runtime,
+        skill_registry=build_default_registry(),
+        services={"reports": reports, "registry": registry, "cc_runtime": runtime, "search": search},
+    )
+
+    report = asyncio.run(chat.chat("scenario_skills_conv", "/report AI Agent", user_id="scenario_user", allow_web_search=True))
+    brief = asyncio.run(chat.chat("scenario_skills_conv", "/brief AI Agent", user_id="scenario_user", allow_web_search=True))
+    sources = asyncio.run(chat.chat("scenario_skills_conv", "/sources tech", user_id="scenario_user", allow_web_search=True))
+
+    assert report.skill_result["data"]["agent_source"] == "cc_runtime"
+    assert brief.skill_result["data"]["agent_source"] == "cc_runtime"
+    assert sources.skill_result["data"]["agent_source"] == "cc_runtime"
+    assert [NEWS_TOPIC_REPORT_SKILL_NAME] in runtime.skill_names
+    assert [NEWS_DAILY_BRIEF_SKILL_NAME] in runtime.skill_names
+    assert [NEWS_SOURCE_AUDIT_SKILL_NAME] in runtime.skill_names
 
 
 def test_parse_weekly_schedule_command():
@@ -2884,27 +3278,30 @@ class FakeCCRuntime:
         self.calls = 0
         self.logical_model_key = None
         self.skill_names = None
+        self.last_kwargs = None
 
     async def run(self, **kwargs):
         self.calls += 1
+        self.last_kwargs = kwargs
         assert kwargs["allow_web_search"] is True
         self.logical_model_key = kwargs["logical_model_key"]
         self.skill_names = kwargs.get("skill_names")
+        query = kwargs.get("query") or "测试主题"
         return CCRuntimeResult(
             answer="## Runtime 汇总\n\n证据支持这项变化。",
             results=[
                 SearchResult(
                     source_id="runtime.local",
-                    title="AI Agent 最近变化",
+                    title=f"{query} 最新变化",
                     url="https://runtime.example/ai-agent",
-                    summary="Runtime 检索到的证据摘要。",
+                    summary=f"{query} 的证据摘要。",
                     category="tech",
                     published_at=datetime.now(timezone.utc),
                     score=1.0,
                     origin="local",
                 )
             ],
-            queries=[{"query": "AI Agent 最近变化", "origin": "local", "result_count": 1}],
+            queries=[{"query": query, "origin": "local", "result_count": 1}],
             trace=[
                 {
                     "stage": "本地新闻引擎",
@@ -2913,6 +3310,108 @@ class FakeCCRuntime:
                     "count": 1,
                 }
             ],
+        )
+
+
+class FakeScenarioCCRuntime:
+    configured = True
+
+    def __init__(self):
+        self.skill_names = []
+
+    async def run(self, **kwargs):
+        selected = kwargs.get("skill_names") or []
+        self.skill_names.append(selected)
+        if selected == [SCHEDULED_NEWS_TASK_SKILL_NAME]:
+            answer = json.dumps(
+                {
+                    "user_id": "wrong-owner",
+                    "task_type": "scheduled_push",
+                    "schedule": "0 8 * * 1",
+                    "topics": ["AI芯片热点"],
+                    "category_scope": ["tech"],
+                    "source_scope": [],
+                    "output_style": "专题报告",
+                    "delivery_channel": "in_app",
+                    "raw_task_description": "wrong-description",
+                    "parsed_workflow": {
+                        "intent_summary": "汇总周末AI芯片热点",
+                        "search_queries": ["AI芯片 周末 热点"],
+                        "category_scope": ["tech"],
+                        "source_scope": [],
+                        "fetch_strategy": {"max_results": 12, "fetch_articles": 6, "max_sources": 3},
+                        "report_style": {"sections": ["摘要", "事件", "来源"]},
+                        "delivery": {"channel": "in_app"},
+                    },
+                },
+                ensure_ascii=False,
+            )
+            results = []
+        else:
+            answer = "## Agent 场景结果\n\n已根据证据完成结构化输出。\n\n### 来源\n\n- [测试来源](https://example.com/news)"
+            results = [
+                SearchResult(
+                    source_id="test",
+                    title="测试来源",
+                    url="https://example.com/news",
+                    summary="用于验证场景 Skill 路由。",
+                    category="tech",
+                    published_at=datetime.now(timezone.utc),
+                    origin="local",
+                )
+            ]
+        trace = {"stage": "Agent 主控", "status": "completed", "message": "场景工作流执行完成。"}
+        if kwargs.get("on_trace"):
+            await kwargs["on_trace"](trace)
+        return CCRuntimeResult(answer=answer, results=results, trace=[trace], queries=[])
+
+
+class FakeRelatedCCRuntime:
+    configured = True
+
+    def __init__(self):
+        self.kwargs = None
+
+    async def run(self, **kwargs):
+        self.kwargs = kwargs
+        trace = {
+            "stage": "外部搜索工具",
+            "status": "completed",
+            "message": "已完成 2 次外部证据检索。",
+            "count": 2,
+        }
+        if kwargs.get("on_trace"):
+            await kwargs["on_trace"](trace)
+        return CCRuntimeResult(
+            answer=(
+                "结合刚才的 TI 话题，你这里说的 Ame 是 Dota 2 职业选手。\n\n"
+                "### 他与当前事件的关系\n\nAme 是中国赛区受到关注的 carry 选手。\n\n"
+                "### 来源\n\n- [赛事资料](https://example.com/ame-ti)"
+            ),
+            results=[
+                SearchResult(
+                    source_id="gamersky",
+                    title="沈腾新片 _ GamerSky.com",
+                    url="https://example.com/movie",
+                    summary="上海暑期档电影资讯",
+                    category="entertainment",
+                    origin="local",
+                ),
+                SearchResult(
+                    source_id="esports",
+                    title="Dota 2 选手 Ame 备战 TI",
+                    url="https://example.com/ame-ti",
+                    summary="Ame 与中国战队参加上海赛事的动态。",
+                    category="game",
+                    origin="local",
+                ),
+            ],
+            queries=[
+                {"query": "Dota 2 Ame TI 上海", "origin": "local", "result_count": 1},
+                {"query": "Dota 2 Ame current roster", "origin": "web", "result_count": 3},
+            ],
+            trace=[trace],
+            provider_metadata={"builtin_web_calls": 2},
         )
 
 

@@ -30,7 +30,7 @@ class RelatedSearchRequest(BaseModel):
     topic: str | None = None
     category_scope: list[str] | None = None
     max_queries: int = Field(default=8, ge=3, le=8)
-    allow_web_search: bool = False
+    allow_web_search: bool = True
 
 
 class NativeSearchIngestRequest(BaseModel):

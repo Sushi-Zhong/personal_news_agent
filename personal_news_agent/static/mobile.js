@@ -10,10 +10,8 @@ const mobileState = {
 };
 let mobileTopicLocked = Boolean(mobileState.topic);
 const mobileBootstrapTopics = [
-  { title: "新能源汽车产业链", category_scope: ["auto"], topic_type: "user" },
   { title: "科技公司上市观察", category_scope: ["tech", "economy"], topic_type: "system" },
   { title: "大型体育赛事运营", category_scope: ["sports"], topic_type: "system" },
-  { title: "AI 终端设备", category_scope: ["tech"], topic_type: "user" },
 ];
 syncMobileChatContext();
 syncMobileSessionState();
@@ -115,7 +113,12 @@ document.querySelector("#loginForm").addEventListener("submit", async (event) =>
     const result = await loginFromForm(form);
     document.querySelector("#registerStatus").textContent = `已登录：${result.user.display_name}`;
     syncMobileSessionState();
-    await loadProfileIntoForm("#onboardingForm");
+    const profileData = await loadProfileIntoForm("#onboardingForm");
+    if (!profileData?.profile?.onboarding_completed) {
+      showOnboardingForm();
+      document.querySelector(".auth-card details").open = true;
+      document.querySelector("#registerStatus").textContent = "登录成功，请先选择关注板块和兴趣。";
+    }
     await refreshMobile();
   } catch (error) {
     document.querySelector("#registerStatus").textContent = error.message;
@@ -193,9 +196,26 @@ bindAskButtons();
 bindNotificationReads();
 window.handleAssistantInput = handleMobileAssistantInput;
 window.handleChatResponseSideEffects = handleMobileChatResponseSideEffects;
-loadOnboardingOptions("#onboardingForm").then(() => loadProfileIntoForm("#onboardingForm"));
+initializeMobileProfileState();
 startTaskPushPolling();
 refreshMobile();
+
+async function initializeMobileProfileState() {
+  await loadOnboardingOptions("#onboardingForm");
+  if (!activeUserId || activeUserId === "default") return;
+  try {
+    const data = await loadProfileIntoForm("#onboardingForm");
+    if (!data?.profile?.onboarding_completed) {
+      showOnboardingForm();
+      document.querySelector(".auth-card details").open = true;
+      const status = document.querySelector("#registerStatus");
+      if (status) status.textContent = "请选择关注板块和兴趣，完成首次初始化。";
+    }
+  } catch (error) {
+    const status = document.querySelector("#registerStatus");
+    if (status) status.textContent = "个人配置暂时无法载入，可稍后重试。";
+  }
+}
 
 function showOnboardingForm() {
   const form = document.querySelector("#onboardingForm");
@@ -376,6 +396,14 @@ async function handleMobileAssistantInput(message) {
       const mapCommand = ["/map", mapTopic, category ? `--category ${category}` : ""].filter(Boolean).join(" ");
       return sendChatIntoTurn(mapCommand, assistantNode);
     }
+    if (["schedule"].includes(command.name)) {
+      const taskDescription = commandText(command) || "";
+      return sendChatIntoTurn(["/schedule", taskDescription].filter(Boolean).join(" "), assistantNode);
+    }
+    if (["sources"].includes(command.name)) {
+      const sourceCategory = commandText(command) || commandArg(command, "category", "cat") || "";
+      return sendChatIntoTurn(["/sources", sourceCategory].filter(Boolean).join(" "), assistantNode);
+    }
     if (["feed"].includes(command.name)) {
       mobileCategory = commandArg(command, "cat", "category") || commandText(command) || "";
       mobileState.categoryScope = mobileCategory ? [mobileCategory] : [];
@@ -385,7 +413,7 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/map、/report、/brief、/related。");
+    setAssistantTurnText(assistantNode, "可执行：/factcheck、/map、/report、/brief、/related、/schedule、/sources。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);
@@ -394,25 +422,8 @@ async function handleMobileAssistantInput(message) {
 }
 
 async function runMobileRelatedSearchIntoTurn(assistantNode, explicitTopic = "") {
-  const query = explicitTopic || mobileState.topic || "当前关注";
-  const data = await request("/api/news/related", {
-    method: "POST",
-    body: JSON.stringify({
-      conversation_id: conversationId,
-      user_id: activeUserId || "default",
-      query,
-      topic: mobileState.topic || null,
-      category_scope: mobileState.categoryScope,
-      max_queries: 8,
-      allow_web_search: isWebSearchEnabled(),
-    }),
-  });
-  conversationId = data.conversation_id;
-  localStorage.setItem("pna_conversation_id", conversationId);
-  setAssistantResponseHtml(assistantNode, chatResponseHtml(data));
-  syncChatResponseContext(data);
-  await notifyConversationHistoryChanged();
-  return data;
+  const relatedCommand = ["/related", explicitTopic].filter(Boolean).join(" ");
+  return sendChatIntoTurn(relatedCommand, assistantNode);
 }
 
 async function loadMobileTopics() {
@@ -424,18 +435,25 @@ async function loadMobileTopics() {
     const remote = await request(
       `/api/topics?user_id=${encodeURIComponent(userId)}&conversation_id=${encodeURIComponent(topicConversationId)}&limit=10`,
     );
-    renderMobileTopicRail(target, [...(remote.items || []), ...mobileBootstrapTopics]);
+    const persisted = remote.items || [];
+    renderMobileTopicRail(target, composeMobileTopicItems(persisted));
     try {
       const recommended = await request(
         `/api/topics/recommended?user_id=${encodeURIComponent(userId)}&limit=5&window_hours=24&refresh_window_hours=6`,
       );
-      renderMobileTopicRail(target, [...(remote.items || []), ...(recommended.items || []), ...mobileBootstrapTopics]);
+      renderMobileTopicRail(target, composeMobileTopicItems(persisted, recommended.items || []));
     } catch (error) {
       // Keep persisted topics and static fallbacks visible.
     }
   } catch (error) {
     renderMobileTopicRail(target, mobileBootstrapTopics);
   }
+}
+
+function composeMobileTopicItems(persisted, recommended = []) {
+  const userTopics = persisted.filter((item) => item.topic_type !== "system");
+  const systemTopics = persisted.filter((item) => item.topic_type === "system");
+  return [...userTopics, ...recommended, ...systemTopics, ...mobileBootstrapTopics];
 }
 
 function renderMobileTopicRail(target, items) {
@@ -513,8 +531,12 @@ function renderMobileTopicPopoverList(target, items) {
       const conversation = item.conversation_id || "";
       const active = (conversation && conversation === conversationId) || title === mobileState.topic ? " active" : "";
       const kind = ` ${mobileTopicKind(item)}`;
+      const evidenceLevel = item.evidence_level || "";
+      const evidenceLabel = item.evidence_label || (evidenceLevel === "lead" ? "新线索" : "热点");
       const meta = item.topic_type === "recommended"
-        ? `热度 ${Number(item.hot_score || 0).toFixed(2)} · ${item.source_count || 1} 源`
+        ? (evidenceLevel === "lead"
+          ? `${evidenceLabel} · 单源待确认`
+          : `${evidenceLabel} ${Number(item.hot_score || 0).toFixed(2)} · ${item.source_count || 1} 源/${item.article_count || 1} 报`)
         : (scope ? scope.split(",").join(" / ") : (item.topic_type === "system" ? "system" : "all"));
       return `<button type="button" class="topic-card${kind}${active}" data-mobile-topic-select="${escapeAttr(title)}" data-conversation-id="${escapeAttr(conversation)}" data-category-scope="${escapeAttr(scope)}"><span>${escapeHtml(shortMobileTopic(title))}</span><small>${escapeHtml(meta)}</small></button>`;
     })

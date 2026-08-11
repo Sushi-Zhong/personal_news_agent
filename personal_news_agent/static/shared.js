@@ -334,9 +334,11 @@ async function loadOnboardingOptions(formSelector) {
   if (categories) {
     categories.innerHTML = data.categories
       .map((item) => {
-        const checked = data.default_categories.includes(item.key) ? "checked" : "";
+        const checked = item.implemented && data.default_categories.includes(item.key) ? "checked" : "";
+        const disabled = item.implemented ? "" : "disabled aria-disabled=\"true\"";
+        const optionClass = item.implemented ? "" : " class=\"future-option\"";
         const disabledLabel = item.implemented ? "" : "（后续）";
-        return `<label><input type="checkbox" name="preferred_categories" value="${escapeAttr(item.key)}" ${checked} /> ${escapeHtml(item.name)}${disabledLabel}</label>`;
+        return `<label${optionClass}><input type="checkbox" name="preferred_categories" value="${escapeAttr(item.key)}" ${checked} ${disabled} /> ${escapeHtml(item.name)}${disabledLabel}</label>`;
       })
       .join("");
   }
@@ -767,13 +769,10 @@ function assistantIdentityHtml(status = "研究完成") {
 }
 
 function turnActionsHtml(role) {
-  const edit = role === "user"
-    ? '<button type="button" data-turn-action="edit" title="编辑并重新发送" aria-label="编辑并重新发送">✎</button>'
-    : "";
-  const relation = role === "assistant"
-    ? '<button type="button" class="relation-toggle" data-turn-action="mark-related" title="标记为相关">相关</button><button type="button" class="relation-toggle" data-turn-action="mark-unrelated" title="标记为不相关">不相关</button>'
-    : "";
-  return `<div class="turn-actions" aria-label="消息操作">${edit}${relation}<button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答"><span aria-hidden="true">⧉</span> 复制</button></div>`;
+  if (role === "user") {
+    return '<div class="turn-actions" aria-label="消息操作"><button type="button" class="edit-action" data-turn-action="edit" title="编辑并重新发送" aria-label="编辑并重新发送"><span aria-hidden="true">✎</span> 重新编辑</button></div>';
+  }
+  return '<div class="turn-actions" aria-label="消息操作"><button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答"><span aria-hidden="true">⧉</span> 复制</button></div>';
 }
 
 document.addEventListener("click", async (event) => {
@@ -916,7 +915,9 @@ async function copyTurnText(text) {
 function chatResponseHtml(data) {
   const trace = renderResearchTrace(data.research_trace || []);
   const mindMap = renderChatMindMapPlaceholder(data.mind_map);
-  const isRelated = data.context_relation === "related_search" || data.mind_map?.type === "related_mind_map";
+  const isRelated = data.context_relation === "related_search"
+    || data.context_relation === "related_search_cc_runtime"
+    || String(data.mind_map?.type || "").startsWith("related_");
   const isFactcheck = data.skill_result?.command === "/factcheck";
   const answerText = isFactcheck
     ? stripFactcheckEvidenceMarkdown(data.markdown || data.answer || "")
@@ -926,7 +927,7 @@ function chatResponseHtml(data) {
   const answer = renderMarkdown(answerText);
   const reportDownloads = renderReportDownloads(data);
   const evidenceIndex = isRelated ? renderChatEvidenceIndex(data.evidence || []) : "";
-  const factcheckEvidence = isFactcheck ? renderFactcheckEvidenceCards(data.skill_result?.data?.evidence || []) : "";
+  const factcheckEvidence = isFactcheck ? renderFactcheckEvidenceCards(data.skill_result?.data || {}) : "";
   const timeline = renderChatEventLine(data.event_line, data.evidence || []);
   const responseMeta = data.turn_id
     ? `<span hidden data-response-turn-id="${escapeAttr(data.turn_id)}" data-forced-relation="${escapeAttr(data.forced_relation || "")}"></span>`
@@ -1011,7 +1012,8 @@ function eventItemUrl(item, evidenceItems) {
 
 function renderChatMindMapPlaceholder(map) {
   const branches = (map && map.branches) || [];
-  if (!branches.length) return "";
+  const steps = (map && map.steps) || [];
+  if (!branches.length && !steps.length) return "";
   const id = `mind_map_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
   window.__pnaMindMapPayloads = window.__pnaMindMapPayloads || {};
   window.__pnaMindMapPayloads[id] = map;
@@ -1035,90 +1037,133 @@ function mountRelatedMindMaps(scope = document) {
 }
 
 function RelatedMindMapExplorer({ map }) {
-  const branches = React.useMemo(() => normalizeMindMapBranches(map), [map]);
+  const steps = React.useMemo(() => normalizeRelatedResearchSteps(map), [map]);
   const [activeIndex, setActiveIndex] = React.useState(0);
-  const activeBranch = branches[activeIndex] || branches[0];
-  const layout = React.useMemo(() => buildExplorerLayout(branches), [branches]);
-  const activePoints = (activeBranch?.points || []).slice(0, 5);
+  const activeStep = steps[activeIndex] || steps[0];
+  const activePoints = (activeStep?.points || []).slice(0, 6);
 
   return React.createElement(
     "section",
-    { className: "related-explorer", "aria-label": "相关联想探索图" },
+    { className: "related-research-path", "aria-label": "关联研究路径" },
     React.createElement(
       "header",
-      { className: "related-explorer-head" },
+      { className: "related-path-head" },
       React.createElement(
         "div",
         null,
-        React.createElement("span", null, "Related Map"),
-        React.createElement("strong", null, map.topic || "当前主题"),
-        React.createElement("p", null, "先看从哪些关系出发，再看每条关系召回了哪些证据。")
+        React.createElement("span", null, "RESEARCH PATH"),
+        React.createElement("strong", null, "关联研究路径"),
+        React.createElement("p", null, "展示 Agent 如何锚定语境、执行检索并形成结论；这是可核验的执行记录，不是隐藏思维链。")
       ),
       React.createElement(
         "div",
-        { className: "related-explorer-stats" },
-        React.createElement("span", null, `${branches.length} 个方向`),
+        { className: "related-path-stats" },
+        React.createElement("span", null, `${steps.length} 个节点`),
         React.createElement("span", null, `${map.evidence_count || 0} 条证据`)
       )
     ),
     React.createElement(
       "div",
-      { className: "related-explorer-body" },
+      { className: "related-path-context" },
+      React.createElement("span", null, "当前话题"),
+      React.createElement("strong", null, map.active_topic || map.topic || "当前主题"),
+      React.createElement("i", { "aria-hidden": "true" }, "→"),
+      React.createElement("span", null, "延展对象"),
+      React.createElement("strong", null, map.requested_focus || map.topic || "指定对象")
+    ),
+    React.createElement(
+      "div",
+      { className: "related-path-body" },
       React.createElement(
-        "div",
-        { className: "related-explorer-map", style: { height: layout.height } },
-        React.createElement(ExplorerLinks, { branches, layout, activeIndex }),
-        React.createElement("div", { className: "explorer-stage-size", style: { width: layout.width, height: layout.height } }),
-        React.createElement(ExplorerNode, {
-          kind: "center",
-          x: layout.center.x,
-          y: layout.center.y,
-          width: layout.center.width,
-          height: layout.center.height,
-          eyebrow: "中心主题",
-          title: map.topic || "当前主题",
-          detail: "联想搜索起点",
-        }),
-        branches.map((branch, index) =>
-          React.createElement(ExplorerNode, {
-            key: `branch_${index}`,
-            kind: "branch",
-            relationType: branch.relationType,
-            active: index === activeIndex,
-            x: layout.branches[index].x,
-            y: layout.branches[index].y,
-            width: layout.branches[index].width,
-            height: layout.branches[index].height,
-            eyebrow: "联想依据",
-            detail: branch.edgeReason,
-            onClick: () => setActiveIndex(index),
-          })
+        "ol",
+        { className: "related-path-steps" },
+        steps.map((step, index) =>
+          React.createElement(
+            "li",
+            { key: `path_${index}`, className: index === activeIndex ? "active" : "" },
+            React.createElement(
+              "button",
+              { type: "button", onClick: () => setActiveIndex(index), "aria-pressed": index === activeIndex },
+              React.createElement("b", null, String(index + 1).padStart(2, "0")),
+              React.createElement(
+                "span",
+                null,
+                React.createElement("em", null, step.label),
+                React.createElement("strong", null, truncateText(step.title, 64)),
+                React.createElement("small", null, truncateText(step.detail, 110))
+              ),
+              React.createElement(
+                "i",
+                { className: `path-state ${step.status}` },
+                step.status === "limited" ? "证据有限" : step.resultCount ? `${step.resultCount} 条` : "完成"
+              )
+            )
+          )
         )
       ),
       React.createElement(
         "aside",
-        { className: "related-explorer-detail", style: { "--relation-color": relationColor(activeBranch?.relationType) } },
-        React.createElement("span", null, activeBranch?.relationLabel || "相关方向"),
-        React.createElement("strong", null, activeBranch?.title || "相关方向"),
-        React.createElement("p", null, activeBranch?.edgeReason || "从这个方向补充关联信息。"),
+        { className: "related-path-detail" },
+        React.createElement("span", null, activeStep?.label || "执行节点"),
+        React.createElement("strong", null, activeStep?.title || "关联研究"),
+        React.createElement("p", null, activeStep?.detail || "围绕当前主题核对关联信息。"),
         React.createElement(
           "div",
-          { className: "detail-evidence-list" },
+          { className: "path-evidence-list" },
           activePoints.length
             ? activePoints.map((point, index) =>
                 React.createElement(
-                  "a",
-                  { key: `${point.title}_${index}`, href: point.url || "#", target: "_blank", rel: "noreferrer" },
-                  React.createElement("span", null, point.evidence_index ? `#${point.evidence_index}` : `0${index + 1}`),
+                  point.url ? "a" : "div",
+                  point.url
+                    ? { key: `${point.title}_${index}`, href: point.url, target: "_blank", rel: "noreferrer" }
+                    : { key: `${point.title}_${index}` },
+                  React.createElement("span", null, point.evidence_index || point.index ? `证据 #${point.evidence_index || point.index}` : `证据 ${index + 1}`),
                   React.createElement("strong", null, evidenceTitle(point.title || "相关证据")),
                   React.createElement("small", null, evidenceSnippet(point.summary || point.connection_reason || "暂无摘要"))
                 )
               )
-            : React.createElement("p", { className: "detail-empty" }, "这个方向暂时没有召回证据。")
+            : React.createElement("p", { className: "path-detail-empty" }, activeStep?.kind === "context" || activeStep?.kind === "resolution"
+              ? "这是语境解析节点，不单独绑定新闻证据。"
+              : "该节点没有可展示的来源，结论中会明确保留不确定性。")
         )
       )
     )
   );
+}
+
+function normalizeRelatedResearchSteps(map) {
+  if (Array.isArray(map?.steps) && map.steps.length) {
+    return map.steps.map((step) => ({
+      kind: step.kind || "search",
+      label: step.label || "执行节点",
+      title: step.title || map.topic || "关联研究",
+      detail: step.detail || "围绕当前主题核对关联信息。",
+      status: step.status === "limited" ? "limited" : "completed",
+      resultCount: Number(step.result_count || 0),
+      points: step.points || [],
+    }));
+  }
+  const branches = normalizeMindMapBranches(map);
+  return [
+    {
+      kind: "context",
+      label: "语境锚点",
+      title: map?.topic || "当前主题",
+      detail: "从这轮对话的主题与用户指定对象出发。",
+      status: "completed",
+      resultCount: 0,
+      points: [],
+    },
+    ...branches.map((branch) => ({
+      kind: "search",
+      label: "本轮检索式",
+      title: branch.title || "关联检索",
+      detail: branch.edgeReason,
+      status: branch.points.length ? "completed" : "limited",
+      resultCount: Number(branch.count || branch.points.length || 0),
+      points: branch.points,
+    })),
+  ];
 }
 
 function ExplorerLinks({ branches, layout, activeIndex }) {
@@ -1248,13 +1293,13 @@ function flowRelationType(value) {
 }
 
 function renderMindMapFallback(map) {
-  const branches = (map && map.branches) || [];
+  const steps = normalizeRelatedResearchSteps(map);
   return `<section class="related-explorer-fallback">
-    <strong>${escapeHtml(map.topic || "相关联想图")}</strong>
-      <p>${escapeHtml(branches.length)} 个方向 · ${escapeHtml(map.evidence_count || 0)} 条证据</p>
-      <div>${branches
+    <strong>关联研究路径</strong>
+      <p>${escapeHtml(steps.length)} 个执行节点 · ${escapeHtml(map.evidence_count || 0)} 条证据</p>
+      <div>${steps
       .slice(0, 8)
-      .map((branch) => `<span>${escapeHtml(branch.relation_label || "相关")}：${escapeHtml(truncateText(branch.title || "", 24))}</span>`)
+      .map((step, index) => `<span>${String(index + 1).padStart(2, "0")} ${escapeHtml(step.label)}：${escapeHtml(truncateText(step.title || "", 28))}</span>`)
       .join("")}</div>
   </section>`;
 }
@@ -1302,12 +1347,15 @@ function stripFactcheckEvidenceMarkdown(markdown) {
   const lines = String(markdown || "").split(/\r?\n/);
   const output = [];
   let skippingSection = false;
+  const structuredSections = (
+    "### 支持证据|### 反向证据|### 检索到的全部证据|### 缺失证据|### 来源说明|### 下一步核查"
+  ).split("|");
   for (const line of lines) {
     const trimmed = line.trim();
-    if (skippingSection && trimmed.startsWith("### ")) {
+    if (skippingSection && trimmed.startsWith("## ")) {
       skippingSection = false;
     }
-    if (trimmed.startsWith("### 检索到的全部证据")) {
+    if (structuredSections.some((heading) => trimmed.startsWith(heading))) {
       skippingSection = true;
       continue;
     }
@@ -1316,25 +1364,86 @@ function stripFactcheckEvidenceMarkdown(markdown) {
   return output.join("\n").trim();
 }
 
-function renderFactcheckEvidenceCards(items) {
+function renderFactcheckEvidenceCards(payload) {
+  const allItems = Array.isArray(payload?.evidence) ? payload.evidence : [];
+  const supporting = hydrateFactcheckEvidence(payload?.supporting_evidence, allItems);
+  const contradicting = hydrateFactcheckEvidence(payload?.contradicting_evidence, allItems);
+  const classified = new Set(
+    [...supporting, ...contradicting].map((item) => factcheckEvidenceKey(item)).filter(Boolean),
+  );
+  const contextual = allItems.filter((item) => !classified.has(factcheckEvidenceKey(item)));
+  const hasDetails = supporting.length || contradicting.length || contextual.length
+    || payload?.missing_evidence?.length || payload?.source_notes?.length || payload?.next_checks?.length;
+  if (!hasDetails) return "";
+  const verdict = String(payload?.verdict || "insufficient");
+  const verdictLabels = {
+    supported: "有证据支持",
+    contradicted: "关键事实不符",
+    mixed: "部分成立 / 存在冲突",
+    insufficient: "证据不足",
+    not_checkable: "暂不可核查",
+  };
+  const confidence = Math.round(Math.max(0, Math.min(1, Number(payload?.confidence) || 0)) * 100);
+  return `<section class="factcheck-workbench verdict-${escapeAttr(verdict)}" aria-label="事实核查证据台">
+    <header class="factcheck-verdict">
+      <div><span>FACT CHECK</span><strong>${escapeHtml(verdictLabels[verdict] || "核查完成")}</strong></div>
+      <em>证据完整度 ${confidence}%</em>
+    </header>
+    ${renderFactcheckEvidenceGroup("支持原说法", supporting, "support")}
+    ${renderFactcheckEvidenceGroup("反驳原说法", contradicting, "contradict")}
+    ${renderFactcheckEvidenceGroup("背景材料（不直接决定结论）", contextual, "context")}
+    ${renderFactcheckChecklist("仍缺少的证据", payload?.missing_evidence, "missing")}
+    ${renderFactcheckChecklist("建议继续核查", payload?.next_checks, "next")}
+    ${renderFactcheckChecklist("来源与局限", payload?.source_notes, "notes")}
+  </section>`;
+}
+
+function hydrateFactcheckEvidence(refs, allItems) {
+  if (!Array.isArray(refs)) return [];
+  return refs.map((ref) => {
+    if (!ref || typeof ref !== "object") return null;
+    const match = allItems.find((item) =>
+      (ref.index && item.index === ref.index) || (ref.url && item.url === ref.url),
+    );
+    return { ...(match || {}), ...ref };
+  }).filter(Boolean);
+}
+
+function factcheckEvidenceKey(item) {
+  return String(item?.url || item?.index || item?.title || "").trim();
+}
+
+function renderFactcheckEvidenceGroup(title, items, role) {
   if (!items.length) return "";
-  return `<div class="chat-event-line factcheck-evidence-cards">${items
-    .slice(0, 12)
-    .map((item, index) => {
-      const title = item.title || "未命名证据";
-      const url = String(item.url || "").trim();
-      const tag = url.startsWith("http") ? "a" : "div";
-      const attrs = url.startsWith("http") ? ` href="${escapeAttr(url)}" target="_blank" rel="noreferrer"` : "";
-      const date = item.published_at || "发布时间未知";
-      const source = item.source_id || "来源未知";
-      const summary = truncateText(cleanEvidenceText(item.summary || item.content_excerpt || ""), 180);
-      return `<${tag} class="chat-event"${attrs}>
-        <time>${escapeHtml(date)}</time>
-        <strong>${escapeHtml(title)}</strong>
-        <p>${escapeHtml(source)}${summary ? ` — ${escapeHtml(summary)}` : ""}${url ? " Read more" : ""}</p>
-      </${tag}>`;
-    })
-    .join("")}</div>`;
+  return `<div class="factcheck-group factcheck-${escapeAttr(role)}">
+    <h4>${escapeHtml(title)} <span>${items.length}</span></h4>
+    <div class="factcheck-evidence-grid">${items.slice(0, 12).map((item) => renderFactcheckEvidenceItem(item, role)).join("")}</div>
+  </div>`;
+}
+
+function renderFactcheckEvidenceItem(item, role) {
+  const title = item.title || "未命名证据";
+  const url = String(item.url || "").trim();
+  const tag = url.startsWith("http") ? "a" : "article";
+  const attrs = url.startsWith("http") ? ` href="${escapeAttr(url)}" target="_blank" rel="noreferrer"` : "";
+  const date = item.published_at || "时间未知";
+  const source = item.source_id || "来源未知";
+  const origin = item.origin === "external" ? "外部来源" : "本地新闻引擎";
+  const summary = truncateText(cleanEvidenceText(item.summary || item.content_excerpt || ""), 210);
+  return `<${tag} class="factcheck-evidence-card evidence-${escapeAttr(role)}"${attrs}>
+    <div class="factcheck-evidence-meta"><span>${escapeHtml(origin)}</span><time>${escapeHtml(date)}</time></div>
+    <strong>${escapeHtml(title)}</strong>
+    <p>${escapeHtml(source)}${summary ? ` · ${escapeHtml(summary)}` : ""}</p>
+    ${url ? "<em>打开原始来源 ↗</em>" : ""}
+  </${tag}>`;
+}
+
+function renderFactcheckChecklist(title, items, role) {
+  const values = Array.isArray(items) ? items.filter(Boolean).slice(0, 6) : [];
+  if (!values.length) return "";
+  return `<div class="factcheck-checklist factcheck-${escapeAttr(role)}"><h4>${escapeHtml(title)}</h4><ul>${values
+    .map((item) => `<li>${escapeHtml(item)}</li>`)
+    .join("")}</ul></div>`;
 }
 
 function renderChatEvidenceIndex(items) {
@@ -1449,7 +1558,8 @@ function renderMermaidBlock(code) {
     return `<pre data-language="mermaid"><code>${escapeHtml(source || "图谱内容为空")}</code></pre>`;
   }
   return `<section class="chat-mermaid" data-mermaid-source="${escapeAttr(source)}">
-    <div class="chat-mermaid-canvas" aria-label="热点事件图谱"></div>
+    <header class="chat-mermaid-toolbar"><div><strong>交互事件图谱</strong><span>点击图谱放大，选中节点可继续研究</span></div><button type="button" data-mermaid-expand>展开大图</button></header>
+    <div class="chat-mermaid-canvas" aria-label="热点事件图谱" role="button" tabindex="0" title="点击展开事件图谱"></div>
     <p class="chat-mermaid-status">正在渲染事件图谱…</p>
     <details class="chat-mermaid-source"><summary>查看图谱源码</summary><pre data-language="mermaid"><code>${escapeHtml(source)}</code></pre></details>
   </section>`;
@@ -1461,6 +1571,7 @@ function sanitizeMermaidSource(code) {
     .filter((line) => !/^\s*(click\s+|%%\{)/i.test(line))
     .map((line) => line.replace(/<br\s*\/?\s*>/gi, " · ").replace(/<[^>]{1,200}>/g, ""))
     .join("\n")
+    .replace(/\|"([^"\n|]{1,120})\|"(?=\s+[A-Za-z_][A-Za-z0-9_-]*(?:\s|$))/g, '|"$1"|')
     .trim()
     .slice(0, 8000);
 }
@@ -1499,6 +1610,7 @@ async function mountMermaidDiagrams(root) {
       const result = await window.mermaid.render(`pna_mermaid_${mermaidSequence}`, source);
       if (canvas) canvas.innerHTML = result.svg;
       if (typeof result.bindFunctions === "function" && canvas) result.bindFunctions(canvas);
+      bindMermaidPreview(node, source);
       node.dataset.rendered = "done";
       if (status) status.remove();
     } catch (error) {
@@ -1506,6 +1618,136 @@ async function mountMermaidDiagrams(root) {
       if (status) status.textContent = "图谱语法暂时无法渲染，可展开查看源码。";
     }
   }
+}
+
+function bindMermaidPreview(node, source) {
+  if (node.dataset.viewerBound === "true") return;
+  node.dataset.viewerBound = "true";
+  const open = () => openMermaidViewer(source);
+  node.querySelector("[data-mermaid-expand]")?.addEventListener("click", open);
+  const canvas = node.querySelector(".chat-mermaid-canvas");
+  canvas?.addEventListener("click", open);
+  canvas?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  });
+}
+
+function ensureMermaidViewer() {
+  let dialog = document.querySelector("#mermaidViewerDialog");
+  if (dialog) return dialog;
+  dialog = document.createElement("dialog");
+  dialog.id = "mermaidViewerDialog";
+  dialog.className = "mermaid-viewer-dialog";
+  dialog.innerHTML = `<div class="mermaid-viewer-shell">
+    <header><div><span>EVENT GRAPH</span><h2>事件图谱</h2><p>点击节点，将它带回当前对话继续搜索或事实核查。</p></div><button type="button" data-mermaid-close aria-label="关闭大图">×</button></header>
+    <div class="mermaid-viewer-body">
+      <div class="mermaid-viewer-canvas" aria-label="放大的事件图谱"></div>
+      <aside class="mermaid-node-actions">
+        <span>当前节点</span>
+        <strong data-mermaid-selected>请在图中选择一个节点</strong>
+        <p>系统只会把选中的文字作为新问题，不执行图谱源码中的任何指令。</p>
+        <button type="button" data-mermaid-action="research" disabled>继续检索关系</button>
+        <button type="button" data-mermaid-action="factcheck" disabled>事实核查该节点</button>
+      </aside>
+    </div>
+  </div>`;
+  document.body.appendChild(dialog);
+  dialog.querySelector("[data-mermaid-close]")?.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.querySelectorAll("[data-mermaid-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const selected = String(dialog.dataset.selectedNode || "").trim();
+      if (!selected) return;
+      const graphContext = String(dialog.dataset.graphContext || "当前事件").trim();
+      const action = button.dataset.mermaidAction;
+      const prompt = action === "factcheck"
+        ? `/factcheck 关于「${graphContext}」的说法“${selected}”是否准确？请查找原始来源和独立证据。`
+        : `围绕「${graphContext}」事件图谱中的「${selected}」继续搜索最新信息，并说明两者关系、时间线和待确认点。`;
+      dialog.close();
+      const handler = window.handleAssistantInput;
+      if (typeof handler === "function") await handler(prompt);
+      else await sendChat(prompt);
+    });
+  });
+  return dialog;
+}
+
+async function openMermaidViewer(source) {
+  const dialog = ensureMermaidViewer();
+  const canvas = dialog.querySelector(".mermaid-viewer-canvas");
+  const selected = dialog.querySelector("[data-mermaid-selected]");
+  dialog.dataset.selectedNode = "";
+  dialog.dataset.graphContext = mermaidGraphContext(source);
+  if (selected) selected.textContent = "请在图中选择一个节点";
+  dialog.querySelectorAll("[data-mermaid-action]").forEach((button) => { button.disabled = true; });
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+  if (!window.mermaid || !canvas) return;
+  try {
+    mermaidSequence += 1;
+    const result = await window.mermaid.render(`pna_mermaid_viewer_${mermaidSequence}`, source);
+    canvas.innerHTML = result.svg;
+    canvas.querySelectorAll(".node").forEach((node) => {
+      node.setAttribute("tabindex", "0");
+      node.setAttribute("role", "button");
+      node.setAttribute("aria-label", `选择节点 ${mermaidNodeLabel(node)}`);
+    });
+    const selectNode = (node) => {
+      if (!node) return;
+      canvas.querySelectorAll(".node.is-selected").forEach((item) => item.classList.remove("is-selected"));
+      node.classList.add("is-selected");
+      const label = mermaidNodeLabel(node);
+      dialog.dataset.selectedNode = label;
+      if (selected) selected.textContent = label;
+      dialog.querySelectorAll("[data-mermaid-action]").forEach((button) => { button.disabled = !label; });
+    };
+    canvas.onclick = (event) => selectNode(event.target.closest?.(".node"));
+    canvas.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        const node = event.target.closest?.(".node");
+        if (node) {
+          event.preventDefault();
+          selectNode(node);
+        }
+      }
+    };
+  } catch (error) {
+    canvas.innerHTML = `<p class="mermaid-viewer-error">图谱暂时无法放大渲染，请返回回答查看源码。</p>`;
+  }
+}
+
+function mermaidNodeLabel(node) {
+  return String(node?.textContent || "")
+    .replace(/\s+/g, " ")
+    .replace(/^\[[^\]]+\]\s*/, "")
+    .trim()
+    .slice(0, 160);
+}
+
+function mermaidGraphContext(source) {
+  const labels = new Map();
+  const degrees = new Map();
+  for (const line of String(source || "").split(/\r?\n/)) {
+    if (/^\s*(?:flowchart|graph|classDef|class|style|linkStyle|subgraph|end)\b/i.test(line)) continue;
+    const declaration = line.match(/^\s*([A-Za-z_][A-Za-z0-9_-]*)\s*[\[({]+\"?([^\"\])}]{2,160})/);
+    if (declaration?.[1] && declaration?.[2]) {
+      labels.set(declaration[1], declaration[2].replace(/\s+/g, " ").trim());
+    }
+    const edge = line.match(
+      /^\s*([A-Za-z_][A-Za-z0-9_-]*)\s+.+?(?:-->|==>|-\.->)\s*([A-Za-z_][A-Za-z0-9_-]*)(?:\s|$)/,
+    );
+    if (edge) {
+      degrees.set(edge[1], (degrees.get(edge[1]) || 0) + 1);
+      degrees.set(edge[2], (degrees.get(edge[2]) || 0) + 1);
+    }
+  }
+  const ranked = [...labels.entries()].sort((left, right) => (degrees.get(right[0]) || 0) - (degrees.get(left[0]) || 0));
+  return ranked[0]?.[1] || "当前事件";
 }
 
 function isMarkdownTableStart(lines, index) {
@@ -1621,8 +1863,26 @@ const assistantSlashCommands = [
   {
     name: "related",
     label: "查找相关新闻",
-    description: "不输入内容则用当前主题；输入内容则查 /related 后面的内容",
+    description: "结合当前对话理解人物或事件，再联网查询它与主题的关系",
     icon: "⌁",
+  },
+  {
+    name: "map",
+    label: "生成事件图谱",
+    description: "检索人物、组织、时间、地点和事件关系，生成可视化图谱",
+    icon: "◇",
+  },
+  {
+    name: "schedule",
+    label: "创建定时报告",
+    description: "解析周期、主题和报告样式，创建主动推送任务",
+    icon: "◷",
+  },
+  {
+    name: "sources",
+    label: "审计新闻来源",
+    description: "检查门户覆盖、配置状态、可信度结构与可用性",
+    icon: "◎",
   },
 ];
 

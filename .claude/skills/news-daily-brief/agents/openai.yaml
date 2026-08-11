@@ -1,0 +1,4 @@
+interface:
+  display_name: "主题新闻简报"
+  short_description: "提炼当前主题近期变化、影响和后续观察点并形成简洁新闻简报"
+  default_prompt: "Use $news-daily-brief for this task."

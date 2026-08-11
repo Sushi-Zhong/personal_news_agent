@@ -8,7 +8,12 @@ from personal_news_agent.core.models import NormalizedArticle
 from personal_news_agent.core.text import content_hash
 from personal_news_agent.services.store import NewsStore
 from personal_news_agent.services.cc_runtime import CCRuntimeResult
-from personal_news_agent.services.trending_topics import TrendingTopicBatch, TrendingTopicService, _normalize_batch_payload
+from personal_news_agent.services.trending_topics import (
+    TrendingTopicBatch,
+    TrendingTopicService,
+    _balanced_title_rows,
+    _normalize_batch_payload,
+)
 
 
 class FakeTrendingLLM:
@@ -132,11 +137,95 @@ def test_trending_topics_use_title_window_and_system_heat_metrics(tmp_path):
     assert result["items"][0]["source_count"] == 3
     assert result["items"][0]["article_count"] == 3
     assert result["items"][0]["recent_update_count"] == 3
+    assert result["items"][0]["evidence_level"] == "hot"
+    assert result["items"][1]["evidence_level"] == "lead"
     assert result["items"][0]["hot_score"] > result["items"][1]["hot_score"]
     assert "匹配关注" in result["items"][0]["recommend_reason"]
     payload = json.loads(llm.calls[0][-1]["content"])
     assert {item["article_id"] for item in payload["articles"]} == {"sport_1", "sport_2", "sport_3", "tech_1"}
     assert all("content" not in item and "summary" not in item for item in payload["articles"])
+
+
+def test_trending_topics_supplement_missing_preferred_category_with_real_article(tmp_path):
+    store = _store(tmp_path)
+    for article in (
+        _article("economy_1", "finance", "多家机构发布最新经济数据", "economy", 0.4),
+        _article("sports_1", "sports", "世界杯预选赛国家队完成赛前训练", "sports", 0.8),
+    ):
+        store.save_article(article)
+    llm = FakeTrendingLLM(
+        [
+            {
+                "category": "economy",
+                "title": "多家机构发布最新经济数据",
+                "summary": "多家机构发布最新经济数据并引发市场关注。",
+                "keywords": ["经济数据"],
+                "article_ids": ["economy_1"],
+                "confidence": 0.9,
+            }
+        ]
+    )
+
+    result = asyncio.run(TrendingTopicService(store, llm=llm).recommend("sports_user", limit=2))
+
+    assert result["generation_source"] == "llm"
+    assert result["items"][0]["category"] == "sports"
+    assert result["items"][0]["article_ids"] == ["sports_1"]
+    assert result["items"][0]["generation_source"] == "recent_article"
+    assert "匹配关注" in result["items"][0]["recommend_reason"]
+
+
+def test_ui_cache_preference_returns_fast_fallback_then_uses_warmed_llm_result(tmp_path):
+    store = _store(tmp_path)
+    store.save_article(_article("sport_fast", "sports", "国家队公布世界杯预选赛阵容", "sports", 0.2))
+    llm = FakeTrendingLLM(
+        [
+            {
+                "category": "sports",
+                "title": "国家队公布世界杯预选赛阵容",
+                "summary": "国家队公布世界杯预选赛阵容并引发持续关注。",
+                "keywords": ["国家队", "世界杯预选赛"],
+                "article_ids": ["sport_fast"],
+                "confidence": 0.9,
+            }
+        ]
+    )
+    service = TrendingTopicService(store, llm=llm, cache_minutes=3)
+
+    first = asyncio.run(service.recommend("sports_user", prefer_cached=True))
+    assert first["generation_source"] == "fallback"
+    assert llm.calls == []
+
+    warmed = asyncio.run(service.recommend("sports_user"))
+    assert warmed["generation_source"] == "llm"
+    assert len(llm.calls) == 1
+
+    cached = asyncio.run(service.recommend("sports_user", prefer_cached=True))
+    assert cached["generation_source"] == "llm"
+    assert len(llm.calls) == 1
+
+
+def test_trending_fallback_keeps_a_real_candidate_for_preferred_category(tmp_path):
+    store = _store(tmp_path)
+    for index in range(24):
+        store.save_article(
+            _article(
+                f"economy_{index}",
+                "finance",
+                f"机构发布第{index + 1}项经济运行观察数据",
+                "economy",
+                0.2 + index * 0.01,
+            )
+        )
+    store.save_article(_article("sports_only", "sports", "世界杯国家队今日完成公开训练", "sports", 2.0))
+
+    result = asyncio.run(
+        TrendingTopicService(store, llm=DisabledTrendingLLM()).recommend("sports_user", limit=3)
+    )
+
+    assert result["generation_source"] == "fallback"
+    assert result["items"][0]["category"] == "sports"
+    assert result["items"][0]["article_ids"] == ["sports_only"]
 
 
 def test_trending_topics_reject_invented_article_ids_and_fall_back(tmp_path):
@@ -185,7 +274,7 @@ def test_trending_topics_prefer_cc_runtime_for_title_clustering(tmp_path):
     assert runtime.calls[0]["strict_json_output"] is True
     assert runtime.calls[0]["allow_web_search"] is False
     assert runtime.calls[0]["allow_local_search"] is False
-    assert runtime.calls[0]["timeout_seconds"] == 60
+    assert runtime.calls[0]["timeout_seconds"] == 90
 
 
 def test_trending_topics_without_llm_returns_recent_article_fallback(tmp_path):
@@ -199,6 +288,69 @@ def test_trending_topics_without_llm_returns_recent_article_fallback(tmp_path):
     assert result["items"][0]["topic_type"] == "recommended"
 
 
+def test_single_article_candidates_are_capped_and_labeled_as_leads(tmp_path):
+    store = _store(tmp_path)
+    for index in range(8):
+        store.save_article(
+            _article(
+                f"single_{index}",
+                f"source_{index}",
+                f"互不相关的单篇新闻线索{index}",
+                "sports" if index % 2 else "tech",
+                0.2 + index * 0.1,
+            )
+        )
+
+    result = asyncio.run(
+        TrendingTopicService(store, llm=DisabledTrendingLLM()).recommend("sports_user", limit=6)
+    )
+
+    assert len(result["items"]) == 2
+    assert {item["evidence_level"] for item in result["items"]} == {"lead"}
+    assert all(item["evidence_label"] == "新线索" for item in result["items"])
+    assert all(item["hot_score"] < 0.25 for item in result["items"])
+
+
+def test_title_window_is_balanced_across_portals_before_cc_clustering():
+    rows = [
+        {"article_id": f"qq_{index}", "source_id": "qq", "category": "tech", "title": "腾讯标题"}
+        for index in range(20)
+    ] + [
+        {"article_id": f"sina_{index}", "source_id": "sina", "category": "tech", "title": "新浪标题"}
+        for index in range(4)
+    ]
+
+    selected = _balanced_title_rows(rows, limit=8)
+
+    assert [item["source_id"] for item in selected[:4]] == ["qq", "sina", "qq", "sina"]
+    assert sum(item["source_id"] == "sina" for item in selected) == 4
+
+
+def test_fallback_skips_social_post_titles_and_strips_source_suffixes(tmp_path):
+    store = _store(tmp_path)
+    store.save_article(
+        _article(
+            "social_1",
+            "toutiao",
+            "8月10日有网友发现一件非常有意思的事情，于是把前因后果全部讲了一遍，随后许多网友又发表了自己的不同看法，事情还在持续发酵中。",
+            "sports",
+            0.1,
+        )
+    )
+    store.save_article(_article("clean_1", "chinanews", "国家队公布世界杯预选赛最新阵容-中新网", "sports", 1))
+
+    result = asyncio.run(TrendingTopicService(store, llm=DisabledTrendingLLM()).recommend("sports_user", limit=3))
+
+    assert [item["title"] for item in result["items"]] == ["国家队公布世界杯预选赛最新阵容"]
+
+
+def test_llm_fallback_cache_retries_quickly(tmp_path):
+    service = TrendingTopicService(_store(tmp_path), llm=DisabledTrendingLLM(), cache_minutes=15)
+
+    assert service._cache_ttl_for({"generation_source": "fallback"}, True) == timedelta(seconds=45)
+    assert service._cache_ttl_for({"generation_source": "cc_runtime"}, True) == timedelta(minutes=15)
+
+
 def test_trending_topics_empty_window_is_safe(tmp_path):
     store = _store(tmp_path)
 
@@ -206,6 +358,16 @@ def test_trending_topics_empty_window_is_safe(tmp_path):
 
     assert result["items"] == []
     assert result["article_count"] == 0
+
+
+def test_article_lists_exclude_obviously_future_dated_content(tmp_path):
+    store = _store(tmp_path)
+    store.save_article(_article("current_1", "cctv", "当前有效报道", "sports", 1))
+    store.save_article(_article("future_1", "bad_clock", "错误的未来时间报道", "sports", -48))
+
+    items = store.list_articles(category="sports", limit=10)
+
+    assert [item["id"] for item in items] == ["current_1"]
 
 
 def test_trending_topic_batch_accepts_observed_compatible_envelope_alias():

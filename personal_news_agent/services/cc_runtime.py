@@ -22,8 +22,22 @@ WEB_TOOL_NAME = "mcp__pna_news__web_search"
 FACTCHECK_SKILL_NAME = "news-fact-check"
 HOT_EVENT_MAP_SKILL_NAME = "hot-event-map"
 NEWS_CONVERSATION_RESEARCH_SKILL_NAME = "news-conversation-research"
+NEWS_RELATED_EXPLORATION_SKILL_NAME = "news-related-exploration"
+NEWS_TOPIC_REPORT_SKILL_NAME = "news-topic-report"
+NEWS_DAILY_BRIEF_SKILL_NAME = "news-daily-brief"
+NEWS_SOURCE_AUDIT_SKILL_NAME = "news-source-audit"
+SCHEDULED_NEWS_TASK_SKILL_NAME = "scheduled-news-task"
 ALLOWED_PROJECT_SKILLS = frozenset(
-    {FACTCHECK_SKILL_NAME, HOT_EVENT_MAP_SKILL_NAME, NEWS_CONVERSATION_RESEARCH_SKILL_NAME}
+    {
+        FACTCHECK_SKILL_NAME,
+        HOT_EVENT_MAP_SKILL_NAME,
+        NEWS_CONVERSATION_RESEARCH_SKILL_NAME,
+        NEWS_RELATED_EXPLORATION_SKILL_NAME,
+        NEWS_TOPIC_REPORT_SKILL_NAME,
+        NEWS_DAILY_BRIEF_SKILL_NAME,
+        NEWS_SOURCE_AUDIT_SKILL_NAME,
+        SCHEDULED_NEWS_TASK_SKILL_NAME,
+    }
 )
 DISALLOWED_BUILTIN_TOOLS = [
     "AskUserQuestion",
@@ -77,6 +91,8 @@ class RuntimeSearchContext:
         self.queries: list[dict[str, Any]] = []
         self.trace: list[dict[str, Any]] = []
         self._seen_urls: set[str] = set()
+        self.builtin_web_search_calls = 0
+        self.builtin_web_search_denied = 0
 
     async def local_news_search(self, args: dict[str, Any]) -> dict[str, Any]:
         query = _bounded_query(args.get("query"))
@@ -125,7 +141,16 @@ class RuntimeSearchContext:
         return _tool_success("UNTRUSTED_WEB_EVIDENCE", query, results, self.store)
 
     def _record(self, origin: str, query: str, results: list[SearchResult]) -> None:
-        self.queries.append({"query": query, "origin": origin, "result_count": len(results)})
+        self.queries.append(
+            {
+                "query": query,
+                "origin": origin,
+                "result_count": len(results),
+                # Preserve the evidence linkage for user-facing execution views.
+                # This is observability metadata, not model reasoning.
+                "result_urls": [str(item.url or "") for item in results[:12] if item.url],
+            }
+        )
         self.trace.append(
             {
                 "stage": "本地新闻引擎" if origin == "local" else "外部搜索工具",
@@ -207,6 +232,8 @@ class CCRuntimeOrchestrator:
         strict_json_output: bool = False,
         allow_local_search: bool = True,
         timeout_seconds: float | None = None,
+        max_turns: int | None = None,
+        builtin_web_search_limit: int | None = None,
         on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> CCRuntimeResult:
         if not self.configured:
@@ -221,7 +248,13 @@ class CCRuntimeOrchestrator:
             on_trace,
         )
         selected_skills = _validated_skill_names(skill_names)
-        options = self.build_options(context, selected_skills, strict_json_output=strict_json_output)
+        options = self.build_options(
+            context,
+            selected_skills,
+            strict_json_output=strict_json_output,
+            max_turns=max_turns,
+            builtin_web_search_limit=builtin_web_search_limit,
+        )
         prompt = _runtime_prompt(
             message,
             query,
@@ -243,7 +276,7 @@ class CCRuntimeOrchestrator:
 
         answer_parts: list[str] = []
         result_metadata: dict[str, Any] = {}
-        builtin_web_calls = 0
+        observed_builtin_web_calls = 0
         require_builtin_web_search = bool(
             allow_web_search and self.settings.cc_runtime_builtin_web_search
         )
@@ -276,14 +309,18 @@ class CCRuntimeOrchestrator:
                                     if type(block).__name__ == "TextBlock" and getattr(block, "text", ""):
                                         attempt_answer_parts.append(str(block.text))
                                     elif type(block).__name__ == "ToolUseBlock" and getattr(block, "name", "") == "WebSearch":
-                                        builtin_web_calls += 1
-                                        trace_item = {
-                                            "stage": "外部搜索工具",
-                                            "status": "running",
-                                            "message": "正在检索外部实时信息。",
-                                        }
-                                        context.trace.append(trace_item)
-                                        await context._notify_last_trace()
+                                        observed_builtin_web_calls += 1
+                                        if (
+                                            builtin_web_search_limit is None
+                                            or observed_builtin_web_calls <= builtin_web_search_limit
+                                        ):
+                                            trace_item = {
+                                                "stage": "外部搜索工具",
+                                                "status": "running",
+                                                "message": "正在检索外部实时信息。",
+                                            }
+                                            context.trace.append(trace_item)
+                                            await context._notify_last_trace()
                             elif class_name == "ResultMessage":
                                 if bool(getattr(sdk_message, "is_error", False)):
                                     errors = getattr(sdk_message, "errors", None)
@@ -307,10 +344,15 @@ class CCRuntimeOrchestrator:
                                 }
                         answer_parts = attempt_answer_parts
                         source_links_present = _contains_source_url("\n".join(answer_parts))
-                        if not require_builtin_web_search or builtin_web_calls:
+                        if not require_builtin_web_search or observed_builtin_web_calls:
                             break
-                    if require_builtin_web_search and not builtin_web_calls:
+                    if require_builtin_web_search and not observed_builtin_web_calls:
                         raise CCRuntimeError("CC Runtime did not execute the required WebSearch")
+                    builtin_web_calls = (
+                        context.builtin_web_search_calls
+                        if builtin_web_search_limit is not None
+                        else observed_builtin_web_calls
+                    )
                     if builtin_web_calls:
                         completed = {
                             "stage": "外部搜索工具",
@@ -371,8 +413,10 @@ class CCRuntimeOrchestrator:
         skill_names: list[str] | None = None,
         *,
         strict_json_output: bool = False,
+        max_turns: int | None = None,
+        builtin_web_search_limit: int | None = None,
     ) -> Any:
-        from claude_agent_sdk import ClaudeAgentOptions, create_sdk_mcp_server, tool
+        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, create_sdk_mcp_server, tool
 
         selected_skills = _validated_skill_names(skill_names)
 
@@ -409,6 +453,42 @@ class CCRuntimeOrchestrator:
         if context.allow_web_search and self.settings.cc_runtime_builtin_web_search:
             builtin_tools.append("WebSearch")
             allowed_tools.append("WebSearch")
+
+        hooks = None
+        if context.allow_web_search and builtin_web_search_limit is not None:
+            web_search_budget = max(1, int(builtin_web_search_limit))
+            web_search_count = 0
+
+            async def limit_builtin_web_search(input_data: dict[str, Any], *_: Any) -> dict[str, Any]:
+                nonlocal web_search_count
+                if str(input_data.get("tool_name") or "") != "WebSearch":
+                    return {}
+                if web_search_count >= web_search_budget:
+                    context.builtin_web_search_denied += 1
+                    return {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": (
+                                "External search budget reached. Stop searching and synthesize the final answer "
+                                "from evidence already collected; mark unsupported details as unconfirmed."
+                            ),
+                        }
+                    }
+                web_search_count += 1
+                context.builtin_web_search_calls += 1
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                    }
+                }
+
+            hooks = {
+                "PreToolUse": [
+                    HookMatcher(matcher="WebSearch", hooks=[limit_builtin_web_search], timeout=5.0)
+                ]
+            }
 
         server = create_sdk_mcp_server(name="pna_news", version="0.1.0", tools=sdk_tools)
         config_dir = self.settings.cc_runtime_config_dir.resolve()
@@ -451,11 +531,12 @@ class CCRuntimeOrchestrator:
             cwd=str(Path(BASE_DIR).resolve()),
             setting_sources=["project"],
             skills=selected_skills,
-            max_turns=max(1, self.settings.cc_runtime_max_turns),
+            max_turns=max(1, int(max_turns or self.settings.cc_runtime_max_turns)),
             max_budget_usd=self.settings.cc_runtime_max_budget_usd,
             model=self.settings.cc_runtime_model,
             effort=self.settings.cc_runtime_effort,
             env=runtime_env,
+            hooks=hooks,
         )
 
 
@@ -474,7 +555,7 @@ def _system_prompt(
     skill_rule = (
         f"本轮已指定项目级 Skill：{', '.join(skill_names or [])}。必须先加载并遵守其工作流与输出契约。"
         if skill_names
-        else "本轮没有指定项目级 Skill，按通用新闻研究流程执行。"
+        else "本轮没有指定项目级 Skill，按自然、简洁的通用对话方式执行。"
     )
     output_rule = (
         "最终严格按用户任务给出的 JSON 字段输出一个 JSON 对象，不要 Markdown 代码围栏或额外解释。"
@@ -487,7 +568,13 @@ def _system_prompt(
         else "本轮输入已包含完整的本地数据窗口，不调用任何本地检索工具；"
     )
     return (
-        "你是个人资讯助手的核心研究主控。先理解问题，再自主决定搜索词和调用次数。"
+        "你是 News Agent（元融个人资讯助手）的核心研究主控。先理解问题，再自主决定搜索词和调用次数。"
+        "用户询问你是谁或能做什么时，只介绍 News Agent 的热点追踪、新闻解读、事实核查、"
+        "延展研究、事件图谱和定时报告能力。"
+        "不得提及 Claude、Claude Code、CC Runtime、SDK、DeepSeek、实际模型供应商或内部编排架构。"
+        "面向用户只使用“本地新闻引擎”和“外部搜索工具”这两个工具名称；"
+        "不得输出 WebSearch、MCP、ES、Elasticsearch、MySQL 等内部工具或存储名称。"
+        "不得把公开抓取或检索到的新闻网站称为合作方、合作源或授权源；统一称为已收录的公开新闻来源。"
         f"{skill_rule}"
         f"{local_rule}"
         f"{web_rule}"

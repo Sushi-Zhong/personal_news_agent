@@ -1,0 +1,4 @@
+interface:
+  display_name: "新闻来源审计"
+  short_description: "检查系统新闻来源覆盖、配置状态、可信度结构与当前可用性"
+  default_prompt: "Use $news-source-audit for this task."

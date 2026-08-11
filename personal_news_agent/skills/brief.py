@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from personal_news_agent.core.models import TimeRange
+from personal_news_agent.services.cc_runtime import NEWS_DAILY_BRIEF_SKILL_NAME
 from personal_news_agent.skills.base import SkillContext, SkillResult, SkillSpec
-from personal_news_agent.skills.report import _categories, _parse_args
+from personal_news_agent.skills.report import _categories, _cc_enrich_report_payload, _parse_args
 
 
 class BriefSkill:
@@ -35,6 +37,15 @@ class BriefSkill:
                 report_type="daily_digest",
             )
         payload = report.model_dump(mode="json") if hasattr(report, "model_dump") else dict(report)
+        payload = await _cc_enrich_report_payload(
+            payload,
+            topic=topic,
+            categories=categories,
+            context=context,
+            skill_name=NEWS_DAILY_BRIEF_SKILL_NAME,
+            request=f"请围绕【{topic}】生成一份紧凑、及时、可追踪来源的主题新闻简报。",
+            time_range=TimeRange(days=1),
+        )
         return SkillResult(
             command=self.spec.command,
             title=f"今日简报：{topic}",

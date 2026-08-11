@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
@@ -69,11 +70,15 @@ class FactCheckService:
                     history="",
                     allow_web_search=include_remote,
                     skill_names=[FACTCHECK_SKILL_NAME],
+                    max_turns=10,
+                    builtin_web_search_limit=3,
                     on_trace=on_trace,
                 )
                 parsed = _decode_json_object(runtime_result.answer)
-                evidence = self._evidence(runtime_result.results)
-                if int(runtime_result.provider_metadata.get("builtin_web_calls") or 0) > 0:
+                relevant_results = _relevant_factcheck_results(cleaned_claim, runtime_result.results)
+                evidence = self._evidence(relevant_results)
+                builtin_web_calls = int(runtime_result.provider_metadata.get("builtin_web_calls") or 0)
+                if builtin_web_calls > 0:
                     evidence = _append_declared_external_evidence(evidence, parsed)
                 fallback = _fallback_payload(
                     cleaned_claim,
@@ -81,6 +86,7 @@ class FactCheckService:
                     evidence,
                     include_remote=include_remote,
                     web_search_available=bool(getattr(self.search_service, "external_configured", False)),
+                    builtin_web_search_used=builtin_web_calls > 0,
                     check_query=cleaned_check_query,
                 )
                 payload = _normalize_payload(parsed, fallback, evidence)
@@ -141,7 +147,10 @@ class FactCheckService:
                     search_query,
                     {"error": str(exc), "provider_configured": web_search_available},
                 )
-        results = _merge_search_results(local_results, web_results, max_results)
+        results = _relevant_factcheck_results(
+            cleaned_claim,
+            _merge_search_results(local_results, web_results, max_results),
+        )
         evidence = self._evidence(results)
         fallback = _fallback_payload(
             cleaned_claim,
@@ -280,6 +289,7 @@ def _fallback_payload(
     *,
     include_remote: bool = False,
     web_search_available: bool = False,
+    builtin_web_search_used: bool = False,
     check_query: str = "",
 ) -> dict[str, Any]:
     if not evidence:
@@ -293,7 +303,15 @@ def _fallback_payload(
         "supporting_evidence": [],
         "contradicting_evidence": [],
         "missing_evidence": ["原始权威来源", "明确发布时间", "可直接验证该说法的正文证据"],
-        "source_notes": [_source_note(evidence, include_remote, web_search_available, check_query)],
+        "source_notes": [
+            _source_note(
+                evidence,
+                include_remote,
+                web_search_available,
+                check_query,
+                builtin_web_search_used=builtin_web_search_used,
+            )
+        ],
         "next_checks": ["查找原始发布方或权威媒体全文", "对比标题与正文是否一致", "确认时间、地点、主体是否明确"],
     }
 
@@ -303,6 +321,8 @@ def _source_note(
     include_remote: bool,
     web_search_available: bool,
     check_query: str,
+    *,
+    builtin_web_search_used: bool = False,
 ) -> str:
     remote_count = sum(1 for item in evidence if item.get("origin") == "external")
     local_count = len(evidence) - remote_count
@@ -311,11 +331,35 @@ def _source_note(
         remote_note = "未请求外部搜索工具"
     elif remote_count:
         remote_note = f"外部搜索工具返回 {remote_count} 条"
+    elif builtin_web_search_used:
+        remote_note = "已执行外部搜索，但本轮未返回可归档的来源链接"
     elif web_search_available:
         remote_note = "已请求外部搜索工具，但未返回可用结果"
     else:
         remote_note = "已请求外部搜索工具，但服务尚未配置"
     return f"本次保留 {local_count} 条本地证据、{remote_count} 条联网证据；{remote_note}{suffix}。"
+
+
+def _relevant_factcheck_results(claim: str, results: list[SearchResult]) -> list[SearchResult]:
+    if len(results) <= 1:
+        return results
+    text = " ".join(str(claim or "").split())
+    quoted = [item.strip() for item in re.findall(r"《([^》]{2,80})》|[“\"]([^”\"]{2,80})[”\"]", text) for item in item if item.strip()]
+    concepts = [
+        token
+        for token in ("票房", "暑期档", "评分", "上映", "获奖", "回应", "声明", "事故", "政策", "日期", "时间")
+        if token in text
+    ]
+    numbers = re.findall(r"\d+(?:\.\d+)?(?:%|亿|万|元|人|次)?", text)
+    selected: list[SearchResult] = []
+    for item in results:
+        haystack = f"{item.title} {item.summary}".lower()
+        entity_match = any(entity.lower() in haystack for entity in quoted)
+        concept_matches = sum(token.lower() in haystack for token in concepts)
+        number_match = any(number.lower() in haystack for number in numbers)
+        if entity_match or concept_matches >= min(2, max(1, len(concepts))) or (concept_matches and number_match):
+            selected.append(item)
+    return selected or results[: min(4, len(results))]
 
 
 def _merge_search_results(
@@ -377,12 +421,21 @@ def _normalize_payload(parsed: dict[str, Any], fallback: dict[str, Any], evidenc
     for note in fallback["source_notes"]:
         if note not in source_notes:
             source_notes.append(note)
+    supporting = _evidence_refs(parsed.get("supporting_evidence"), evidence)
+    contradicting = _evidence_refs(parsed.get("contradicting_evidence"), evidence)
+    if verdict == "contradicted":
+        # Evidence lists are relative to the user's original claim. Partial
+        # truth belongs in a mixed verdict, not in the supporting column of a
+        # fully contradicted claim.
+        supporting = []
+    elif verdict == "supported":
+        contradicting = []
     return {
         "verdict": verdict,
         "confidence": confidence,
         "summary": _clean_text(parsed.get("summary"), 600) or fallback["summary"],
-        "supporting_evidence": _evidence_refs(parsed.get("supporting_evidence"), evidence),
-        "contradicting_evidence": _evidence_refs(parsed.get("contradicting_evidence"), evidence),
+        "supporting_evidence": supporting,
+        "contradicting_evidence": contradicting,
         "missing_evidence": _clean_string_list(parsed.get("missing_evidence"), 6, 160) or fallback["missing_evidence"],
         "source_notes": source_notes[:6],
         "next_checks": _clean_string_list(parsed.get("next_checks"), 6, 160) or fallback["next_checks"],

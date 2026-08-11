@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
-    <link rel="stylesheet" href="static/styles.css?v=20260810-dialogue-skill-2" />
+    <link rel="stylesheet" href="static/styles.css?v=20260811-topic-pulse-6" />
   </head>
   <body>
     <template id="webTemplate" data-body-class="web-shell console-shell">
@@ -31,16 +31,16 @@
               <div class="rail-sticky-stack">
                 <section class="rail-panel topic-nav">
                   <div class="panel-head compact-head">
-                    <h2>关注</h2>
+                    <div class="topic-panel-title">
+                      <h2>关注</h2>
+                      <small data-topic-refresh-status aria-live="polite">正在更新热点</small>
+                    </div>
                     <button id="newTopicConversation" class="secondary-button mini-button" type="button">新增</button>
                   </div>
-                  <div data-topic-list>
-                    <button class="topic-card active" data-topic-title="新能源汽车产业链" data-category-scope="auto" data-tooltip="新能源汽车产业链"><span>新能源汽车产业链</span><small>auto</small></button>
-                    <button class="topic-card" data-topic-title="体育赛事商业化" data-category-scope="sports" data-tooltip="体育赛事商业化"><span>体育赛事商业化</span><small>sports</small></button>
-                    <button class="topic-card system-topic" data-topic-title="科技公司上市观察" data-category-scope="tech,economy" data-tooltip="科技公司上市观察"><span>科技公司上市</span><small>tech / economy</small></button>
-                    <button class="topic-card system-topic" data-topic-title="大型体育赛事运营" data-category-scope="sports" data-tooltip="大型体育赛事运营"><span>赛事运营</span><small>sports</small></button>
-                    <button class="topic-card" data-topic-title="国际局势与大宗商品" data-category-scope="politics,economy" data-tooltip="国际局势与大宗商品"><span>国际局势 × 大宗商品</span><small>politics / economy</small></button>
-                    <button class="topic-card" data-topic-title="AI 终端设备" data-category-scope="tech" data-tooltip="AI 终端设备"><span>AI 终端设备</span><small>tech</small></button>
+                  <div data-topic-list aria-busy="true" aria-label="正在载入关注专题">
+                    <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
+                    <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
+                    <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
                   </div>
                 </section>
                 <section class="rail-panel events-panel">
@@ -57,15 +57,21 @@
                   <h2 data-agent-topic>新能源汽车产业链</h2>
                   <p data-dialog-context>18 条证据 · 18 个事件</p>
                 </div>
-                <div class="prompt-suggestions">
-                  <button type="button" data-action="changes">变化</button>
-                  <button type="button" data-action="deep-dive-chat">深挖</button>
-                  <button type="button" data-action="make-task">跟踪</button>
-                </div>
-                <div class="context-dock">
-                  <span data-current-topic-chip>新能源汽车产业链</span>
-                  <span data-current-category-chip>auto</span>
-                  <span data-current-view-chip>事件线</span>
+                <div class="conversation-command-bar">
+                  <div class="prompt-suggestions" aria-label="专题快捷操作">
+                    <button type="button" class="quick-action primary" data-action="changes">
+                      <span class="quick-action-icon" aria-hidden="true">↻</span>
+                      <span><strong>追踪最新</strong><small>核对新变化</small></span>
+                    </button>
+                    <button type="button" class="quick-action" data-action="deep-dive-chat">
+                      <span class="quick-action-icon" aria-hidden="true">◇</span>
+                      <span><strong>深度解读</strong><small>人物、事件与争议</small></span>
+                    </button>
+                  </div>
+                  <div class="context-dock" aria-label="当前专题范围">
+                    <span data-current-category-chip>领域 · auto</span>
+                    <span data-current-view-chip>视图 · 事件线</span>
+                  </div>
                 </div>
                 <div class="messages hero-messages chat-stream" id="messages">
                   <article class="chat-turn chat-assistant">
@@ -252,6 +258,11 @@
               <h2>个人配置</h2>
               <button class="secondary-button">关闭</button>
             </form>
+            <section class="onboarding-intro" data-onboarding-intro hidden>
+              <span>首次使用</span>
+              <strong>先告诉 Agent 你真正关心什么</strong>
+              <p>选择板块并填写少量关注词即可。系统会把持续抓取形成的实时热点按你的兴趣重新排序，之后也可以随时修改。</p>
+            </section>
             <form id="onboardingForm" class="config-grid">
               <input name="display_name" placeholder="常用称呼" />
               <textarea name="self_description" placeholder="自我描述：职业、城市、信息偏好、最近关注的长期目标"></textarea>
@@ -444,6 +455,6 @@
     <script src="static/vendor/react.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/react-dom.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/mermaid.min.js?v=11.9.0"></script>
-    <script src="static/home.js?v=20260810-dialogue-skill-2"></script>
+    <script src="static/home.js?v=20260811-topic-pulse-6"></script>
   </body>
 </html>

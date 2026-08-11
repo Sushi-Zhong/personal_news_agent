@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+import re
 
 from personal_news_agent.core.models import TopicCluster
 from personal_news_agent.core.text import extract_entities, extract_keywords, stable_id
@@ -60,9 +61,27 @@ class EventDiscoveryService:
 
 
 def _cluster_title(key: str, rows: list[dict]) -> str:
-    if len(rows) == 1:
-        return rows[0]["title"]
-    return f"{key}相关热点：{rows[0]['title']}"
+    del key
+    titles = [_clean_event_title(row.get("title") or "") for row in rows]
+    titles = [title for title in titles if title]
+    if not titles:
+        return "热点事件"
+    # Keyword extraction is intentionally permissive and can produce buckets such
+    # as "10" or "流言板". Showing a real representative headline is more honest
+    # and useful than presenting those weak tokens as a synthesized event name.
+    return min(titles, key=lambda title: (abs(len(title) - 28), len(title)))
+
+
+def _clean_event_title(value: str) -> str:
+    title = re.sub(r"\s+", " ", str(value or "")).strip()
+    title = re.sub(r"^[\[【](?:流言板|速报|快讯)[\]】]\s*", "", title)
+    title = re.sub(
+        r"\s*[-_—|]\s*(?:中新网|腾讯新闻|新浪(?:新闻|财经)?|搜狐(?:新闻)?|今日头条|虎扑|游民星空|中华网(?:军事)?|界面新闻)\s*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    return title[:90].strip()
 
 
 def _parse_dt(value: str | None) -> datetime | None:

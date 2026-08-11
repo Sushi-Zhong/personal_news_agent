@@ -51,7 +51,7 @@ class Settings:
         and os.getenv("PNA_WEB_DISABLE_BACKGROUND_CRAWL", "0") != "1"
     )
     background_crawl_interval_seconds: int = int(os.getenv("PERSONAL_NEWS_BACKGROUND_CRAWL_SECONDS", "10"))
-    trending_topic_refresh_seconds: int = int(os.getenv("PERSONAL_NEWS_TRENDING_REFRESH_SECONDS", "900"))
+    trending_topic_refresh_seconds: int = int(os.getenv("PERSONAL_NEWS_TRENDING_REFRESH_SECONDS", "180"))
     external_search_provider: str = os.getenv("EXTERNAL_SEARCH_PROVIDER", "none")
     bing_search_key: str | None = os.getenv("BING_SEARCH_KEY")
     bing_search_endpoint: str = os.getenv("BING_SEARCH_ENDPOINT", "https://api.bing.microsoft.com/v7.0/search")

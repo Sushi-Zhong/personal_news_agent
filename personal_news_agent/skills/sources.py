@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+
+from personal_news_agent.services.cc_runtime import NEWS_SOURCE_AUDIT_SKILL_NAME
 from personal_news_agent.skills.base import SkillContext, SkillResult, SkillSpec
 
 
@@ -36,9 +39,52 @@ class SourcesSkill:
             for source in sources
         ]
         summary = registry.source_summary()
+        data = {"category": category, "summary": summary, "items": items}
+        runtime = context.services.get("cc_runtime")
+        if runtime and getattr(runtime, "configured", False):
+            try:
+                result = await runtime.run(
+                    message=(
+                        f"请审计系统配置的{'全部' if not category else category}新闻来源，"
+                        "说明覆盖、可用性抽查边界、风险和改进建议。"
+                    ),
+                    query=f"{category or '主要门户'} 新闻来源 可用性",
+                    topic=f"{category or '全部'}资讯源审计",
+                    category_scope=[category] if category else [],
+                    time_range=None,
+                    history=json.dumps(data, ensure_ascii=False)[:8_000],
+                    allow_web_search=context.allow_web_search,
+                    allow_local_search=False,
+                    skill_names=[NEWS_SOURCE_AUDIT_SKILL_NAME],
+                    max_turns=8,
+                    builtin_web_search_limit=2,
+                    on_trace=context.on_trace,
+                )
+                data.update(
+                    {
+                        "markdown": result.answer,
+                        "research_trace": result.trace,
+                        "expanded_queries": result.queries[:8],
+                        "recommendations": [item.model_dump(mode="json") for item in result.results[:8]],
+                        "agent_source": "cc_runtime",
+                    }
+                )
+            except Exception as exc:
+                data.update(
+                    {
+                        "agent_source": "fallback",
+                        "research_trace": [
+                            {
+                                "stage": "来源审计 Skill",
+                                "status": "fallback",
+                                "message": f"Agent 主控审计失败，保留配置清单：{type(exc).__name__}。",
+                            }
+                        ],
+                    }
+                )
         return SkillResult(
             command=self.spec.command,
             title="资讯源" if not category else f"{category} 资讯源",
             message=f"找到 {len(items)} 个来源，其中 {sum(item['crawl_enabled'] for item in items)} 个可抓取。",
-            data={"category": category, "summary": summary, "items": items},
+            data=data,
         )

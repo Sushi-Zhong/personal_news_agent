@@ -75,6 +75,35 @@ pna_load_runtime_env() {
     source "${runtime_env_file}"
     set +a
   fi
+  pna_load_phone_env
+}
+
+pna_load_phone_env() {
+  local phone_env_file="${PNA_PHONE_ENV_FILE:-}"
+  if [[ -z "${phone_env_file}" ]]; then
+    return 0
+  fi
+  if [[ ! -r "${phone_env_file}" ]]; then
+    echo "Configured phone environment file is not readable: ${phone_env_file}" >&2
+    return 1
+  fi
+
+  # Share only the phone-verification contract. Sourcing another application's
+  # complete .env would also override this service's database and LLM settings.
+  local key value
+  while IFS='=' read -r key value; do
+    key="${key#export }"
+    case "${key}" in
+      FIN_AGENT_PHONE_CHALLENGE_PROVIDER|FIN_AGENT_PHONE_CHALLENGE_SECRET|FIN_AGENT_PHONE_CHALLENGE_MOCK_ENABLED|FIN_AGENT_PHONE_CHALLENGE_TTL_SECONDS|FIN_AGENT_PHONE_CHALLENGE_RESEND_SECONDS|FIN_AGENT_PHONE_CHALLENGE_REQUEST_TIMEOUT_SECONDS|FIN_AGENT_PHONE_CHALLENGE_MAX_ATTEMPTS|FIN_AGENT_PHONE_CHALLENGE_RATE_WINDOW_SECONDS|FIN_AGENT_PHONE_CHALLENGE_MOBILE_RATE_LIMIT|FIN_AGENT_PHONE_CHALLENGE_IP_RATE_LIMIT|FIN_AGENT_PNVS_SIGN_NAME|FIN_AGENT_PNVS_TEMPLATE_CODE|FIN_AGENT_PNVS_SCHEME_NAME|FIN_AGENT_PNVS_ENDPOINT)
+        value="${value%$'\r'}"
+        value="${value%\"}"
+        value="${value#\"}"
+        value="${value%\'}"
+        value="${value#\'}"
+        export "${key}=${value}"
+        ;;
+    esac
+  done < "${phone_env_file}"
 }
 
 pna_python_bin() {

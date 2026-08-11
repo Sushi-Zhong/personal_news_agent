@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+from typing import Any
+
+from personal_news_agent.core.models import TimeRange
+from personal_news_agent.services.cc_runtime import NEWS_TOPIC_REPORT_SKILL_NAME
 from personal_news_agent.skills.base import SkillContext, SkillResult, SkillSpec
 
 
@@ -26,6 +31,15 @@ class ReportSkill:
                 strict_topic_filter=bool(topic),
             )
             payload = report.model_dump(mode="json") if hasattr(report, "model_dump") else dict(report)
+            payload = await _cc_enrich_report_payload(
+                payload,
+                topic=payload.get("topic") or topic or "当前对话",
+                categories=payload.get("category_scope") or context.category_scope or [],
+                context=context,
+                skill_name=NEWS_TOPIC_REPORT_SKILL_NAME,
+                request="请把当前对话与已收集证据整理成一份可追踪的专题报告。",
+                time_range=TimeRange(days=30),
+            )
             return SkillResult(
                 command=self.spec.command,
                 title=f"专题报告：{payload.get('topic') or topic or '当前对话'}",
@@ -43,6 +57,15 @@ class ReportSkill:
             report_type="timeline_analysis",
         )
         payload = report.model_dump(mode="json") if hasattr(report, "model_dump") else dict(report)
+        payload = await _cc_enrich_report_payload(
+            payload,
+            topic=topic,
+            categories=categories,
+            context=context,
+            skill_name=NEWS_TOPIC_REPORT_SKILL_NAME,
+            request=f"请围绕【{topic}】生成一份证据化专题报告。",
+            time_range=TimeRange(days=_time_range_days(options.get("time-range", "30d"), 30)),
+        )
         return SkillResult(
             command=self.spec.command,
             title=f"专题报告：{topic}",
@@ -84,3 +107,88 @@ def _clean_report_topic(value: str) -> str:
                 topic = topic[len(prefix):].strip()
                 changed = True
     return topic
+
+
+async def _cc_enrich_report_payload(
+    payload: dict[str, Any],
+    *,
+    topic: str,
+    categories: list[str],
+    context: SkillContext,
+    skill_name: str,
+    request: str,
+    time_range: TimeRange,
+) -> dict[str, Any]:
+    runtime = context.services.get("cc_runtime")
+    if not runtime or not getattr(runtime, "configured", False):
+        payload["agent_source"] = "fallback"
+        payload.setdefault("research_trace", []).append(
+            {"stage": "场景 Skill", "status": "fallback", "message": "Agent 主控暂不可用，保留本地报告结果。"}
+        )
+        return payload
+    try:
+        result = await runtime.run(
+            message=request,
+            query=topic,
+            topic=topic,
+            category_scope=categories,
+            time_range=time_range,
+            history=json.dumps(payload, ensure_ascii=False, default=str)[:8_000],
+            allow_web_search=context.allow_web_search,
+            skill_names=[skill_name],
+            max_turns=10,
+            builtin_web_search_limit=3,
+            on_trace=context.on_trace,
+        )
+    except Exception as exc:
+        payload["agent_source"] = "fallback"
+        payload.setdefault("research_trace", []).append(
+            {
+                "stage": "场景 Skill",
+                "status": "fallback",
+                "message": f"Agent 主控生成失败，保留本地报告：{type(exc).__name__}。",
+            }
+        )
+        return payload
+    payload["markdown"] = result.answer
+    payload["agent_source"] = "cc_runtime"
+    payload["research_trace"] = result.trace
+    payload["evidence"] = _runtime_evidence(result.results)
+    payload["expanded_queries"] = result.queries[:8]
+    payload["recommendations"] = [item.model_dump(mode="json") for item in result.results[:8]]
+    return payload
+
+
+def _time_range_days(value: str, default: int) -> int:
+    raw = str(value or "").strip().lower()
+    if raw.endswith("d"):
+        raw = raw[:-1]
+    try:
+        days = int(raw)
+    except ValueError:
+        days = default
+    return max(1, min(365, days))
+
+
+def _runtime_evidence(results: list[Any]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in results[:12]:
+        url = str(getattr(item, "url", "") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        published_at = getattr(item, "published_at", None)
+        evidence.append(
+            {
+                "index": len(evidence) + 1,
+                "article_id": getattr(item, "article_id", None),
+                "source_id": getattr(item, "source_id", None),
+                "title": getattr(item, "title", ""),
+                "url": url,
+                "summary": getattr(item, "summary", ""),
+                "published_at": published_at.isoformat() if hasattr(published_at, "isoformat") else published_at,
+                "origin": getattr(item, "origin", "local"),
+            }
+        )
+    return evidence

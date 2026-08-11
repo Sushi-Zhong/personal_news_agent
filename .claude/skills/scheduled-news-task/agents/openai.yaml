@@ -1,0 +1,4 @@
+interface:
+  display_name: "定时资讯任务"
+  short_description: "把自然语言周期推送要求解析为安全且可校验的定时任务参数"
+  default_prompt: "Use $scheduled-news-task for this task."

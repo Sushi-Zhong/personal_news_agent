@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +12,7 @@ from personal_news_agent.core.categories import CATEGORIES
 from personal_news_agent.core.models import FocusObject, SearchResult
 from personal_news_agent.core.text import summarize
 from personal_news_agent.services.chat_understanding import infer_categories
+from personal_news_agent.services.cc_runtime import SCHEDULED_NEWS_TASK_SKILL_NAME
 from personal_news_agent.services.llm import LLMClient
 from personal_news_agent.services.reports import ReportGenerationService
 from personal_news_agent.services.store import NewsStore
@@ -68,6 +70,7 @@ class ScheduledTaskService:
         search_service: Any | None = None,
         native_ingestion: Any | None = None,
         llm_client: LLMClient | None = None,
+        cc_runtime: Any | None = None,
         prompt_path: Path | None = None,
         task_prompt_path: Path | None = None,
     ):
@@ -76,6 +79,7 @@ class ScheduledTaskService:
         self.search_service = search_service or reports.search_service
         self.native_ingestion = native_ingestion
         self.llm_client = llm_client or LLMClient()
+        self.cc_runtime = cc_runtime
         self.prompt_path = prompt_path or Path(__file__).resolve().parents[1] / "prompts" / "scheduled_push_summary.md"
         self.task_prompt_path = task_prompt_path or Path(__file__).resolve().parents[1] / "prompts" / "scheduled_task_parsing.md"
 
@@ -89,11 +93,25 @@ class ScheduledTaskService:
         normalized["next_run_at"] = next_run_at(normalized["schedule"])
         return self.store.create_task(normalized)
 
-    async def create_from_schedule_message(self, user_id: str, message: str) -> dict[str, Any]:
-        api_params = await self.extract_schedule_task_api_params(user_id, message)
+    async def create_from_schedule_message(
+        self,
+        user_id: str,
+        message: str,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        trace: list[dict[str, Any]] = []
+
+        async def emit(item: dict[str, Any]) -> None:
+            trace.append(item)
+            if on_trace:
+                await on_trace(item)
+
+        api_params = await self.extract_schedule_task_api_params(user_id, message, on_trace=emit)
         payload = api_params.model_dump(mode="json")
         task = self.create_task(payload)
+        await emit({"stage": "任务落库", "status": "completed", "message": f"任务 {task['id']} 已保存。"})
         conversation = self.store.get_or_create_conversation(user_id, SCHEDULED_PUSH_CONVERSATION_KIND, SCHEDULED_PUSH_CONVERSATION_TITLE)
+        await emit({"stage": "推送对话", "status": "completed", "message": f"将推送到 {conversation['title']}。"})
         topic = _task_topic(task)
         answer = (
             f"已创建定时推送任务：每天/周期按 `{task['schedule']}` 执行。\n\n"
@@ -112,10 +130,73 @@ class ScheduledTaskService:
             user_id=user_id,
             payload={"type": "scheduled_task_created", "task": task, "api_params": payload},
         )
-        return {"status": "ok", "task": task, "conversation": conversation, "turn_id": turn_id, "answer": answer, "api_params": payload}
+        return {
+            "status": "ok",
+            "task": task,
+            "conversation": conversation,
+            "turn_id": turn_id,
+            "answer": answer,
+            "api_params": payload,
+            "research_trace": trace,
+        }
 
-    async def extract_schedule_task_api_params(self, user_id: str, message: str) -> ScheduledTaskApiParams:
+    async def extract_schedule_task_api_params(
+        self,
+        user_id: str,
+        message: str,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> ScheduledTaskApiParams:
         fallback = _schedule_api_params_from_fallback(user_id, message)
+        if self.cc_runtime and getattr(self.cc_runtime, "configured", False):
+            started = {
+                "stage": "定时任务 Skill",
+                "status": "running",
+                "message": "正在解析周期、主题、抓取范围和报告样式。",
+            }
+            if on_trace:
+                await on_trace(started)
+            try:
+                categories = ", ".join(f"{key}={label}" for key, label in CATEGORIES.items())
+                result = await self.cc_runtime.run(
+                    message=(
+                        f"用户ID：{user_id}\n当前日期：{datetime.now(LOCAL_TZ).date().isoformat()}\n"
+                        f"可用板块：{categories}\n原始任务描述：{message}\n"
+                        "请输出可直接传给定时任务 API 的 JSON 参数。"
+                    ),
+                    query="定时资讯任务参数解析",
+                    topic=None,
+                    category_scope=[],
+                    time_range=None,
+                    history="",
+                    allow_web_search=False,
+                    allow_local_search=False,
+                    skill_names=[SCHEDULED_NEWS_TASK_SKILL_NAME],
+                    strict_json_output=True,
+                    max_turns=6,
+                    on_trace=on_trace,
+                )
+                raw = _decode_json_object(result.answer)
+                parsed = ScheduledTaskApiParams.model_validate(_coerce_schedule_task_raw(raw))
+                normalized = _normalize_task_api_params(parsed, fallback)
+                if on_trace:
+                    await on_trace(
+                        {
+                            "stage": "定时任务 Skill",
+                            "status": "completed",
+                            "message": f"已解析为 cron：{normalized.schedule}",
+                        }
+                    )
+                return normalized
+            except Exception as exc:
+                self.store.log("scheduled_task_cc_parse", "error", user_id, {"error": str(exc), "message": message})
+                if on_trace:
+                    await on_trace(
+                        {
+                            "stage": "定时任务 Skill",
+                            "status": "fallback",
+                            "message": "Agent 解析失败，已使用本地安全解析规则。",
+                        }
+                    )
         if not self.llm_client.configured:
             return fallback
         try:
@@ -550,6 +631,20 @@ def _coerce_schedule_task_raw(raw: dict[str, Any]) -> dict[str, Any]:
     workflow["report_style"] = report_style
     data["parsed_workflow"] = workflow
     return data
+
+
+def _decode_json_object(raw: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(raw or ""):
+        if char != "{":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(raw[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError("scheduled-task agent did not return a JSON object")
 
 
 def _coerce_list(value: Any) -> list[Any]:

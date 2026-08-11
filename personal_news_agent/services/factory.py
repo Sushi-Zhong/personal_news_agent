@@ -55,8 +55,20 @@ def build_services(settings: Settings) -> dict[str, Any]:
         cc_runtime=cc_runtime,
     )
     topic_summary = TopicSummaryService(store, search_service)
-    trending_topics = TrendingTopicService(store, llm=llm_client, cc_runtime=cc_runtime)
-    tasks = ScheduledTaskService(store, reports, search_service=search_service, native_ingestion=native_ingestion)
+    trending_topics = TrendingTopicService(
+        store,
+        llm=llm_client,
+        cc_runtime=cc_runtime,
+        cache_minutes=max(1, (settings.trending_topic_refresh_seconds + 59) // 60),
+    )
+    tasks = ScheduledTaskService(
+        store,
+        reports,
+        search_service=search_service,
+        native_ingestion=native_ingestion,
+        llm_client=llm_client,
+        cc_runtime=cc_runtime,
+    )
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
     content_moderation = TextModerationPlusService()
     topic_extraction = TopicExtractionService(store)

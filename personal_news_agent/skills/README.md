@@ -1,12 +1,13 @@
 # Personal News Agent Skills
 
-当前注册五个斜杠命令：
+当前注册六个斜杠命令：
 
 ```text
 /report <主题> [--category tech,economy] [--time-range 30d]
 /brief [主题] [--category tech,sports]
 /factcheck <待核查说法> [--category tech,economy]
 /map <热点事件> [--category tech,economy]
+/related <人物、队伍、机构、产品或事件> [--category game,sports]
 /sources [category]
 ```
 

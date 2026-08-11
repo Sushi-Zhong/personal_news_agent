@@ -22,7 +22,11 @@ from personal_news_agent.services.chat_understanding import (
     time_range_from_message,
 )
 from personal_news_agent.services.llm import LLMClient
-from personal_news_agent.services.cc_runtime import NEWS_CONVERSATION_RESEARCH_SKILL_NAME
+from personal_news_agent.services.article_fetch import canonicalize_url
+from personal_news_agent.services.cc_runtime import (
+    NEWS_CONVERSATION_RESEARCH_SKILL_NAME,
+    NEWS_RELATED_EXPLORATION_SKILL_NAME,
+)
 from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL, SHARED_RUNTIME_MODEL, get_model_option
 from personal_news_agent.services.search import (
     UnifiedSearchService,
@@ -33,7 +37,7 @@ from personal_news_agent.services.store import NewsStore
 
 
 RELATED_QUERY_MIN = 3
-RELATED_QUERY_MAX = 8
+RELATED_QUERY_MAX = 5
 TOPIC_DRIFT_NOTICE = "提示：这条追问和当前关注主题关联较弱，我会照常回答，但不会因此更改当前主题或新增关注卡片。"
 MULTI_FOCUS_DRIFT_NOTICE = "提示：这条消息里包含多个彼此关联较弱的热点，我会照常分别回答，但不会把它们合并成同一个主题或新增关注卡片。"
 TOPIC_TEMPLATE_PHRASES = (
@@ -162,14 +166,14 @@ class NewsChatService:
         if moderation_response:
             self._save_response_turn(moderation_response, message, user_id, save_topic, category_scope)
             return moderation_response
-        schedule_response = await self._schedule_command_response(conv_id, user_id, message)
-        if schedule_response:
-            self._save_response_turn(schedule_response, message, user_id, save_topic, category_scope)
-            return schedule_response
         skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope, allow_web_search)
         if skill_response:
             self._save_response_turn(skill_response, message, user_id, save_topic, category_scope)
             return skill_response
+        schedule_response = await self._schedule_command_response(conv_id, user_id, message)
+        if schedule_response:
+            self._save_response_turn(schedule_response, message, user_id, save_topic, category_scope)
+            return schedule_response
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         ordinal = extract_ordinal(message) if not topic_response else None
         if topic_response:
@@ -177,15 +181,25 @@ class NewsChatService:
         elif ordinal:
             response = await self._article_followup(conv_id, message, ordinal)
         elif use_llm:
-            response = await self._research_chat(
-                conv_id,
-                message,
-                topic,
-                category_scope,
-                user_id=user_id,
-                allow_web_search=allow_web_search,
-                model_key=model_key,
-            )
+            if _is_general_conversation(message, topic):
+                response = await self._general_chat(
+                    conv_id,
+                    message,
+                    user_id=user_id,
+                    allow_web_search=allow_web_search,
+                    model_key=model_key,
+                )
+                save_topic = None
+            else:
+                response = await self._research_chat(
+                    conv_id,
+                    message,
+                    topic,
+                    category_scope,
+                    user_id=user_id,
+                    allow_web_search=allow_web_search,
+                    model_key=model_key,
+                )
         else:
             response = await self._news_search(
                 conv_id,
@@ -209,33 +223,172 @@ class NewsChatService:
         user_id: str = "default",
         max_queries: int = RELATED_QUERY_MAX,
         allow_web_search: bool = False,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        save_turn: bool = True,
     ) -> ChatResponse:
         conv_id = conversation_id or f"conv_{uuid4().hex[:12]}"
         message = f"/related {query}".strip()
         topic, category_scope = self._resolve_conversation_context(conv_id, query, topic, category_scope, user_id)
-        base_query = _related_base_query(query_from_message(query, topic), query)
-        categories = categories_for_message(query, topic, category_scope)
+        requested_focus = _related_base_query(query_from_message(query, topic), query)
+        base_query = _related_context_query(topic, requested_focus)
+        categories = categories_for_message(base_query, topic, category_scope)
         query_limit = _related_query_limit(max_queries)
-        trace: list[dict[str, Any]] = [
+        trace: list[dict[str, Any]] = []
+        await _add_trace(
+            trace,
+            {
+                "stage": "关联消歧",
+                "status": "running",
+                "message": f"正在结合当前主题【{topic or '未设定'}】理解【{requested_focus}】。",
+            },
+            on_trace,
+        )
+        memory = [
+            turn
+            for turn in self._conversation_memory(conv_id, user_id, current_limit=6, recent_limit=0)
+            if not str(turn.get("user_message") or "").strip().lower().startswith("/related")
+        ]
+        history = _conversation_history_text(memory, turn_limit=4, question_limit=260, answer_limit=1_400)
+
+        if self.cc_runtime and getattr(self.cc_runtime, "configured", False):
+            try:
+                runtime_settings = getattr(self.cc_runtime, "settings", None)
+                await _add_trace(
+                    trace,
+                    {
+                        "stage": "关联消歧",
+                        "status": "completed",
+                        "message": f"已将检索焦点解析为【{base_query}】，保留当前主题不变。",
+                    },
+                    on_trace,
+                )
+                runtime_result = await self.cc_runtime.run(
+                    message=(
+                        "用户正在执行相关新闻延展。"
+                        f"当前对话主题是【{topic or base_query}】，用户指定焦点是【{requested_focus}】。"
+                        "请先结合近期对话消歧这个焦点，再说明它与当前主题的具体关系、近况和后续观察点。"
+                    ),
+                    query=base_query,
+                    topic=topic or base_query,
+                    category_scope=categories,
+                    time_range=None,
+                    history=history,
+                    allow_web_search=allow_web_search,
+                    logical_model_key=DEFAULT_LOGICAL_MODEL,
+                    skill_names=[NEWS_RELATED_EXPLORATION_SKILL_NAME],
+                    timeout_seconds=max(
+                        180.0,
+                        float(getattr(runtime_settings, "cc_runtime_timeout_seconds", 150.0)),
+                    ),
+                    max_turns=max(10, int(getattr(runtime_settings, "cc_runtime_max_turns", 6))),
+                    builtin_web_search_limit=3,
+                    on_trace=on_trace,
+                )
+                runtime_candidates = _enrich_from_store(
+                        self.store,
+                        [
+                            *runtime_result.results,
+                            *_runtime_declared_link_results(
+                                runtime_result.answer,
+                                categories[0] if categories else "all",
+                            ),
+                        ],
+                    )
+                runtime_results = _rank_for_chat(
+                    _filter_related_runtime_results(runtime_candidates, topic, requested_focus),
+                    base_query,
+                )[:12]
+                evidence = _evidence_payload(self.store, runtime_results)
+                related_queries = _runtime_related_queries(base_query, runtime_result.queries, query_limit)
+                grouped = _related_groups_from_runtime(related_queries, runtime_results)
+                runtime_trace = [*trace, *runtime_result.trace]
+                builtin_web_calls = int(runtime_result.provider_metadata.get("builtin_web_calls") or 0)
+                total_tool_calls = len(runtime_result.queries) + builtin_web_calls
+                runtime_trace.append(
+                    {
+                        "stage": "Agent 主控",
+                        "status": "completed",
+                        "message": f"完成 {total_tool_calls} 次只读检索，确认焦点与当前主题的关系。",
+                        "count": total_tool_calls,
+                    }
+                )
+                response = ChatResponse(
+                    conversation_id=conv_id,
+                    answer=runtime_result.answer,
+                    markdown=runtime_result.answer,
+                    context_relation="related_search_cc_runtime",
+                    topic=topic or base_query,
+                    category_scope=categories or [],
+                    focus_object=FocusObject(type="topic", text=base_query),
+                    required_context_items=[
+                        "current_topic",
+                        "requested_focus",
+                        "conversation_history",
+                        "local_news_search",
+                        "web_search",
+                        "retrieved_evidence",
+                    ],
+                    recommendations=runtime_results[:8],
+                    research_trace=runtime_trace,
+                    evidence=evidence,
+                    expanded_queries=related_queries,
+                    mind_map=_related_mind_map_payload(
+                        base_query,
+                        grouped,
+                        evidence,
+                        "cc_runtime",
+                        active_topic=topic or base_query,
+                        requested_focus=requested_focus,
+                        conclusion=_related_conclusion(runtime_result.answer),
+                        runtime_queries=runtime_result.queries,
+                        builtin_web_calls=builtin_web_calls,
+                    ),
+                )
+                if save_turn:
+                    self._save_response_turn(response, message, user_id, topic or base_query, category_scope)
+                return response
+            except Exception as exc:
+                failure_message = _related_runtime_failure_message(exc)
+                self.store.log(
+                    "cc_runtime_related",
+                    "error",
+                    base_query,
+                    {"error_type": type(exc).__name__, "error": str(exc)[:500]},
+                )
+                await _add_trace(
+                    trace,
+                    {
+                        "stage": "Agent 主控",
+                        "status": "fallback",
+                        "message": failure_message,
+                    },
+                    on_trace,
+                )
+
+        await _add_trace(
+            trace,
             {
                 "stage": "相关规划",
                 "status": "running",
-                "message": "正在使用本地 agent 生成相关检索词。",
-            }
-        ]
+                "message": "正在生成带当前主题约束的相关检索词。",
+            },
+            on_trace,
+        )
         related_queries, planner_source = await self._plan_related_queries(
             base_query,
             categories,
             user_id=user_id,
             max_queries=query_limit,
         )
-        trace.append(
+        await _add_trace(
+            trace,
             {
                 "stage": "相关规划",
                 "status": "completed" if planner_source == "local_agent" else "fallback",
                 "message": f"生成 {len(related_queries)} 个相关检索词。",
                 "count": len(related_queries),
-            }
+            },
+            on_trace,
         )
 
         grouped: list[dict[str, Any]] = []
@@ -252,7 +405,14 @@ class NewsChatService:
                 max_results=6,
                 include_remote=allow_web_search,
             )
-            ranked = _rank_for_chat(_enrich_from_store(self.store, results), related_query)[:5]
+            ranked = _rank_for_chat(
+                _filter_related_runtime_results(
+                    _enrich_from_store(self.store, results),
+                    topic,
+                    requested_focus,
+                ),
+                related_query,
+            )[:5]
             grouped.append(
                 {
                     "query": related_query,
@@ -266,13 +426,15 @@ class NewsChatService:
             merged_results.extend(ranked)
         merged_results = _merge_results(merged_results)[:12]
         evidence = _evidence_payload(self.store, merged_results)
-        trace.append(
+        await _add_trace(
+            trace,
             {
                 "stage": "自动搜索",
                 "status": "completed",
                 "message": f"已完成 {len(grouped)} 组相关搜索，合并 {len(evidence)} 条证据。",
                 "count": len(evidence),
-            }
+            },
+            on_trace,
         )
 
         expanded_queries = [
@@ -285,16 +447,22 @@ class NewsChatService:
             for item in related_queries
             if item.get("query")
         ]
-        mind_map = _related_mind_map_payload(base_query, grouped, evidence, planner_source)
         answer = _related_search_answer(base_query, grouped, evidence, planner_source)
-        drift_warning = _topic_drift_warning(topic, base_query, query)
-        answer = _prepend_notice(answer, drift_warning)
+        mind_map = _related_mind_map_payload(
+            base_query,
+            grouped,
+            evidence,
+            planner_source,
+            active_topic=topic or base_query,
+            requested_focus=requested_focus,
+            conclusion=_related_conclusion(answer),
+        )
         response = ChatResponse(
             conversation_id=conv_id,
             answer=answer,
             markdown=answer,
             context_relation="related_search",
-            topic=base_query,
+            topic=topic or base_query,
             category_scope=categories or [],
             focus_object=FocusObject(type="topic", text=base_query),
             required_context_items=["local_agent_related_queries", "retrieved_evidence"],
@@ -304,7 +472,8 @@ class NewsChatService:
             expanded_queries=expanded_queries,
             mind_map=mind_map,
         )
-        self._save_response_turn(response, message, user_id, topic, category_scope)
+        if save_turn:
+            self._save_response_turn(response, message, user_id, topic or base_query, category_scope)
         return response
 
     async def chat_events(
@@ -326,12 +495,6 @@ class NewsChatService:
         if moderation_response:
             self._save_response_turn(moderation_response, message, user_id, save_topic, category_scope)
             yield {"type": "final", "response": moderation_response.model_dump(mode="json")}
-            return
-        schedule_response = await self._schedule_command_response(conv_id, user_id, message)
-        if schedule_response:
-            self._save_response_turn(schedule_response, message, user_id, save_topic, category_scope)
-            yield {"type": "trace", "item": {"stage": "定时任务", "status": "completed", "message": schedule_response.context_relation}}
-            yield {"type": "final", "response": schedule_response.model_dump(mode="json")}
             return
         if message.strip().startswith("/") and self.skill_registry:
             skill_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -369,6 +532,12 @@ class NewsChatService:
                 if not skill_task.done():
                     skill_task.cancel()
             return
+        schedule_response = await self._schedule_command_response(conv_id, user_id, message)
+        if schedule_response:
+            self._save_response_turn(schedule_response, message, user_id, save_topic, category_scope)
+            yield {"type": "trace", "item": {"stage": "定时任务", "status": "completed", "message": schedule_response.context_relation}}
+            yield {"type": "final", "response": schedule_response.model_dump(mode="json")}
+            return
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         if topic_response:
             for item in topic_response.research_trace:
@@ -403,17 +572,34 @@ class NewsChatService:
 
         async def run_pipeline() -> None:
             try:
-                response = await self._research_chat(
-                    conv_id,
+                general_conversation = _is_general_conversation(message, topic)
+                if general_conversation:
+                    response = await self._general_chat(
+                        conv_id,
+                        message,
+                        emit_trace,
+                        user_id,
+                        allow_web_search,
+                        model_key,
+                    )
+                else:
+                    response = await self._research_chat(
+                        conv_id,
+                        message,
+                        topic,
+                        category_scope,
+                        emit_trace,
+                        user_id,
+                        allow_web_search,
+                        model_key,
+                    )
+                self._save_response_turn(
+                    response,
                     message,
-                    topic,
-                    category_scope,
-                    emit_trace,
                     user_id,
-                    allow_web_search,
-                    model_key,
+                    None if general_conversation else save_topic,
+                    category_scope,
                 )
-                self._save_response_turn(response, message, user_id, save_topic, category_scope)
                 await queue.put({"type": "final", "response": response.model_dump(mode="json")})
             except Exception as exc:
                 await queue.put({"type": "error", "message": str(exc)})
@@ -443,6 +629,15 @@ class NewsChatService:
         if not text.startswith("/") or not self.skill_registry:
             return None
         topic, category_scope = self._skill_context_from_turns(conversation_id, text, user_id, topic, category_scope)
+        command = text.split(maxsplit=1)[0].lower()
+        if on_trace:
+            await on_trace(
+                {
+                    "stage": "场景 Skill",
+                    "status": "running",
+                    "message": f"正在执行 {command} 场景工作流。",
+                }
+            )
         try:
             result = await self.skill_registry.execute(
                 text,
@@ -467,28 +662,151 @@ class NewsChatService:
                 required_context_items=["skill_registry"],
             )
         payload = result.data or {}
+        skill_trace = {
+            "stage": "场景 Skill",
+            "status": "completed",
+            "message": f"{result.title}工作流已完成。",
+        }
+        if on_trace:
+            await on_trace(skill_trace)
+        payload["research_trace"] = [skill_trace, *(payload.get("research_trace") or [])]
         answer = _skill_answer(result.title, result.message, payload)
         response_topic = _skill_context_topic(result.command, payload)
-        focus_type = "topic" if response_topic else "skill"
-        focus_text = response_topic or result.title
+        focus_payload = payload.get("focus_object")
+        if isinstance(focus_payload, dict):
+            focus_object = FocusObject.model_validate(focus_payload)
+        else:
+            focus_type = "topic" if response_topic else "skill"
+            focus_object = FocusObject(type=focus_type, text=response_topic or result.title)
+        recommendations = [
+            SearchResult.model_validate(item)
+            for item in (payload.get("recommendations") or [])
+            if isinstance(item, dict)
+        ]
         return ChatResponse(
             conversation_id=conversation_id,
             answer=answer,
             markdown=answer,
-            context_relation=f"skill:{result.command}",
+            context_relation=payload.get("context_relation") or f"skill:{result.command}",
             topic=response_topic,
             category_scope=payload.get("category_scope") or [],
-            focus_object=FocusObject(type=focus_type, text=focus_text),
-            required_context_items=["skill_registry"],
+            focus_object=focus_object,
+            required_context_items=payload.get("required_context_items") or ["skill_registry"],
+            recommendations=recommendations,
             research_trace=payload.get("research_trace") or [],
             evidence=payload.get("evidence") or [],
             expanded_queries=payload.get("expanded_queries") or [],
+            event_line=payload.get("event_line"),
+            mind_map=payload.get("mind_map"),
             skill_result={
                 "command": result.command,
                 "title": result.title,
                 "message": result.message,
                 "data": payload,
             },
+        )
+
+    async def _general_chat(
+        self,
+        conversation_id: str,
+        message: str,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        user_id: str = "default",
+        allow_web_search: bool = False,
+        model_key: str = DEFAULT_LOGICAL_MODEL,
+    ) -> ChatResponse:
+        trace: list[dict[str, Any]] = []
+        selected_model = get_model_option(model_key, getattr(self.llm_client, "settings", None))
+        general_kind = _general_question_kind(message)
+        kind_labels = {
+            "weather": "天气查询",
+            "route": "路线查询",
+            "knowledge": "通用知识",
+            "conversation": "通用对话",
+        }
+        await _add_trace(
+            trace,
+            {
+                "stage": "理解问题",
+                "status": "completed",
+                "message": f"识别为{kind_labels.get(general_kind, '通用对话')}，不加载业务 Skill，由 Agent 结合外部搜索直接回答。",
+            },
+            on_trace,
+        )
+        if self.cc_runtime and getattr(self.cc_runtime, "configured", False):
+            await _add_trace(
+                trace,
+                {"stage": "Agent 主控", "status": "running", "message": "正在结合对话上下文组织回答。"},
+                on_trace,
+            )
+            history = ""
+            if not _is_social_smalltalk(message):
+                history = _conversation_history_text(
+                    self._conversation_memory(conversation_id, user_id, current_limit=4, recent_limit=0),
+                    turn_limit=4,
+                    question_limit=400,
+                    answer_limit=1_000,
+                )
+            try:
+                result = await self.cc_runtime.run(
+                    message=_general_runtime_message(message, general_kind),
+                    query=message,
+                    topic=None,
+                    category_scope=[],
+                    time_range=None,
+                    history=history,
+                    allow_web_search=allow_web_search,
+                    logical_model_key=selected_model.key,
+                    logical_model_name=selected_model.name,
+                    skill_names=[],
+                    allow_local_search=False,
+                    max_turns=6,
+                    builtin_web_search_limit=2,
+                    on_trace=on_trace,
+                )
+                declared = _runtime_declared_link_results(result.answer, "all")
+                answer = _guard_live_general_answer(
+                    result.answer,
+                    message,
+                    general_kind,
+                    allow_web_search=allow_web_search,
+                    declared_sources=declared,
+                )
+                trace.extend(result.trace)
+                final_trace = {
+                    "stage": "生成回答",
+                    "status": "completed",
+                    "message": "Agent 已完成通用对话回答。",
+                }
+                await _add_trace(trace, final_trace, on_trace)
+                return ChatResponse(
+                    conversation_id=conversation_id,
+                    answer=answer,
+                    markdown=answer,
+                    context_relation="general_conversation_cc_runtime",
+                    focus_object=FocusObject(type="conversation", text="通用对话"),
+                    required_context_items=["cc_runtime", "conversation_history", "web_search"],
+                    recommendations=declared[:8],
+                    research_trace=[trace[0], *result.trace, final_trace],
+                    evidence=_evidence_payload(self.store, declared),
+                    expanded_queries=result.queries[:8],
+                )
+            except Exception as exc:
+                self.store.log("cc_runtime_general", "error", message[:120], {"error_type": type(exc).__name__})
+        answer = "你好，我是你的个人资讯 Agent。你可以直接聊天，也可以让我检索新闻、核查事实、生成事件图谱或定时报告。"
+        await _add_trace(
+            trace,
+            {"stage": "Agent 主控", "status": "fallback", "message": "Agent 主控暂不可用，返回基础说明。"},
+            on_trace,
+        )
+        return ChatResponse(
+            conversation_id=conversation_id,
+            answer=answer,
+            markdown=answer,
+            context_relation="general_conversation_fallback",
+            focus_object=FocusObject(type="conversation", text="通用对话"),
+            required_context_items=["cc_runtime"],
+            research_trace=trace,
         )
 
     def _skill_context_from_turns(
@@ -816,7 +1134,6 @@ class NewsChatService:
         response_topic = topic or query
         focus_text = query if explicit_query else response_topic
         categories = categories_for_message(search_message, topic, category_scope)
-        selected_model = get_model_option(model_key, getattr(self.llm_client, "settings", None))
         rule_drift_warning = _topic_drift_warning(topic, query, search_message)
         drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, search_message, rule_drift_warning))
         results = await self.search_service.search(
@@ -875,6 +1192,8 @@ class NewsChatService:
         rule_drift_warning = _topic_drift_warning(topic, query, search_message)
         drift_warning_task = asyncio.create_task(self._llm_topic_drift_warning(topic, query, search_message, rule_drift_warning))
         time_range = time_range_from_message(search_message)
+        search_plan = await self._plan_search_query(search_message, topic, query, time_range, allow_web_search)
+        search_query = search_plan.query
         runtime_fallback_trace: list[dict[str, Any]] = []
         if self.cc_runtime and getattr(self.cc_runtime, "configured", False):
             try:
@@ -904,7 +1223,7 @@ class NewsChatService:
                 )
                 runtime_result = await self.cc_runtime.run(
                     message=message,
-                    query=query,
+                    query=search_query,
                     topic=topic,
                     category_scope=categories,
                     time_range=time_range,
@@ -913,6 +1232,8 @@ class NewsChatService:
                     logical_model_key=selected_model.key,
                     logical_model_name=selected_model.name,
                     skill_names=[NEWS_CONVERSATION_RESEARCH_SKILL_NAME],
+                    max_turns=10,
+                    builtin_web_search_limit=4,
                     on_trace=on_trace,
                 )
                 runtime_declared_results = _runtime_declared_link_results(
@@ -921,17 +1242,19 @@ class NewsChatService:
                 )
                 trace.extend(runtime_result.trace)
                 runtime_results = _rank_for_chat(
-                    _filter_by_time(
-                        _enrich_from_store(
-                            self.store,
-                            [*runtime_result.results, *runtime_declared_results],
+                    _filter_research_results(
+                        _filter_by_time(
+                            _enrich_from_store(
+                                self.store,
+                                [*runtime_result.results, *runtime_declared_results],
+                            ),
+                            time_range,
                         ),
-                        time_range,
+                        search_plan,
                     ),
                     message,
                 )[:12]
-                runtime_used_web = int(runtime_result.provider_metadata.get("builtin_web_calls") or 0) > 0
-                if runtime_results or runtime_used_web:
+                if runtime_results:
                     evidence = _evidence_payload(self.store, runtime_results)
                     event_line = await self._event_line(query, categories, runtime_results)
                     drift_warning = await drift_warning_task
@@ -1005,8 +1328,6 @@ class NewsChatService:
                         "message": "Agent 主控暂不可用，已切换到兼容研究流程。",
                     }
                 )
-        search_plan = await self._plan_search_query(search_message, topic, query, time_range, allow_web_search)
-        search_query = search_plan.query
         await _add_trace(
             trace,
             {
@@ -1075,7 +1396,7 @@ class NewsChatService:
                     },
                     on_trace,
                 )
-            except Exception as exc:
+            except Exception:
                 await _add_trace(trace, {"stage": "新闻源更新", "status": "error", "message": "新闻源更新暂时失败，继续使用已有证据。"}, on_trace)
         elif self.native_ingestion:
             await _add_trace(
@@ -1121,7 +1442,7 @@ class NewsChatService:
                     },
                     on_trace,
                 )
-            except Exception as exc:
+            except Exception:
                 await _add_trace(trace, {"stage": "外部搜索工具", "status": "error", "message": "外部搜索暂时失败，继续使用已有证据。"}, on_trace)
 
         expanded_queries: list[dict[str, Any]] = []
@@ -1164,7 +1485,8 @@ class NewsChatService:
             await _add_trace(trace, {"stage": "扩展搜索", "status": "skipped", "message": "当前服务未注入 deep dive 模块。"}, on_trace)
 
         merged_results = _merge_results([*external_results, *refreshed_results, *local_results, *expansion_results])
-        merged_results = _rank_for_chat(_filter_by_time(merged_results, time_range), message)[:12]
+        merged_results = _filter_research_results(_filter_by_time(merged_results, time_range), search_plan)
+        merged_results = _rank_for_chat(merged_results, message)[:12]
         evidence = _evidence_payload(self.store, merged_results)
         await _add_trace(trace, {"stage": "证据合并", "status": "completed", "message": f"去重后保留 {len(evidence)} 条可引用证据。", "count": len(evidence)}, on_trace)
 
@@ -1219,6 +1541,12 @@ class NewsChatService:
             return rule_notice
         if not self.llm_client.configured or not query:
             return rule_notice
+        if topic and _looks_like_general_topic_extension(message):
+            # Questions about broader effects, relationships, public response,
+            # or the same class of issue are valid extensions of the active
+            # topic. Do not let a remote classifier add a drift warning after
+            # the deterministic contextual rule has already accepted them.
+            return None
         focuses = _explicit_focuses_from_message(message)
         if topic and not focuses and _topic_drift_terms(topic).intersection(_topic_drift_terms(query)):
             # Deterministic subject anchors are enough for ordinary follow-ups;
@@ -1312,9 +1640,10 @@ class NewsChatService:
             "只返回一个严格 JSON 对象，字段为："
             '{"query":"适合搜索引擎的简洁检索式",'
             '"primary_subject":"最具体的核心对象或关系",'
-            '"required_terms":["结果至少应出现其一的1到4个短主题词"],'
+            '"required_terms":["每个词都能独立识别核心事件的1到4个短主题词"],'
             '"keywords":["用于扩大召回的2到6个必要概念"]}。'
-            "required_terms 必须描述目标对象本身，不能只描述背景事件。"
+            "required_terms 必须描述目标对象或事件本身，不能只给地名、人名、行业名、时间词或宽泛背景；"
+            "例如查询北京天津防汛，应使用防汛、暴雨、应急响应，而不能只使用北京、天津。"
         )
         user_payload = {
             "message": message,
@@ -1499,7 +1828,11 @@ def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
                 if not isinstance(item, dict):
                     continue
                 lines.append(_factcheck_evidence_line(item))
-        for label, key in (("缺失证据", "missing_evidence"), ("来源说明", "source_notes")):
+        for label, key in (
+            ("缺失证据", "missing_evidence"),
+            ("下一步核查", "next_checks"),
+            ("来源说明", "source_notes"),
+        ):
             values = payload.get(key) or []
             if values:
                 lines.extend(["", f"### {label}"])
@@ -1539,7 +1872,7 @@ def _skill_answer(title: str, message: str, payload: dict[str, Any]) -> str:
 def _skill_context_topic(command: str, payload: dict[str, Any]) -> str | None:
     if command == "/factcheck":
         return payload.get("claim") or None
-    if command in {"/report", "/brief", "/map"}:
+    if command in {"/report", "/brief", "/map", "/related"}:
         return payload.get("topic") or None
     return None
 
@@ -1564,6 +1897,172 @@ def _is_default_brief_topic(topic: str | None) -> bool:
 
 def _is_topic_placeholder(topic: str | None) -> bool:
     return str(topic or "").strip() in {"", "新对话", "当前关注", "今日资讯"}
+
+
+def _is_general_conversation(message: str, topic: str | None = None) -> bool:
+    text = " ".join(str(message or "").strip().split())
+    lowered = text.lower().strip("。！!?？ ")
+    if not lowered or lowered.startswith("/"):
+        return False
+    if _is_social_smalltalk(text):
+        return True
+    if _general_question_kind(text) in {"weather", "route"}:
+        return True
+    news_signals = (
+        "新闻",
+        "报道",
+        "热点",
+        "最新",
+        "最近",
+        "今天",
+        "昨日",
+        "刚刚",
+        "进展",
+        "回应",
+        "发布",
+        "宣布",
+        "事件",
+        "事故",
+        "政策",
+        "局势",
+        "行情",
+        "事实核查",
+        "是真是假",
+        "消息属实",
+        "时间线",
+    )
+    if any(signal in lowered for signal in news_signals):
+        return False
+    if topic and is_contextual_followup(text):
+        return False
+    general_signals = (
+        "什么是",
+        "是什么意思",
+        "怎么理解",
+        "解释一下",
+        "区别是什么",
+        "有什么区别",
+        "为什么",
+        "如何",
+        "怎么做",
+        "帮我写",
+        "翻译",
+        "计算",
+        "代码",
+        "编程",
+        "讲个笑话",
+        "聊聊天",
+        "陪我聊",
+    )
+    return any(signal in lowered for signal in general_signals)
+
+
+def _general_question_kind(message: str) -> str:
+    text = " ".join(str(message or "").strip().split()).lower()
+    weather_signals = (
+        "天气",
+        "气温",
+        "温度",
+        "降雨",
+        "会下雨",
+        "带伞",
+        "穿什么",
+        "风力",
+        "空气质量",
+        "紫外线",
+    )
+    if any(signal in text for signal in weather_signals):
+        return "weather"
+    route_signals = (
+        "怎么走",
+        "路线",
+        "导航",
+        "怎么去",
+        "如何到",
+        "到达",
+        "乘车",
+        "坐地铁",
+        "坐公交",
+        "步行",
+        "自驾",
+        "打车",
+    )
+    from_to_pattern = re.search(r"从.{1,80}(?:到|去).{1,80}", text)
+    if any(signal in text for signal in route_signals) or from_to_pattern:
+        return "route"
+    knowledge_signals = (
+        "什么是",
+        "是什么意思",
+        "怎么理解",
+        "解释一下",
+        "区别是什么",
+        "有什么区别",
+        "为什么",
+        "如何",
+        "原理",
+        "历史上",
+    )
+    if any(signal in text for signal in knowledge_signals):
+        return "knowledge"
+    return "conversation"
+
+
+def _general_runtime_message(message: str, kind: str) -> str:
+    guidance = {
+        "weather": (
+            "这是天气查询。请先确认地点和预报对应的日期，调用 WebSearch 核对最新预报；"
+            "说明信息更新时间、温度或降雨区间及出行建议，并给出可点击来源链接。"
+            "若没有获得带日期的可靠来源，不得用历史气候推测今天的气温、降雨或空气质量。"
+        ),
+        "route": (
+            "这是路线查询。请调用 WebSearch 核对地点、交通方式和近期运营信息；"
+            "给出一条首选路线和必要备选；任何班次、票价、限行、耗时等可变信息都要附可点击来源链接。"
+            "没有来源时只给路线框架，不得编造具体数字或当前管制规则，并提醒实时路况和导航结果可能变化。"
+            "若起终点存在关键歧义，只问一个最必要的澄清问题。"
+        ),
+        "knowledge": (
+            "这是通用知识问题。请用自然对话方式直接回答，并调用 WebSearch 核对可能变化的事实；"
+            "概念解释应先给结论，再给必要背景和可靠来源。"
+        ),
+        "conversation": "这是通用对话。请自然、直接地回应；若涉及可变事实，先用 WebSearch 核对。",
+    }
+    return f"{message}\n\n回答要求：{guidance.get(kind, guidance['conversation'])}"
+
+
+def _guard_live_general_answer(
+    answer: str,
+    original_message: str,
+    kind: str,
+    *,
+    allow_web_search: bool,
+    declared_sources: list[SearchResult],
+) -> str:
+    if kind not in {"weather", "route"} or not allow_web_search or declared_sources:
+        return answer
+    if kind == "weather":
+        return (
+            "## 暂未取得可核验的实时天气来源\n\n"
+            "本轮外部搜索没有返回带日期、可点击的天气来源，因此我不使用历史气候数据猜测今天的温度或降雨。\n\n"
+            f"你的问题是：{original_message}\n\n"
+            "建议先查看当地气象部门、中国天气网或手机系统天气中的逐小时预报；"
+            "拿到预报后，我可以继续帮你判断是否带伞、如何穿衣和安排出行。"
+        )
+    return (
+        "> 本轮外部搜索没有返回可点击的交通来源；下面只能作为路线思路，"
+        "不能视为实时班次、票价、限行或路况。出发前请以 12306 和地图导航为准。\n\n"
+        f"{answer}"
+    )
+
+
+def _is_social_smalltalk(message: str) -> bool:
+    lowered = " ".join(str(message or "").strip().split()).lower().strip("。！!?？ ")
+    casual_patterns = (
+        r"^(你好|您好|嗨|哈喽|hello|hi|hey)(呀|啊|呢)?([，,、 ]*(你是谁|你叫什么|怎么称呼你|你能做什么))?$",
+        r"^(早上好|上午好|下午好|晚上好|晚安)$",
+        r"^(谢谢|多谢|感谢|辛苦了|再见|拜拜)(你)?$",
+        r"^(你是谁|你叫什么|怎么称呼你|你能做什么|介绍一下你自己)$",
+    )
+    return any(re.fullmatch(pattern, lowered, flags=re.IGNORECASE) for pattern in casual_patterns)
 
 
 def _response_can_seed_topic(response: ChatResponse) -> bool:
@@ -1866,6 +2365,153 @@ def _related_base_query(planned_query: str, raw_query: str) -> str:
         if matches:
             return _clean_related_topic(matches[-1])
     return _clean_related_topic(planned_query)
+
+
+def _related_context_query(topic: str | None, requested_focus: str) -> str:
+    active_topic = _clean_related_topic(topic or "") if topic else ""
+    focus = _clean_related_topic(requested_focus)
+    if focus in {"当前关注", "当前主题"}:
+        focus = ""
+    if not active_topic:
+        return focus or "当前主题"
+    if not focus:
+        return active_topic
+    compact_topic = _compact_topic_text(active_topic)
+    compact_focus = _compact_topic_text(focus)
+    if compact_focus and compact_focus in compact_topic:
+        return active_topic
+    return f"{active_topic} 中的 {focus}"[:180]
+
+
+def _related_runtime_failure_message(exc: Exception) -> str:
+    detail = str(exc or "").casefold()
+    if "maximum number of turns" in detail:
+        return "外部研究轮次达到本轮上限，已切换到带当前话题约束的兼容检索。"
+    if "timed out" in detail or "timeout" in detail:
+        return "外部研究未能在本轮时限内完成，已切换到带当前话题约束的兼容检索。"
+    return "Agent 研究链路本轮未完成，已切换到带当前话题约束的兼容检索。"
+
+
+def _runtime_related_queries(
+    base_query: str,
+    runtime_queries: list[dict[str, Any]],
+    max_queries: int,
+) -> list[dict[str, Any]]:
+    queries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in runtime_queries:
+        query = _clean_plan_text(item.get("query"), 120)
+        key = query.casefold()
+        if not query or key in seen:
+            continue
+        relation_type = _infer_related_relation_type(query, "")
+        origin = item.get("origin") or "local"
+        queries.append(
+            {
+                "query": query,
+                "relation_type": relation_type,
+                "relation_label": _related_relation_label(relation_type),
+                "reason": "用于身份消歧和关系核验。" if origin == "local" else "用于核对当前外部信息。",
+                "origin": origin,
+                "result_count": int(item.get("result_count") or 0),
+                "result_urls": list(item.get("result_urls") or [])[:12],
+            }
+        )
+        seen.add(key)
+        if len(queries) >= max_queries:
+            break
+    if queries:
+        return queries
+    return [
+        {
+            "query": base_query,
+            "relation_type": "related",
+            "relation_label": "与当前主题的关系",
+            "reason": "围绕当前对话主题解释用户指定焦点。",
+        }
+    ]
+
+
+def _related_groups_from_runtime(
+    related_queries: list[dict[str, Any]],
+    results: list[SearchResult],
+) -> list[dict[str, Any]]:
+    grouped: list[dict[str, Any]] = []
+    for item in related_queries[:5]:
+        query = item.get("query") or ""
+        recorded_urls = {
+            canonicalize_url(str(url or ""))
+            for url in item.get("result_urls") or []
+            if canonicalize_url(str(url or ""))
+        }
+        recorded_results = [
+            result
+            for result in results
+            if canonicalize_url(str(result.url or "")) in recorded_urls
+        ]
+        ranked = _rank_for_chat(recorded_results or results, query)[:4]
+        grouped.append(
+            {
+                "query": query,
+                "reason": item.get("reason") or "",
+                "relation_type": item.get("relation_type") or "other",
+                "relation_label": item.get("relation_label") or _related_relation_label(item.get("relation_type") or "other"),
+                "count": len(ranked),
+                "items": ranked,
+            }
+        )
+    return grouped
+
+
+def _filter_related_runtime_results(
+    results: list[SearchResult],
+    topic: str | None,
+    requested_focus: str,
+) -> list[SearchResult]:
+    focus_terms = _related_identity_terms(requested_focus)
+    topic_terms = _related_identity_terms(topic or "")
+    if not focus_terms or not topic_terms:
+        return results
+    filtered: list[SearchResult] = []
+    for item in results:
+        if item.origin == "external":
+            filtered.append(item)
+            continue
+        text = f"{item.title or ''} {item.summary or ''}"
+        if any(_related_term_in_text(term, text) for term in focus_terms) and any(
+            _related_term_in_text(term, text) for term in topic_terms
+        ):
+            filtered.append(item)
+    return filtered
+
+
+def _filter_research_results(
+    results: list[SearchResult],
+    search_plan: SearchQueryPlan,
+) -> list[SearchResult]:
+    """Keep only evidence that still names the planned subject or event.
+
+    Agent runs may issue several broad discovery queries. Their raw union is a
+    candidate pool, not a user-facing evidence list, so every path passes this
+    final relevance gate before citations and recommendations are rendered.
+    """
+    if search_plan.required_terms:
+        return [item for item in results if search_result_matches_terms(search_plan.required_terms, item)]
+    subject = search_plan.primary_subject or search_plan.query
+    return [item for item in results if search_result_matches_subject(subject, item)]
+
+
+def _related_identity_terms(value: str) -> list[str]:
+    text = " ".join(str(value or "").split()).strip().lower()
+    latin = re.findall(r"[a-z][a-z0-9+#._-]{1,}", text)
+    cjk = re.findall(r"[\u4e00-\u9fff]{2,}", text)
+    return [*latin, *cjk][:6]
+
+
+def _related_term_in_text(term: str, value: str) -> bool:
+    if re.fullmatch(r"[a-z0-9+#._-]+", term):
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", value, flags=re.IGNORECASE))
+    return term in value
 
 
 def _clean_related_topic(value: str) -> str:
@@ -2237,7 +2883,7 @@ def _runtime_declared_link_results(answer: str, category: str) -> list[SearchRes
                 source_id=parsed.netloc.lower(),
                 title=title[:240],
                 url=url,
-                summary="由 CC 外部搜索工具返回；可打开原始页面核对全文。",
+                summary="由外部搜索工具返回；可打开原始页面核对全文。",
                 category=category or "all",
                 published_at=None,
                 score=0.72,
@@ -2254,6 +2900,12 @@ def _related_mind_map_payload(
     grouped: list[dict[str, Any]],
     evidence: list[dict[str, Any]],
     planner_source: str,
+    *,
+    active_topic: str | None = None,
+    requested_focus: str | None = None,
+    conclusion: str | None = None,
+    runtime_queries: list[dict[str, Any]] | None = None,
+    builtin_web_calls: int = 0,
 ) -> dict[str, Any]:
     evidence_index_by_key = {
         item.get("article_id") or item.get("url"): item.get("index")
@@ -2292,13 +2944,89 @@ def _related_mind_map_payload(
                 "evidence_indices": [point["evidence_index"] for point in points if point.get("evidence_index")],
             }
         )
+    steps: list[dict[str, Any]] = [
+        {
+            "kind": "context",
+            "label": "语境锚点",
+            "title": active_topic or query,
+            "detail": f"在当前话题中识别并核对「{requested_focus or query}」。",
+            "status": "completed",
+            "evidence_indices": [],
+        },
+        {
+            "kind": "resolution",
+            "label": "对象消歧",
+            "title": requested_focus or query,
+            "detail": f"将检索对象解析为「{query}」，避免脱离上下文匹配同名对象。",
+            "status": "completed",
+            "evidence_indices": [],
+        },
+    ]
+    query_records = runtime_queries or []
+    for index, branch in enumerate(branches[:5]):
+        record = query_records[index] if index < len(query_records) else {}
+        origin = str(record.get("origin") or "local")
+        evidence_indices = branch.get("evidence_indices") or []
+        steps.append(
+            {
+                "kind": "web_search" if origin == "web" else "local_search",
+                "label": "外部证据核对" if origin == "web" else "本地新闻检索",
+                "title": branch.get("title") or query,
+                "detail": branch.get("edge_reason") or "围绕已消歧对象检索可引用报道。",
+                "status": "completed" if evidence_indices else "limited",
+                "result_count": int(record.get("result_count") or branch.get("count") or 0),
+                "evidence_indices": evidence_indices,
+                "points": branch.get("points") or [],
+            }
+        )
+    if builtin_web_calls and not any(step.get("kind") == "web_search" for step in steps):
+        steps.append(
+            {
+                "kind": "web_search",
+                "label": "外部证据核对",
+                "title": "实时网页交叉核验",
+                "detail": f"外部搜索工具完成 {builtin_web_calls} 次检索，核对身份、时间与当前关系。",
+                "status": "completed",
+                "result_count": builtin_web_calls,
+                "evidence_indices": [item.get("index") for item in evidence if item.get("origin") == "external"],
+                "points": [item for item in evidence if item.get("origin") == "external"][:5],
+            }
+        )
+    steps.append(
+        {
+            "kind": "conclusion",
+            "label": "关系结论",
+            "title": "形成面向当前话题的回答",
+            "detail": conclusion or "根据已召回证据说明对象与当前话题的具体关系。",
+            "status": "completed" if evidence else "limited",
+            "evidence_indices": [item.get("index") for item in evidence[:6] if item.get("index")],
+            "points": evidence[:6],
+        }
+    )
     return {
-        "type": "related_mind_map",
+        "type": "related_research_path_v2",
         "topic": query,
+        "active_topic": active_topic or query,
+        "requested_focus": requested_focus or query,
         "planner_source": planner_source,
         "evidence_count": len(evidence),
+        "steps": steps,
         "branches": branches,
     }
+
+
+def _related_conclusion(answer: str) -> str:
+    text = re.sub(r"```[\s\S]*?```", " ", str(answer or ""))
+    paragraphs = [
+        re.sub(r"\s+", " ", item).strip(" -#")
+        for item in re.split(r"\n\s*\n", text)
+        if re.sub(r"\s+", " ", item).strip(" -#")
+    ]
+    for paragraph in paragraphs:
+        if paragraph.startswith(("来源", "证据", "下一步")):
+            continue
+        return paragraph[:220] + ("…" if len(paragraph) > 220 else "")
+    return ""
 
 
 def _enrich_from_store(store: NewsStore, results: list[SearchResult]) -> list[SearchResult]:

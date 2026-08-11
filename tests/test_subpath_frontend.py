@@ -29,7 +29,7 @@ def test_shared_client_preserves_pna_prefix_for_api_requests():
     auth = (STATIC_DIR / "auth.html").read_text(encoding="utf-8")
     auth_script = (STATIC_DIR / "auth.js").read_text(encoding="utf-8")
     mobile_script = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
-    assert "home.js?v=20260810-dialogue-skill-2" in home
+    assert "home.js?v=20260811-topic-pulse-6" in home
     assert "shared.js?v=20260810-phone-controls-2" in auth
     assert "ensureRegistrationChallenge(form, status)" in auth_script
     assert "ensureRegistrationChallenge(form, status)" in mobile_script
@@ -47,7 +47,7 @@ def test_server_templates_keep_nginx_and_web_port_aligned():
 
 def test_html_routes_disable_cache_and_expose_frontend_revision():
     routes = (ROOT / "personal_news_agent" / "api" / "routes.py").read_text(encoding="utf-8")
-    assert 'FRONTEND_REVISION = "20260810-dialogue-skill-2"' in routes
+    assert 'FRONTEND_REVISION = "20260811-topic-pulse-6"' in routes
     assert '"Cache-Control": "no-store, max-age=0"' in routes
     assert '"frontend_revision": FRONTEND_REVISION' in routes
 
@@ -55,7 +55,7 @@ def test_html_routes_disable_cache_and_expose_frontend_revision():
 def test_console_theme_has_dark_drawers_readable_content_and_responsive_rails():
     styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
     home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
-    assert "styles.css?v=20260810-dialogue-skill-2" in home
+    assert "styles.css?v=20260811-topic-pulse-6" in home
     assert ".console-shell .agent-drawer" in styles
     assert "background: rgba(10, 28, 45, 0.96)" in styles
     assert ".console-shell .assistant-markdown h3" in styles
@@ -68,6 +68,7 @@ def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_lay
     home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
     shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
     styles = (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+    web = (STATIC_DIR / "web.js").read_text(encoding="utf-8")
 
     assert home.count("legacy-agent-drawer") == 2
     assert ".legacy-agent-drawer" in styles
@@ -76,6 +77,31 @@ def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_lay
     assert "margin-top: auto;" in styles
     assert "grid-template-columns: auto 168px" in styles
     assert ".console-shell .turn-actions button" in styles
+    turn_actions = shared.split("function turnActionsHtml", 1)[1].split("document.addEventListener", 1)[0]
+    assert "mark-related" not in turn_actions
+    assert "mark-unrelated" not in turn_actions
+    assert "重新编辑" in turn_actions
+    assert 'data-action="changes"' in home
+    assert 'data-action="deep-dive-chat"' in home
+    assert 'data-action="make-task"' not in home
+    assert "conversation-command-bar" in home
+    assert "topic-card-skeleton" in home
+    assert 'aria-busy="true"' in home
+    assert 'target.setAttribute("aria-busy", "false")' in web
+    assert 'target.setAttribute("aria-label", "关注专题")' in web
+    assert 'target.dataset.loaded = "true"' in web
+    assert 'target.dataset.recommendationsLoading = "true"' in web
+    assert "const TOPIC_REFRESH_INTERVAL_MS = 180_000" in web
+    assert "TOPIC_RECOMMENDATION_RETENTION_MS = 30 * 60_000" in web
+    assert "stabilizeRecommendedTopics" in web
+    assert "单源待确认" in web
+    assert "startTopicAutoRefresh()" in web
+    assert 'loadTopics({ quiet: true })' in web
+    assert 'target.addEventListener("click", async (event) =>' in web
+    assert "await selectTopicCard(button)" in web
+    assert "当前对话主题已确定" not in web.split("function bindTopicCards", 1)[1].split("function mergeTopics", 1)[0]
+    assert "data-topic-refresh-status" in home
+    assert "grid-template-rows: auto auto minmax(0, 1fr) auto auto" in styles
     assert "本轮过程" in shared
     assert "assistantIdentityHtml" in shared
     assert "mountAssistantSections" in shared
@@ -87,8 +113,19 @@ def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_lay
     assert 'html += "<ol>"' in shared
     assert "static/vendor/mermaid.min.js" in home
     assert "mountMermaidDiagrams" in shared
+    assert "openMermaidViewer" in shared
+    assert "mermaidGraphContext" in shared
+    assert "data-mermaid-action=\"factcheck\"" in shared
+    assert ".mermaid-viewer-dialog" in styles
+    assert ".factcheck-workbench" in styles
+    assert 'name: "map"' in shared
+    assert "生成事件图谱" in shared
     assert 'language.toLowerCase() === "mermaid"' in shared
     assert "function sanitizeMermaidSource" in shared
+    assert "normalizeRelatedResearchSteps" in shared
+    assert "这是可核验的执行记录，不是隐藏思维链" in shared
+    assert ".related-research-path" in styles
+    assert "未公布举办地" not in shared
     assert "click\\s+" in shared
     assert ".chat-mermaid-canvas" in styles
     assert "本地新闻引擎 --" in home
@@ -121,3 +158,33 @@ def test_chat_model_selector_is_logical_and_sent_with_each_chat_request():
     assert "provider_model" not in shared.split("async function loadOnboardingOptions", 1)[1].split("async function loadProfileIntoForm", 1)[0]
     assert "model_key: getChatModelKey()" in web
     assert "model_key: getChatModelKey()" in mobile
+
+
+def test_first_run_onboarding_opens_automatically_and_topics_come_from_real_state():
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+    web = (STATIC_DIR / "web.js").read_text(encoding="utf-8")
+    mobile = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
+
+    assert "data-onboarding-intro" in home
+    assert "initializeUserProfileState()" in web
+    assert "data.profile?.onboarding_completed" in web
+    assert "dialog.showModal()" in web
+    assert 'dataset.firstRun === "true"' in web
+    assert "initializeMobileProfileState()" in mobile
+    assert "showOnboardingForm()" in mobile
+    assert "const disabled = item.implemented" in shared
+    assert "aria-disabled" in shared
+
+    web_bootstrap = web.split("const bootstrapTopics = [", 1)[1].split("];", 1)[0]
+    mobile_bootstrap = mobile.split("const mobileBootstrapTopics = [", 1)[1].split("];", 1)[0]
+    assert 'topic_type: "user"' not in web_bootstrap
+    assert 'topic_type: "user"' not in mobile_bootstrap
+    assert web_bootstrap.count('topic_type: "system"') == 2
+    assert mobile_bootstrap.count('topic_type: "system"') == 2
+    assert "composeTopicItems(persisted, stableRecommendations)" in web
+    assert "return [...userTopics, ...recommended, ...systemTopics, ...bootstrapTopics]" in web
+    assert "composeMobileTopicItems(persisted, recommended.items || [])" in mobile
+    assert "return [...userTopics, ...recommended, ...systemTopics, ...mobileBootstrapTopics]" in mobile
+    assert "展示 CC 如何" not in shared
+    assert "展示 Agent 如何锚定语境" in shared

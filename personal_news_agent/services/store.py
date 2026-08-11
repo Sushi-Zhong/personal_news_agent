@@ -660,7 +660,10 @@ class NewsStore:
         return {"article_id": article.id, "created": existed is None, "duplicate": False}
 
     def list_articles(self, category: str | None = None, limit: int = 50, days: int | None = None) -> list[dict[str, Any]]:
-        clauses = ["status = 'active'"]
+        clauses = [
+            "status = 'active'",
+            "datetime(COALESCE(published_at, fetched_at)) <= datetime('now', '+10 minutes')",
+        ]
         params: list[Any] = []
         if category:
             clauses.append("category = ?")

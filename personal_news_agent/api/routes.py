@@ -43,7 +43,7 @@ from personal_news_agent.services.report_export import export_report
 from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL
 
 
-FRONTEND_REVISION = "20260810-dialogue-skill-2"
+FRONTEND_REVISION = "20260811-topic-pulse-6"
 NO_CACHE_PAGE_HEADERS = {
     "Cache-Control": "no-store, max-age=0",
     "X-PNA-Frontend-Revision": FRONTEND_REVISION,
@@ -403,6 +403,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
         window_hours: int = Query(default=24, ge=3, le=72),
         refresh_window_hours: int = Query(default=6, ge=1, le=24),
         use_llm: bool = True,
+        prefer_cached: bool = False,
     ) -> dict[str, Any]:
         if refresh_window_hours > window_hours:
             raise HTTPException(status_code=400, detail="refresh_window_hours cannot exceed window_hours")
@@ -412,6 +413,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             window_hours=window_hours,
             refresh_window_hours=refresh_window_hours,
             use_llm=use_llm,
+            prefer_cached=prefer_cached,
         )
 
     @app.post("/api/topics")

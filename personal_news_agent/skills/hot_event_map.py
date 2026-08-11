@@ -34,6 +34,8 @@ class HotEventMapSkill:
                 history="",
                 allow_web_search=context.allow_web_search,
                 skill_names=[HOT_EVENT_MAP_SKILL_NAME],
+                max_turns=10,
+                builtin_web_search_limit=3,
                 on_trace=context.on_trace,
             )
             evidence = _runtime_evidence(result.results)
@@ -59,7 +61,7 @@ class HotEventMapSkill:
         return SkillResult(
             command=self.spec.command,
             title=f"热点事件图谱：{topic}",
-            message=f"Agent 主控暂不可用，已用本地新闻引擎生成基础图谱。",
+            message="Agent 主控暂不可用，已用本地新闻引擎生成基础图谱。",
             data={
                 "topic": topic,
                 "category_scope": categories,
@@ -127,6 +129,9 @@ def _mermaid_label(value: Any) -> str:
 
 def _sanitize_event_map_markdown(markdown: str) -> str:
     text = str(markdown or "")[:24_000]
+    section_start = text.find("## 事件图谱")
+    if section_start >= 0:
+        text = text[section_start:]
     match = re.search(r"```mermaid\s*\n(?P<code>[\s\S]*?)```", text, flags=re.IGNORECASE)
     if not match:
         return text
@@ -138,7 +143,20 @@ def _sanitize_event_map_markdown(markdown: str) -> str:
         clean = re.sub(r"<br\s*/?>", " · ", line, flags=re.IGNORECASE)
         clean = re.sub(r"<[^>]{1,200}>", "", clean)
         code_lines.append(clean)
-    code = "\n".join(code_lines).strip()[:8_000]
+    code = _repair_mermaid_source("\n".join(code_lines).strip())[:8_000]
     if not code.lower().startswith("flowchart lr"):
         code = "flowchart LR\n" + code
     return text[: match.start()] + f"```mermaid\n{code}\n```" + text[match.end() :]
+
+
+def _repair_mermaid_source(source: str) -> str:
+    """Repair a narrow, common CC edge-label transposition without inventing graph facts."""
+    text = str(source or "")
+    # Mermaid expects A -->|"label"| B. Models occasionally emit
+    # A -->|"label|" B, which is visually plausible but does not parse.
+    text = re.sub(
+        r'\|"([^"\n|]{1,120})\|"(?=\s+[A-Za-z_][A-Za-z0-9_-]*(?:\s|$))',
+        r'|"\1"|',
+        text,
+    )
+    return text

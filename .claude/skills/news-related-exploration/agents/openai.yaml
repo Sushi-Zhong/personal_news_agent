@@ -1,0 +1,4 @@
+interface:
+  display_name: "相关新闻延展"
+  short_description: "结合当前对话消歧人物或事件，并检索其关系、近况与可靠来源"
+  default_prompt: "Use $news-related-exploration to resolve this focus within the current news conversation and research its relationship with local and web evidence."

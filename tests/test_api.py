@@ -6,7 +6,7 @@ from uuid import uuid4
 import zipfile
 
 from personal_news_agent.app import app
-from personal_news_agent.api.schemas import ChatRequest
+from personal_news_agent.api.schemas import ChatRequest, RelatedSearchRequest
 from personal_news_agent.config import settings
 from personal_news_agent.config import Settings
 from personal_news_agent.services.phone_verification import PhoneVerificationService
@@ -21,13 +21,16 @@ def test_chat_request_defaults_to_cc_with_web_search():
     assert payload.use_llm is True
     assert payload.allow_web_search is True
 
+    related = RelatedSearchRequest(query="Ame")
+    assert related.allow_web_search is True
+
 
 def test_api_health_and_main_routes():
     with TestClient(app) as client:
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
-        assert health.json()["frontend_revision"] == "20260810-dialogue-skill-2"
+        assert health.json()["frontend_revision"] == "20260811-topic-pulse-6"
         assert health.json()["source_count"] >= 20
 
         feed = client.get("/api/feed?category=tech&limit=5")
@@ -62,7 +65,7 @@ def test_api_health_and_main_routes():
         auth = client.get("/auth")
         assert auth.status_code == 200
         assert auth.headers["cache-control"] == "no-store, max-age=0"
-        assert auth.headers["x-pna-frontend-revision"] == "20260810-dialogue-skill-2"
+        assert auth.headers["x-pna-frontend-revision"] == "20260811-topic-pulse-6"
         assert 'data-auth-mode-target="login"' in auth.text
         assert "短信验证码仅用于确认你持有该手机号" in auth.text
 
@@ -396,7 +399,9 @@ def test_api_chat_report_and_task_flow():
         schedule_user_id = f"api_schedule_user_{uuid4().hex[:8]}"
         task_service = client.app.state.services["tasks"]
         original_llm = task_service.llm_client
+        original_cc_runtime = task_service.cc_runtime
         task_service.llm_client = type("FakeLLM", (), {"configured": False})()
+        task_service.cc_runtime = None
         try:
             schedule_api = client.post(
                 "/api/tasks/schedule",
@@ -418,6 +423,7 @@ def test_api_chat_report_and_task_flow():
             )
         finally:
             task_service.llm_client = original_llm
+            task_service.cc_runtime = original_cc_runtime
         assert schedule_chat.status_code == 200
         assert schedule_chat.json()["context_relation"] == "scheduled_push_created"
         conversations = client.get(f"/api/conversations?user_id={schedule_user_id}")

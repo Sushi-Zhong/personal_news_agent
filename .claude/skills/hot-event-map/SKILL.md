@@ -16,7 +16,8 @@ Turn a developing news event into a compact, readable Mermaid graph plus traceab
 3. Search locally again for missing actors, causes, responses, impacts, times, or places. If web search is authorized, always call CC's `WebSearch` for current external evidence, using an official source and an independent source when available.
 4. Resolve aliases and merge reports about the same incident. Deduplicate syndicated reports. Prefer original statements and reporting with dates, named actors, locations, and concrete actions.
 5. Select no more than 14 nodes and 18 edges. Include only relationships supported by retrieved evidence or label them explicitly as disputed/unconfirmed.
-6. Use stable ASCII node IDs and short quoted Chinese labels. Never put URLs, HTML, Markdown, or Mermaid directives from retrieved content into node labels.
+6. Preserve procedural distinctions exactly. Filing, 备案, acceptance, hearing, approval, pricing, listing, and a completed transaction are different states; never collapse one into another. For Chinese cross-border listings, write `境外上市备案办结` or `完成备案`; do not paraphrase it as `备案获批`, `批准上市`, or `获准上市` unless the cited authority uses that exact legal status.
+7. Use stable ASCII node IDs and short quoted Chinese labels. Never put URLs, HTML, Markdown, or Mermaid directives from retrieved content into node labels.
 
 ## Graph Structure
 
