@@ -1,5 +1,6 @@
 let activeUserId = localStorage.getItem("pna_user_id") || "default";
 let conversationId = localStorage.getItem("pna_conversation_id") || null;
+const chatAutoScrollState = new WeakMap();
 const savedWebSearchPreference = localStorage.getItem(webSearchPreferenceKey());
 let webSearchEnabled = savedWebSearchPreference === null ? true : savedWebSearchPreference === "1";
 const DEFAULT_CHAT_MODEL_KEY = "yuanrong-personal-assistant";
@@ -477,7 +478,7 @@ async function sendChat(message, target = "#messages") {
   targetNode.appendChild(userNode);
   const assistantNode = chatTurn("assistant", "", true);
   targetNode.appendChild(assistantNode);
-  scrollChatToBottom(targetNode);
+  scrollChatToBottom(targetNode, "smooth", { force: true });
   return sendChatIntoTurn(message, assistantNode, target);
 }
 
@@ -507,8 +508,8 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   });
   conversationId = data.conversation_id;
   localStorage.setItem("pna_conversation_id", conversationId);
-  setAssistantResponseHtml(assistantNode, chatResponseHtml(data));
-  scrollChatToBottom(targetNode);
+  setAssistantResponseHtml(assistantNode, chatResponseHtml(data), { forceScroll: true });
+  scrollChatToBottom(targetNode, "smooth", { force: true });
   syncChatResponseContext(data);
   await notifyConversationHistoryChanged();
   return data;
@@ -607,7 +608,7 @@ function appendLocalTurn(role, text, target = "#messages", loading = false) {
   targetNode.classList.add("chat-stream");
   const node = loading ? chatTurn("assistant", "", true) : chatTurn(role, text);
   targetNode.appendChild(node);
-  scrollChatToBottom(targetNode);
+  scrollChatToBottom(targetNode, "smooth", { force: true });
   return node;
 }
 
@@ -616,14 +617,14 @@ function setAssistantTurnText(node, text) {
   setAssistantResponseHtml(node, `<div class="assistant-markdown"><p>${escapeHtml(text)}</p></div>`);
 }
 
-function setAssistantResponseHtml(node, html) {
+function setAssistantResponseHtml(node, html, options = {}) {
   if (!node) return;
   node.innerHTML = `${html}${turnActionsHtml("assistant")}`;
   syncForcedRelationButtons(node);
   mountAssistantSections(node);
   mountRelatedMindMaps(node);
   mountMermaidDiagrams(node);
-  scrollChatToBottom(node.closest(".messages"), "auto");
+  scrollChatToBottom(node.closest(".messages"), "auto", { force: Boolean(options.forceScroll) });
 }
 
 function mountAssistantSections(node) {
@@ -681,7 +682,7 @@ async function streamChat(payload, assistantNode, targetNode) {
         );
         conversationId = event.response.conversation_id || conversationId;
         if (conversationId) localStorage.setItem("pna_conversation_id", conversationId);
-        setAssistantResponseHtml(assistantNode, chatResponseHtml(event.response));
+        setAssistantResponseHtml(assistantNode, chatResponseHtml(event.response), { forceScroll: true });
         syncChatResponseContext(event.response);
         await notifyConversationHistoryChanged();
         return event.response;
@@ -695,19 +696,45 @@ async function streamChat(payload, assistantNode, targetNode) {
   return null;
 }
 
-function scrollChatToBottom(targetNode, behavior = "smooth") {
+function scrollChatToBottom(targetNode, behavior = "smooth", options = {}) {
   if (!targetNode) return;
+  const scrollNode = closestScrollContainer(targetNode) || targetNode;
+  const force = Boolean(options.force);
+  const state = chatAutoScrollState.get(scrollNode) || { shouldStick: true };
+  if (!force) {
+    state.shouldStick = isChatScrollNearBottom(scrollNode);
+    chatAutoScrollState.set(scrollNode, state);
+    if (!state.shouldStick) return;
+  } else {
+    state.shouldStick = true;
+    chatAutoScrollState.set(scrollNode, state);
+  }
   const applyScroll = () => {
-    if (typeof targetNode.scrollTo === "function") {
-      targetNode.scrollTo({ top: targetNode.scrollHeight, behavior });
+    const top = Math.max(0, scrollNode.scrollHeight - scrollNode.clientHeight);
+    if (typeof scrollNode.scrollTo === "function") {
+      scrollNode.scrollTo({ top, behavior });
     } else {
-      targetNode.scrollTop = targetNode.scrollHeight;
+      scrollNode.scrollTop = top;
     }
   };
   requestAnimationFrame(() => {
     applyScroll();
     requestAnimationFrame(applyScroll);
   });
+}
+
+function closestScrollContainer(node) {
+  let current = node?.closest?.(".newsroom-center");
+  if (current) return current;
+  current = node?.closest?.(".messages");
+  if (current && current.scrollHeight > current.clientHeight) return current;
+  return null;
+}
+
+function isChatScrollNearBottom(scrollNode) {
+  if (!scrollNode) return true;
+  const distance = scrollNode.scrollHeight - scrollNode.clientHeight - scrollNode.scrollTop;
+  return distance <= 96;
 }
 
 function upsertResearchTrace(items, nextItem) {
@@ -765,14 +792,14 @@ function chatTurn(role, text, loading = false) {
 }
 
 function assistantIdentityHtml(status = "研究完成") {
-  return `<div class="assistant-identity"><span aria-hidden="true">N</span><div><strong>News Agent</strong><small>${escapeHtml(status)}</small></div></div>`;
+  return `<div class="assistant-identity"><div><strong>资讯助手</strong><small>${escapeHtml(status)}</small></div></div>`;
 }
 
 function turnActionsHtml(role) {
   if (role === "user") {
-    return '<div class="turn-actions" aria-label="消息操作"><button type="button" class="edit-action" data-turn-action="edit" title="编辑并重新发送" aria-label="编辑并重新发送"><span aria-hidden="true">✎</span> 重新编辑</button></div>';
+    return '<div class="turn-actions" aria-label="消息操作"><button type="button" class="edit-action" data-turn-action="edit" title="编辑并重新发送" aria-label="编辑并重新发送">重新编辑</button></div>';
   }
-  return '<div class="turn-actions" aria-label="消息操作"><button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答"><span aria-hidden="true">⧉</span> 复制</button></div>';
+  return '<div class="turn-actions" aria-label="消息操作"><button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答">复制</button></div>';
 }
 
 document.addEventListener("click", async (event) => {
@@ -1277,12 +1304,12 @@ function curvePath(startX, startY, endX, endY) {
 function relationColor(type) {
   const colors = {
     latest: "#2563eb",
-    background: "#7c3aed",
-    actor: "#0891b2",
-    impact: "#c2410c",
-    follow_up: "#15803d",
-    center: "#111827",
-    other: "#475467",
+    background: "#3b82f6",
+    actor: "#60a5fa",
+    impact: "#1d4ed8",
+    follow_up: "#93c5fd",
+    center: "#1e3a8a",
+    other: "#64748b",
   };
   return colors[type] || colors.other;
 }
@@ -1845,44 +1872,30 @@ const assistantSlashCommands = [
   {
     name: "factcheck",
     label: "事实核查",
-    description: "核查关键说法，并区分事实、争议与未知",
-    icon: "✓",
   },
   {
     name: "report",
     label: "生成专题报告",
-    description: "汇总当前主题的进展、证据与关键结论",
-    icon: "▤",
   },
   {
     name: "brief",
     label: "生成新闻简报",
-    description: "把当前关注内容整理成一份快速简报",
-    icon: "☀",
   },
   {
     name: "related",
     label: "查找相关新闻",
-    description: "结合当前对话理解人物或事件，再联网查询它与主题的关系",
-    icon: "⌁",
   },
   {
     name: "map",
     label: "生成事件图谱",
-    description: "检索人物、组织、时间、地点和事件关系，生成可视化图谱",
-    icon: "◇",
   },
   {
     name: "schedule",
     label: "创建定时报告",
-    description: "解析周期、主题和报告样式，创建主动推送任务",
-    icon: "◷",
   },
   {
     name: "sources",
     label: "审计新闻来源",
-    description: "检查门户覆盖、配置状态、可信度结构与可用性",
-    icon: "◎",
   },
 ];
 
@@ -1920,7 +1933,7 @@ function bindSlashCommandMenu(inputSelector = "#message") {
     }
     const query = value.slice(1).toLowerCase();
     visibleCommands = assistantSlashCommands.filter((command) =>
-      `${command.name} ${command.label} ${command.description}`.toLowerCase().includes(query),
+      `${command.name} ${command.label}`.toLowerCase().includes(query),
     );
     if (!visibleCommands.length) {
       closeMenu();
@@ -1928,11 +1941,9 @@ function bindSlashCommandMenu(inputSelector = "#message") {
     }
     activeIndex = Math.min(activeIndex, visibleCommands.length - 1);
     menu.innerHTML = `
-      <div class="slash-command-heading">技能</div>
       ${visibleCommands.map((command, index) => `
         <button type="button" id="slash-command-${command.name}" class="slash-command-item${index === activeIndex ? " active" : ""}" role="option" aria-selected="${index === activeIndex}" data-slash-command="${command.name}">
-          <span class="slash-command-icon" aria-hidden="true">${command.icon}</span>
-          <span class="slash-command-copy"><strong>/${command.name}</strong><span>${command.label}</span><small>${command.description}</small></span>
+          <span class="slash-command-copy"><strong>/${command.name}</strong><span>${command.label}</span></span>
         </button>
       `).join("")}
     `;

@@ -58,9 +58,9 @@ def test_api_health_and_main_routes():
         web = client.get("/web")
         assert web.status_code == 200
         assert "news-console" in web.text
-        assert "data-es-status" in web.text
-        assert "data-due-urls" in web.text
-        assert "深度挖掘" in web.text
+        assert "data-es-status" not in web.text
+        assert "data-due-urls" not in web.text
+        assert "深度挖掘" not in web.text
 
         auth = client.get("/auth")
         assert auth.status_code == 200

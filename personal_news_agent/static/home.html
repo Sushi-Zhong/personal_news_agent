@@ -5,179 +5,121 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
     <link rel="stylesheet" href="static/styles.css?v=20260811-topic-pulse-6" />
+    <link rel="stylesheet" href="static/newsroom.css?v=20260812-newsroom-8" />
   </head>
   <body>
-    <template id="webTemplate" data-body-class="web-shell console-shell">
+    <template id="webTemplate" data-body-class="web-shell console-shell newsroom-shell">
       
-          <header class="app-topbar console-topbar">
+          <header class="console-topbar newsroom-topbar">
             <div class="brand-block">
-              <h1>个人资讯助手</h1>
-              <p><span data-user-name></span></p>
+              <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+              <div><h1>个人资讯助手</h1></div>
             </div>
-            <div class="system-strip" aria-live="polite">
-              <span data-es-status>本地新闻引擎 --</span>
-              <span data-mysql-status>外部搜索工具 --</span>
-              <span data-source-count>源 --</span>
-            </div>
-            <nav class="top-actions">
-              <button id="openConfig" class="secondary-button">个人配置</button>
-              <button id="refresh">刷新</button>
-              <a href="auth">登录/注册</a>
+            <nav class="top-actions" aria-label="全局操作">
+              <button id="themeToggle" class="icon-button" type="button" aria-label="切换浅色背景" aria-pressed="false">浅色</button>
+              <button id="openConfig" class="text-button">个人配置</button>
+              <button id="refresh">刷新资讯</button>
+              <a href="auth">登录 / 注册</a>
             </nav>
           </header>
-      
-          <main class="news-console">
-            <aside class="console-rail">
-              <div class="rail-sticky-stack">
-                <section class="rail-panel topic-nav">
-                  <div class="panel-head compact-head">
-                    <div class="topic-panel-title">
-                      <h2>关注</h2>
-                      <small data-topic-refresh-status aria-live="polite">正在更新热点</small>
-                    </div>
-                    <button id="newTopicConversation" class="secondary-button mini-button" type="button">新增</button>
-                  </div>
-                  <div data-topic-list aria-busy="true" aria-label="正在载入关注专题">
-                    <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
-                    <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
-                    <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
-                  </div>
-                </section>
-                <section class="rail-panel events-panel">
-                  <h2>热点事件</h2>
-                  <div id="events" class="list compact title-only-list"></div>
-                </section>
-              </div>
-            </aside>
-      
-            <section class="console-main">
-              <section class="conversation-panel main-dialog">
-                <div class="dialog-header">
-                  <span class="assistant-label">当前</span>
-                  <h2 data-agent-topic>新能源汽车产业链</h2>
-                  <p data-dialog-context>18 条证据 · 18 个事件</p>
+
+          <main class="newsroom-grid news-console">
+            <aside class="newsroom-left">
+              <section class="topic-nav">
+                <div class="section-heading">
+                  <div><h2>我的关注</h2></div>
+                  <button id="newTopicConversation" class="round-add" type="button" aria-label="新增关注">新增</button>
                 </div>
-                <div class="conversation-command-bar">
-                  <div class="prompt-suggestions" aria-label="专题快捷操作">
-                    <button type="button" class="quick-action primary" data-action="changes">
-                      <span class="quick-action-icon" aria-hidden="true">↻</span>
-                      <span><strong>追踪最新</strong><small>核对新变化</small></span>
-                    </button>
-                    <button type="button" class="quick-action" data-action="deep-dive-chat">
-                      <span class="quick-action-icon" aria-hidden="true">◇</span>
-                      <span><strong>深度解读</strong><small>人物、事件与争议</small></span>
-                    </button>
+                <div data-topic-list aria-busy="true" aria-label="正在载入关注专题">
+                  <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
+                  <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
+                  <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
+                </div>
+              </section>
+              <section class="events-panel">
+                <div class="section-heading"><div><h2>热点事件</h2></div></div>
+                <div id="events" class="list compact title-only-list"></div>
+              </section>
+            </aside>
+
+            <section class="newsroom-center">
+              <article class="main-dialog">
+                <header class="story-hero">
+                  <div class="story-heading">
+                    <h2 data-agent-topic>新能源汽车产业链</h2>
+                    <p data-dialog-context>18 条证据 · 18 个事件</p>
                   </div>
                   <div class="context-dock" aria-label="当前专题范围">
                     <span data-current-category-chip>领域 · auto</span>
                     <span data-current-view-chip>视图 · 事件线</span>
                   </div>
-                </div>
-                <div class="messages hero-messages chat-stream" id="messages">
-                  <article class="chat-turn chat-assistant">
-                    <div class="chat-bubble">已就绪。</div>
-                    <div class="turn-actions" aria-label="消息操作">
-                      <button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答"><span aria-hidden="true">⧉</span> 复制</button>
-                    </div>
-                  </article>
-                </div>
-                <div class="chat-runtime-controls">
-                  <label class="chat-model-control">
-                    <span>模型</span>
-                    <select data-chat-model-select aria-label="选择对话模型">
-                      <option value="yuanrong-personal-assistant">元融大模型</option>
-                      <option value="qwen3.6">Qwen 3.6</option>
-                      <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
-                    </select>
-                  </label>
-                  <div class="web-search-control">
-                    <label class="web-search-toggle">
-                      <input type="checkbox" role="switch" data-web-search-toggle checked />
-                      <span>联网回答</span>
-                      <small>默认由 Agent 核对外部信息</small>
-                    </label>
+                </header>
+
+                <div class="conversation-command-bar">
+                  <div class="prompt-suggestions" aria-label="专题快捷操作">
+                    <button type="button" class="quick-action primary" data-action="changes">
+                      <span><strong>追踪最新</strong></span>
+                    </button>
+                    <button type="button" class="quick-action" data-action="deep-dive-chat">
+                      <span><strong>深度解读</strong></span>
+                    </button>
                   </div>
                 </div>
-                <form id="chatForm" class="command-bar dialog-command">
-                  <input id="message" placeholder="继续问..." />
-                  <button>发送</button>
-                </form>
-              </section>
-      
-              <details class="agent-drawer legacy-agent-drawer">
-                <summary>高级操作与偏好</summary>
-                <section class="command-panel">
-                  <form id="topicForm" class="topic-command">
-                    <input id="topicInput" value="新能源汽车产业链" placeholder="输入专题或定向搜索词" />
-                    <select id="categoryScope">
-                      <option value="sports">体育</option>
-                      <option value="politics,economy">时政 + 经济</option>
-                      <option value="tech">科技</option>
-                      <option value="game">游戏</option>
-                      <option value="auto">汽车</option>
-                      <option value="">全部</option>
-                    </select>
-                    <button>更新</button>
+
+                <section class="analysis-board">
+                  <div class="topic-workbench">
+                    <div class="topic-head">
+                      <div>
+                        <h2 data-topic-heading>新能源汽车产业链</h2>
+                        <p data-topic-summary>正在加载专题证据。</p>
+                      </div>
+                      <div class="topic-metrics">
+                        <article><strong data-topic-article-count>--</strong><span>证据</span></article>
+                        <article><strong data-topic-event-count>--</strong><span>事件</span></article>
+                        <article><strong data-topic-node-count>--</strong><span>节点</span></article>
+                      </div>
+                    </div>
+                    <div class="topic-tabs" role="tablist" aria-label="专题视图">
+                      <button class="topic-view-toggle active" data-topic-view="event-line">事件线</button>
+                      <button class="topic-view-toggle" data-topic-view="relation-graph">关系网</button>
+                    </div>
+                    <div class="topic-visual" data-topic-visual data-view="event-line"></div>
+                    <details class="evidence-strip" data-evidence-strip>
+                      <summary>证据来源</summary>
+                      <div class="evidence-list"></div>
+                    </details>
+                  </div>
+                </section>
+
+                <section class="analysis-narrative">
+                  <div class="reading-heading"><h2>观点与判断</h2></div>
+                  <div class="messages hero-messages chat-stream" id="messages">
+                    <article class="chat-turn chat-assistant">
+                      <div class="chat-bubble">已就绪。</div>
+                      <div class="turn-actions" aria-label="消息操作">
+                        <button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答">复制</button>
+                      </div>
+                    </article>
+                  </div>
+                </section>
+
+                <footer class="composer-dock">
+                  <div class="chat-runtime-controls">
+                    <label class="chat-model-control"><span>模型</span><select data-chat-model-select aria-label="选择对话模型"><option value="yuanrong-personal-assistant">元融大模型</option><option value="qwen3.6">Qwen 3.6</option><option value="deepseek-v4-flash">DeepSeek V4 Flash</option></select></label>
+                    <div class="web-search-control"><label class="web-search-toggle"><input type="checkbox" role="switch" data-web-search-toggle checked /><span>联网回答</span></label></div>
+                  </div>
+                  <form id="chatForm" class="dialog-command">
+                    <input id="message" placeholder="继续追问这条新闻，或要求核验某个观点..." />
+                    <button>发送</button>
                   </form>
-                  <div class="command-actions">
-                    <button id="nativeIngest" class="secondary-button">更新新闻源</button>
-                    <button id="deepDive" class="secondary-button">深度挖掘</button>
-                    <button id="createTopicTask" class="secondary-button">保存跟踪</button>
-                    <button id="generateReport" class="secondary-button">专题报告</button>
-                  </div>
-                  <p class="status" data-command-status></p>
-                </section>
-      
-                <section class="rail-panel source-panel">
-                  <h2>源状态</h2>
-                  <div class="metric-grid">
-                    <article><strong data-metric-sources>--</strong><span>总源</span></article>
-                    <article><strong data-metric-crawlable>--</strong><span>抓取</span></article>
-                    <article><strong data-metric-searchable>--</strong><span>搜索</span></article>
-                    <article><strong data-metric-interval>10-20</strong><span>分钟</span></article>
-                  </div>
-                  <div class="source-tags" data-source-tags></div>
-                </section>
-      
-                <section class="rail-panel crawl-panel">
-                  <h2>待抓 URL</h2>
-                  <div data-due-urls class="due-url-list"></div>
-                </section>
-      
-                <section class="rail-panel deep-dive-panel">
-                  <h2>深挖结果</h2>
-                  <div data-deep-dive-output class="deep-dive-output">暂无</div>
-                </section>
-      
-              </details>
-      
-              <details class="agent-drawer topic-detail-drawer legacy-agent-drawer">
-                <summary>专题视图与证据</summary>
-                <section class="topic-workbench">
-                  <div class="topic-head">
-                    <div>
-                      <span class="assistant-label">专题更新</span>
-                      <h2 data-topic-heading>新能源汽车产业链</h2>
-                      <p data-topic-summary>正在加载专题证据。</p>
-                    </div>
-                    <div class="topic-metrics">
-                      <article><strong data-topic-article-count>--</strong><span>证据</span></article>
-                      <article><strong data-topic-event-count>--</strong><span>事件</span></article>
-                      <article><strong data-topic-node-count>--</strong><span>节点</span></article>
-                    </div>
-                  </div>
-                  <div class="topic-tabs" role="tablist" aria-label="专题视图">
-                    <button class="topic-view-toggle active" data-topic-view="event-line">事件线</button>
-                    <button class="topic-view-toggle" data-topic-view="relation-graph">关系网</button>
-                  </div>
-                  <div class="topic-visual" data-topic-visual></div>
-                  <div class="evidence-strip" data-evidence-strip></div>
-                </section>
-              </details>
+                </footer>
+              </article>
+
             </section>
-      
-            <aside class="insight-rail">
-              <section class="rail-panel feed-panel">
+
+            <aside class="newsroom-right">
+              <header class="rail-title"><h2>跟踪与关联</h2></header>
+              <section class="feed-panel">
                 <div class="panel-head compact-head">
                   <h2>相关资讯</h2>
                   <select id="feedCategory" aria-label="筛选相关资讯分类">
@@ -195,18 +137,18 @@
                 </div>
                 <div id="feed" class="list feed-list title-only-list"></div>
               </section>
-              <section class="rail-panel follow-panel">
+              <section class="follow-panel">
                 <h2>后续观察</h2>
                 <div class="follow-up-list" data-follow-up-list></div>
               </section>
-              <section class="rail-panel entity-panel">
+              <section class="entity-panel">
                 <h2>相关主体 / 来源网站</h2>
                 <div class="entity-source-grid">
                   <div data-entity-list></div>
                   <div data-source-list></div>
                 </div>
               </section>
-              <section class="rail-panel task-panel">
+              <section class="task-panel">
                 <div class="panel-head compact-head">
                   <h2>定时跟踪</h2>
                 </div>
@@ -242,7 +184,7 @@
                 <p class="status" data-task-status></p>
                 <div class="task-list title-only-list" data-task-list></div>
               </section>
-              <section class="rail-panel push-panel">
+              <section class="push-panel">
                 <div class="panel-head compact-head">
                   <h2>跟踪提醒</h2>
                   <button id="enableBrowserPush" class="secondary-button mini-button">提醒</button>
@@ -295,7 +237,7 @@
           </dialog>
     </template>
 
-    <template id="mobileTemplate" data-body-class="mobile-shell">
+    <template id="mobileTemplate" data-body-class="mobile-shell newsroom-mobile">
       
           <header class="mobile-top">
             <div>
@@ -348,7 +290,7 @@
                   <article class="chat-turn chat-assistant">
                     <div class="chat-bubble">今日内容已准备，可以点一条资讯继续深挖，或把当前专题加入跟踪。</div>
                     <div class="turn-actions" aria-label="消息操作">
-                      <button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答"><span aria-hidden="true">⧉</span> 复制</button>
+                      <button type="button" class="copy-action" data-turn-action="copy" title="复制回答" aria-label="复制回答">复制</button>
                     </div>
                   </article>
                 </div>
@@ -366,7 +308,6 @@
                   <label class="web-search-toggle">
                     <input type="checkbox" role="switch" data-web-search-toggle checked />
                     <span>联网回答</span>
-                    <small>默认核对外部信息</small>
                   </label>
                 </div>
               </div>
@@ -455,6 +396,6 @@
     <script src="static/vendor/react.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/react-dom.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/mermaid.min.js?v=11.9.0"></script>
-    <script src="static/home.js?v=20260811-topic-pulse-6"></script>
+    <script src="static/home.js?v=20260812-newsroom-8"></script>
   </body>
 </html>

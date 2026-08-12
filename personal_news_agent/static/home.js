@@ -1,6 +1,6 @@
 (function () {
-  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260811-topic-pulse-6";
-  const mobileQuery = window.matchMedia("(max-width: 760px)");
+  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260812-newsroom-8";
+  const mobileQuery = window.matchMedia("(max-width: 1024px)");
   const mode = mobileQuery.matches ? "mobile" : "web";
   const template = document.querySelector(`#${mode}Template`);
 
@@ -16,6 +16,31 @@
 
   document.body.className = template.dataset.bodyClass || "";
   document.documentElement.classList.toggle("mobile-root", mode === "mobile");
+
+  const themePreferenceKey = "pna.console.theme";
+
+  function applyTheme(theme) {
+    const isLight = theme === "light";
+    document.body.classList.toggle("console-light", isLight);
+    document.body.classList.toggle("console-dark", !isLight);
+    const button = document.querySelector("#themeToggle");
+    if (button) {
+      button.textContent = isLight ? "深色" : "浅色";
+      button.setAttribute("aria-pressed", String(isLight));
+      button.setAttribute("aria-label", isLight ? "切换深色背景" : "切换浅色背景");
+    }
+  }
+
+  function savedTheme() {
+    try {
+      const storedTheme = localStorage.getItem(themePreferenceKey);
+      return storedTheme === "dark" ? "dark" : "light";
+    } catch (error) {
+      return "light";
+    }
+  }
+
+  applyTheme(savedTheme());
 
   const rootNode = document.createElement("div");
   rootNode.id = "react-root";
@@ -34,6 +59,17 @@
 
   function HomeShell() {
     React.useEffect(() => {
+      applyTheme(savedTheme());
+      const button = document.querySelector("#themeToggle");
+      button?.addEventListener("click", () => {
+        const nextTheme = document.body.classList.contains("console-light") ? "dark" : "light";
+        try {
+          localStorage.setItem(themePreferenceKey, nextTheme);
+        } catch (error) {
+          // Storage can be unavailable in private or embedded browser contexts.
+        }
+        applyTheme(nextTheme);
+      });
       loadPageScripts();
     }, []);
 

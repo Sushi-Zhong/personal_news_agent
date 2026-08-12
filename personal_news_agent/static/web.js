@@ -142,9 +142,10 @@ document.querySelector("#chatForm")?.addEventListener("submit", async (event) =>
   const input = document.querySelector("#message");
   const message = input.value.trim();
   if (!message) return;
+  input.value = "";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
   await handleAssistantInput(message);
   await loadTopics();
-  input.value = "";
 });
 
 document.querySelector("#taskForm")?.addEventListener("submit", async (event) => {
@@ -410,19 +411,15 @@ function applyTaskCommand(command) {
 
 async function loadSystemStatus() {
   try {
-    const data = await request("/api/news/search/backend");
-    document.querySelector("[data-es-status]").textContent = "本地新闻引擎 可用";
-    document.querySelector("[data-mysql-status]").textContent = `外部搜索工具 ${data.external_search_available ? "可用" : "未配置"}`;
+    await request("/api/news/search/backend");
   } catch (error) {
-    document.querySelector("[data-es-status]").textContent = "本地新闻引擎 暂不可用";
-    document.querySelector("[data-mysql-status]").textContent = "外部搜索工具 暂不可用";
+    console.warn("新闻搜索状态暂不可用", error);
   }
 }
 
 async function loadSourceSummary() {
   try {
     const data = await request("/api/sources/summary");
-    document.querySelector("[data-source-count]").textContent = `源 ${data.source_count || 0}`;
     document.querySelector("[data-metric-sources]").textContent = data.source_count || 0;
     document.querySelector("[data-metric-crawlable]").textContent = data.crawlable_sources || 0;
     document.querySelector("[data-metric-searchable]").textContent = data.searchable_sources || 0;
@@ -516,14 +513,15 @@ function startTopicAutoRefresh() {
 function updateTopicRefreshStatus(message, state) {
   const target = document.querySelector("[data-topic-refresh-status]");
   if (!target) return;
+  target.hidden = true;
   target.textContent = message;
   target.dataset.state = state || "";
 }
 
 function formatTopicRefreshTime(value) {
   const date = value ? new Date(value) : new Date();
-  if (Number.isNaN(date.getTime())) return "热点持续观察中";
-  return `${date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} 汇总 · 持续观察`;
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
 }
 
 function topicRecommendationStorageKey() {
@@ -701,7 +699,10 @@ async function loadTopicView() {
     const dialogContext = document.querySelector("[data-dialog-context]");
     if (heading) heading.textContent = "新对话";
     if (summary) summary.textContent = "发送第一句话后确定关注主题。";
-    if (visual) visual.innerHTML = `<div class="empty-state">暂无主题</div>`;
+    if (visual) {
+      visual.dataset.view = "event-line";
+      visual.innerHTML = `<div class="empty-state">暂无主题</div>`;
+    }
     if (dialogContext) dialogContext.textContent = "新对话";
     document.querySelector("[data-topic-article-count]").textContent = "0";
     document.querySelector("[data-topic-event-count]").textContent = "0";
@@ -1158,6 +1159,7 @@ function renderTopicHeader(payload) {
 function renderTopicVisual(payload, viewType = "event-line") {
   const target = document.querySelector("[data-topic-visual]");
   if (!target || !payload) return;
+  target.dataset.view = viewType;
   target.innerHTML = viewType === "relation-graph" ? relationGraphHtml(payload.relation_graph) : eventLineHtml(payload.event_line);
 }
 
@@ -1186,7 +1188,8 @@ function relationGraphHtml(graph) {
   const nodes = graph?.nodes || [];
   const edges = graph?.edges || [];
   if (!nodes.length) return `<div class="empty-state">暂无关系节点</div>`;
-  const positions = graphPositions(nodes, 760, 420);
+  const graphBox = { width: 900, height: 540 };
+  const positions = graphPositions(nodes, graphBox.width, graphBox.height);
   const lines = edges
     .map((edge) => {
       const source = positions[edge.source];
@@ -1206,16 +1209,27 @@ function relationGraphHtml(graph) {
       </g>`;
     })
     .join("");
-  return `<svg class="topic-relation-graph console-graph" viewBox="0 0 760 420" role="img" aria-label="专题关系网">${lines}${circles}</svg>`;
+  return `<svg class="topic-relation-graph console-graph" viewBox="0 0 900 540" preserveAspectRatio="xMidYMid meet" role="img" aria-label="专题关系网">${lines}${circles}</svg>`;
 }
 
 function renderEvidence(articles) {
   const target = document.querySelector("[data-evidence-strip]");
+  if (!target) return;
+  let list = target.querySelector(".evidence-list");
+  if (!list) {
+    target.innerHTML = `<summary>证据来源</summary><div class="evidence-list"></div>`;
+    list = target.querySelector(".evidence-list");
+  }
   if (!articles.length) {
-    target.innerHTML = `<div class="empty-state">暂无来源证据</div>`;
+    target.hidden = true;
+    target.open = false;
+    if (list) list.innerHTML = "";
     return;
   }
-  target.innerHTML = articles
+  target.hidden = false;
+  target.open = false;
+  if (!list) return;
+  list.innerHTML = articles
     .slice(0, 8)
     .map(
       (item) => `<article>
@@ -1368,10 +1382,11 @@ function graphPositions(nodes, width, height) {
   const center = { x: width / 2, y: height / 2 };
   const outer = nodes.filter((node) => node.id !== "topic");
   positions.topic = center;
+  const safeRadius = Math.max(52, Math.min(width, height) * 0.11);
   outer.forEach((node, index) => {
     const angle = (Math.PI * 2 * index) / Math.max(1, outer.length) - Math.PI / 2;
-    const rx = width * 0.36;
-    const ry = height * 0.34;
+    const rx = Math.max(safeRadius, width * 0.32);
+    const ry = Math.max(safeRadius, height * 0.30);
     positions[node.id] = { x: center.x + Math.cos(angle) * rx, y: center.y + Math.sin(angle) * ry };
   });
   return positions;

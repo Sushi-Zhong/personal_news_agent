@@ -5584,16 +5584,35 @@ body.console-shell {
 }
 
 .console-shell .rail-sticky-stack {
-  height: calc(100vh - 108px);
-  left: auto;
-  position: sticky;
+  grid-template-rows: auto minmax(0, auto);
+  left: max(14px, calc((100vw - 1920px) / 2 + 14px));
+  max-height: calc(100vh - 108px);
+  overflow-y: auto;
+  position: fixed;
   top: 88px;
-  width: auto;
+  width: 232px;
+  z-index: 4;
+}
+
+.console-shell .rail-sticky-stack .topic-nav {
+  max-height: min(560px, calc((100vh - 132px) * 0.64));
+}
+
+.console-shell .rail-sticky-stack .events-panel {
+  max-height: min(360px, calc((100vh - 132px) * 0.36));
 }
 
 .console-shell .console-rail .rail-panel {
   background: rgba(10, 31, 49, 0.96);
   border-color: rgba(103, 232, 249, 0.25);
+}
+
+.console-shell .insight-rail {
+  align-self: start;
+  max-height: calc(100vh - 108px);
+  overflow-y: auto;
+  position: sticky;
+  top: 88px;
 }
 
 .console-shell .topic-card.recommended-topic:not(.active) {
@@ -5782,20 +5801,289 @@ body.console-shell {
   scrollbar-width: thin;
 }
 
+.console-shell.console-light {
+  background:
+    radial-gradient(circle at 78% 8%, rgba(14, 165, 233, 0.12), transparent 26%),
+    radial-gradient(circle at 14% 82%, rgba(20, 184, 166, 0.1), transparent 30%),
+    linear-gradient(180deg, #ffffff 0%, #f5f8fb 48%, #edf3f7 100%);
+  color: #1f2933;
+  color-scheme: light;
+}
+
+.console-shell.console-light::before {
+  background-image:
+    linear-gradient(rgba(15, 23, 42, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.035) 1px, transparent 1px);
+}
+
+.console-shell.console-light .console-topbar {
+  background: rgba(255, 255, 255, 0.92);
+  border-bottom-color: rgba(15, 23, 42, 0.09);
+  backdrop-filter: blur(14px);
+}
+
+.console-shell.console-light .brand-block h1,
+.console-shell.console-light .dialog-header h2,
+.console-shell.console-light .rail-panel h2,
+.console-shell.console-light .topic-head h2,
+.console-shell.console-light .title,
+.console-shell.console-light .agent-brief-grid strong {
+  color: #111827;
+}
+
+.console-shell.console-light .brand-block p,
+.console-shell.console-light p,
+.console-shell.console-light .meta,
+.console-shell.console-light .summary,
+.console-shell.console-light .dialog-header p,
+.console-shell.console-light .status {
+  color: #667085;
+}
+
+.console-shell.console-light .top-actions a {
+  color: #155eef;
+}
+
+.console-shell.console-light button {
+  background: linear-gradient(135deg, #0ea5e9, #2563eb);
+  color: #ffffff;
+}
+
+.console-shell.console-light .secondary-button,
+.console-shell.console-light .prompt-suggestions button:not(:first-child),
+.console-shell.console-light .event-action-popover button {
+  background: #ffffff;
+  border-color: #cfdae6;
+  color: #1f2933;
+}
+
+.console-shell.console-light .rail-panel,
+.console-shell.console-light .command-panel,
+.console-shell.console-light .topic-workbench,
+.console-shell.console-light .conversation-panel,
+.console-shell.console-light .main-dialog,
+.console-shell.console-light .agent-drawer {
+  background: rgba(255, 255, 255, 0.94);
+  border-color: rgba(190, 203, 217, 0.88);
+  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.08);
+}
+
+.console-shell.console-light .console-rail .rail-panel,
+.console-shell.console-light .insight-rail .rail-panel,
+.console-shell.console-light .agent-drawer > .rail-panel,
+.console-shell.console-light .agent-drawer > .command-panel,
+.console-shell.console-light .agent-drawer > .topic-workbench {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: #d9e2ec;
+}
+
+.console-shell.console-light .topic-card,
+.console-shell.console-light .topic-card.system-topic:not(.active),
+.console-shell.console-light .topic-card.user-topic:nth-child(2n):not(.active),
+.console-shell.console-light .topic-card.user-topic:nth-child(2n + 1):not(.active),
+.console-shell.console-light .task-list article,
+.console-shell.console-light .notification-list article,
+.console-shell.console-light .deep-dive-output,
+.console-shell.console-light .agent-brief-grid article,
+.console-shell.console-light .source-tags span,
+.console-shell.console-light .context-dock span,
+.console-shell.console-light .follow-up-list button,
+.console-shell.console-light .entity-source-grid span,
+.console-shell.console-light .entity-source-grid a,
+.console-shell.console-light .item,
+.console-shell.console-light .title-only-list .item,
+.console-shell.console-light .evidence-strip article,
+.console-shell.console-light .due-url-list article,
+.console-shell.console-light .metric-grid article,
+.console-shell.console-light .topic-metrics article {
+  background: #f8fafc;
+  border-color: #e1e8ef;
+  color: #243142;
+}
+
+.console-shell.console-light .topic-card.topic-card-skeleton,
+.console-shell.console-light .topic-card.topic-card-skeleton:nth-child(n) {
+  background: #eef4f8 !important;
+  border-color: #dbe6ee !important;
+}
+
+.console-shell.console-light .topic-card span,
+.console-shell.console-light .title-only-list .item .title,
+.console-shell.console-light .assistant-markdown h3,
+.console-shell.console-light .assistant-markdown h4,
+.console-shell.console-light .assistant-markdown strong,
+.console-shell.console-light .chat-event strong,
+.console-shell.console-light .evidence-strip strong,
+.console-shell.console-light .due-url-list strong,
+.console-shell.console-light .entity-source-grid strong {
+  color: #111827;
+}
+
+.console-shell.console-light .topic-card small,
+.console-shell.console-light .chat-event time,
+.console-shell.console-light .evidence-strip span,
+.console-shell.console-light .due-url-list span,
+.console-shell.console-light .deep-section span,
+.console-shell.console-light .rail-empty,
+.console-shell.console-light .feed-panel .panel-head span {
+  color: #667085;
+}
+
+.console-shell.console-light .topic-card.recommended-topic:not(.active) {
+  background: #ecfeff !important;
+  border-color: #a5f3fc !important;
+  box-shadow: inset 4px 0 0 #06b6d4;
+}
+
+.console-shell.console-light .topic-card.topic-rising:not(.active) {
+  background: #eef4ff !important;
+  border-color: #c7d7fe !important;
+  box-shadow: inset 4px 0 0 #3b82f6;
+}
+
+.console-shell.console-light .topic-card.topic-lead:not(.active) {
+  background: #f8fafc !important;
+  border-color: #d9e2ec !important;
+  box-shadow: inset 3px 0 0 #94a3b8;
+}
+
+.console-shell.console-light .topic-card.active {
+  background: linear-gradient(135deg, #0891b2, #2563eb);
+  border-color: #0ea5e9;
+  color: #ffffff;
+}
+
+.console-shell.console-light .topic-card.active span {
+  color: #ffffff;
+}
+
+.console-shell.console-light .topic-card.active small {
+  color: #dbeafe;
+}
+
+.console-shell.console-light input,
+.console-shell.console-light select,
+.console-shell.console-light textarea,
+.console-shell.console-light .chat-model-control select {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  color: #1f2933;
+}
+
+.console-shell.console-light input::placeholder,
+.console-shell.console-light textarea::placeholder {
+  color: #98a2b3;
+}
+
+.console-shell.console-light .conversation-panel .hero-messages,
+.console-shell.console-light .messages.chat-stream {
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  border-color: #dbe5f0;
+}
+
+.console-shell.console-light .chat-assistant {
+  background: #ffffff;
+  border-color: #dfe6ef;
+}
+
+.console-shell.console-light .chat-assistant .chat-bubble,
+.console-shell.console-light .assistant-markdown,
+.console-shell.console-light .assistant-markdown p,
+.console-shell.console-light .assistant-markdown li,
+.console-shell.console-light .assistant-markdown td,
+.console-shell.console-light .assistant-markdown th,
+.console-shell.console-light .chat-event p,
+.console-shell.console-light .deep-section p {
+  color: #243142;
+}
+
+.console-shell.console-light .assistant-markdown a {
+  color: #155eef;
+}
+
+.console-shell.console-light .assistant-markdown > .answer-section,
+.console-shell.console-light .assistant-markdown blockquote,
+.console-shell.console-light .assistant-markdown th,
+.console-shell.console-light .agent-run-trace,
+.console-shell.console-light .research-trace {
+  background: #f8fafc;
+  border-color: #e1e8ef;
+}
+
+.console-shell.console-light .assistant-markdown code {
+  background: #edf2f7;
+  color: #164e63;
+}
+
+.console-shell.console-light .assistant-markdown pre {
+  background: #f8fafc;
+  border-color: #dbe5f0;
+}
+
+.console-shell.console-light .turn-actions button,
+.console-shell.console-light .turn-actions .copy-action,
+.console-shell.console-light .turn-actions .edit-action {
+  background: transparent;
+  border-color: transparent;
+  color: #667085;
+}
+
+.console-shell.console-light .turn-actions button:hover,
+.console-shell.console-light .turn-actions button:focus-visible,
+.console-shell.console-light .follow-up-list button:hover,
+.console-shell.console-light .follow-up-list button:focus,
+.console-shell.console-light .title-only-list .item:hover,
+.console-shell.console-light .title-only-list .item:focus {
+  background: #eef4ff;
+  border-color: #c7d7fe;
+  color: #155eef;
+}
+
+.console-shell.console-light .web-search-toggle,
+.console-shell.console-light .chat-model-control,
+.console-shell.console-light .agent-drawer > summary {
+  color: #344054;
+}
+
+.console-shell.console-light .web-search-toggle small,
+.console-shell.console-light .chat-model-control small {
+  color: #667085;
+}
+
+.console-shell.console-light .web-search-toggle input {
+  background: #cbd5e1;
+}
+
+.console-shell.console-light * {
+  scrollbar-color: #94a3b8 #edf2f7;
+}
+
 @media (max-width: 1380px) {
   .console-shell .news-console {
     grid-template-columns: 224px minmax(0, 1fr);
   }
 
+  .console-shell .rail-sticky-stack {
+    left: 14px;
+    width: 224px;
+  }
+
   .console-shell .insight-rail {
     grid-column: 2;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    max-height: none;
+    overflow: visible;
+    position: static;
   }
 }
 
 @media (max-width: 900px) {
   .console-shell .news-console {
     grid-template-columns: 196px minmax(0, 1fr);
+  }
+
+  .console-shell .rail-sticky-stack {
+    width: 196px;
   }
 
   .console-shell .insight-rail {
@@ -5918,5 +6206,276 @@ body.console-shell {
 
   .console-shell .conversation-command-bar .context-dock {
     justify-content: flex-start;
+  }
+}
+
+/* Stable console application shell: data changes scroll inside columns, never
+   by reshaping the page frame. */
+:root {
+  --console-header-height: 64px;
+  --console-left-width: 240px;
+  --console-right-width: 280px;
+  --console-gap: 16px;
+}
+
+html:has(body.console-shell),
+body.console-shell {
+  height: 100%;
+}
+
+body.console-shell {
+  overflow: hidden;
+}
+
+.console-shell #react-root,
+.console-shell .react-home-shell,
+.console-shell .react-home-shell-web {
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.console-shell .console-topbar {
+  box-sizing: border-box;
+  flex: 0 0 var(--console-header-height);
+  height: var(--console-header-height);
+  min-height: var(--console-header-height);
+  position: relative;
+  top: auto;
+  z-index: 10;
+}
+
+.console-shell .page-container {
+  box-sizing: border-box;
+  display: flex;
+  gap: var(--console-gap);
+  height: calc(100vh - var(--console-header-height));
+  margin: 0 auto;
+  max-width: 1920px;
+  overflow: hidden;
+  padding: 16px;
+  width: 100%;
+}
+
+.console-shell .left-sidebar {
+  flex-shrink: 0;
+  height: 100%;
+  overflow-y: auto;
+  width: 240px;
+}
+
+.console-shell .right-sidebar {
+  flex-shrink: 0;
+  height: 100%;
+  overflow-y: auto;
+  width: 280px;
+}
+
+.console-shell .left-sidebar,
+.console-shell .right-sidebar {
+  align-content: start;
+  box-sizing: border-box;
+  display: block;
+  flex-shrink: 0;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.console-shell .left-sidebar {
+  width: 240px;
+}
+
+.console-shell .right-sidebar {
+  width: 280px;
+}
+
+.console-shell .main-content {
+  box-sizing: border-box;
+  display: block;
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.console-shell .rail-sticky-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--console-gap);
+  height: 100%;
+  left: auto;
+  max-height: none;
+  min-height: 0;
+  overflow: visible;
+  position: static;
+  top: auto;
+  width: auto;
+  z-index: auto;
+}
+
+.console-shell .card {
+  background: #ffffff;
+  border: 1px solid #d9e2ec;
+  border-radius: 12px;
+  box-shadow: none;
+  box-sizing: border-box;
+  margin-bottom: 16px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 16px;
+}
+
+.console-shell .card:last-child {
+  margin-bottom: 0;
+}
+
+.console-shell .rail-sticky-stack .card {
+  margin-bottom: 0;
+}
+
+.console-shell .topic-nav {
+  flex: 0 0 42%;
+  min-height: 260px;
+}
+
+.console-shell .events-panel {
+  flex: 1 1 auto;
+  min-height: 240px;
+}
+
+.console-shell .feed-panel .feed-list,
+.console-shell .events-panel .list,
+.console-shell [data-topic-list],
+.console-shell .task-panel .title-only-list,
+.console-shell .notification-list,
+.console-shell .follow-up-list {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.console-shell .feed-panel .feed-list {
+  max-height: 240px;
+}
+
+.console-shell .events-panel .list {
+  max-height: none;
+}
+
+.console-shell .main-content .main-dialog {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+}
+
+.console-shell .main-content .messages.chat-stream {
+  height: auto;
+  max-height: none;
+  min-height: 360px;
+  overflow: visible;
+}
+
+.console-shell .card > h2,
+.console-shell .card .panel-head {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+  margin-bottom: 12px;
+  min-height: 36px;
+  padding-bottom: 12px;
+}
+
+.console-shell .panel-head.compact-head {
+  margin-bottom: 12px;
+}
+
+.console-shell .topic-card {
+  border-radius: 10px;
+  min-height: 64px;
+}
+
+.console-shell .topic-card span,
+.console-shell .title-only-list .item .title,
+.console-shell .task-list strong,
+.console-shell .notification-list strong,
+.console-shell .dialog-header h2 {
+  display: -webkit-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.console-shell .summary,
+.console-shell .assistant-markdown p,
+.console-shell .chat-event p {
+  display: -webkit-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+}
+
+.console-shell .follow-up-list button {
+  min-height: 62px;
+  overflow: hidden;
+}
+
+.console-shell .right-sidebar .task-mini-form {
+  display: grid;
+}
+
+body.console-shell.console-light {
+  background: linear-gradient(180deg, #ffffff 0%, #f5f8fb 48%, #eaf3f6 100%);
+}
+
+.console-shell.console-light .card,
+.console-shell.console-light .conversation-panel,
+.console-shell.console-light .main-dialog,
+.console-shell.console-light .rail-panel {
+  background: #ffffff;
+  border-color: #d9e2ec;
+}
+
+@media (max-width: 1180px) {
+  :root {
+    --console-left-width: 220px;
+    --console-right-width: 260px;
+  }
+
+  .console-shell .left-sidebar {
+    width: 220px;
+  }
+
+  .console-shell .right-sidebar {
+    width: 260px;
+  }
+
+  .console-shell .main-content {
+    padding: 18px;
+  }
+}
+
+@media (max-width: 900px) {
+  .console-shell .page-container {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .console-shell .left-sidebar {
+    width: 200px;
+  }
+
+  .console-shell .right-sidebar {
+    width: 232px;
+  }
+
+  .console-shell .main-content {
+    padding: 14px;
   }
 }
