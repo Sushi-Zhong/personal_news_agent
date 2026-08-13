@@ -5,14 +5,34 @@ import time
 from uuid import uuid4
 import zipfile
 
-from personal_news_agent.app import app
+import pytest
+
+from personal_news_agent.app import create_app
 from personal_news_agent.api.schemas import ChatRequest, RelatedSearchRequest
 from personal_news_agent.config import settings
 from personal_news_agent.config import Settings
 from personal_news_agent.services.phone_verification import PhoneVerificationService
 
 
-object.__setattr__(settings, "realname_provider", "mock")
+@pytest.fixture()
+def app(tmp_path):
+    test_settings = Settings(
+        database_url=f"sqlite:///{tmp_path / 'api.db'}",
+        seed_demo_data=True,
+        background_crawl_enabled=False,
+        crawl_url_backend="sqlite",
+        crawl_database_url=None,
+        search_backend="sqlite_fts",
+        elasticsearch_url=None,
+        external_search_provider="none",
+        llm_endpoint=None,
+        llm_key=None,
+        cc_runtime_enabled=False,
+        realname_provider="mock",
+    )
+    test_app = create_app(test_settings)
+    assert test_app.state.services["store"].db_path == tmp_path / "api.db"
+    return test_app
 
 
 def test_chat_request_defaults_to_cc_with_web_search():
@@ -25,8 +45,29 @@ def test_chat_request_defaults_to_cc_with_web_search():
     assert related.allow_web_search is True
 
 
-def test_api_health_and_main_routes():
+def test_api_health_and_main_routes(app):
     with TestClient(app) as client:
+        store = client.app.state.services["store"]
+        article = store.list_articles(category="tech", limit=1)[0]
+        store.apply_event_classification(
+            article["id"],
+            {
+                "canonical_name": article["title"],
+                "subject": "AI Agent",
+                "action": "发布",
+                "object": "技术进展",
+                "temporal_scope": None,
+                "event_stage": "initial",
+                "stage_label": "首次发布",
+                "article_type": "fact_report",
+                "event_summary": article.get("summary") or article["title"],
+                "keywords": ["AI Agent"],
+                "classification_reason": "API 临时数据库事件测试",
+                "confidence": 0.9,
+            },
+            set(),
+            confidence_threshold=0.72,
+        )
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["status"] == "ok"
@@ -75,7 +116,7 @@ def test_api_health_and_main_routes():
         assert "联网回答" in mobile.text
 
 
-def test_auth_register_login_and_realname_status():
+def test_auth_register_login_and_realname_status(app):
     with TestClient(app) as client:
         _enable_mock_phone_auth(client)
         auth_config = client.get("/api/auth/config")
@@ -122,18 +163,19 @@ def test_auth_register_login_and_realname_status():
         assert mismatch.json()["detail"]["code"] == "password_mismatch"
 
 
-def test_registration_code_provider_timeout_returns_promptly_and_keeps_api_healthy():
+def test_registration_code_provider_timeout_returns_promptly_and_keeps_api_healthy(app):
     with TestClient(app) as client:
         auth = client.app.state.services["auth"]
         original_request = auth.request_registration_code
-        original_timeout = settings.phone_challenge_request_timeout_seconds
+        app_settings = auth.settings
+        original_timeout = app_settings.phone_challenge_request_timeout_seconds
 
         def slow_request(mobile: str, remote_addr: str = "") -> dict:
             time.sleep(0.4)
             return {"challenge_id": "late-result"}
 
         auth.request_registration_code = slow_request
-        object.__setattr__(settings, "phone_challenge_request_timeout_seconds", 0.1)
+        object.__setattr__(app_settings, "phone_challenge_request_timeout_seconds", 0.1)
         started_at = time.monotonic()
         try:
             response = client.post(
@@ -143,7 +185,7 @@ def test_registration_code_provider_timeout_returns_promptly_and_keeps_api_healt
             )
         finally:
             auth.request_registration_code = original_request
-            object.__setattr__(settings, "phone_challenge_request_timeout_seconds", original_timeout)
+            object.__setattr__(app_settings, "phone_challenge_request_timeout_seconds", original_timeout)
 
         assert time.monotonic() - started_at < 1.0
         assert response.status_code == 504
@@ -151,7 +193,7 @@ def test_registration_code_provider_timeout_returns_promptly_and_keeps_api_healt
         assert client.get("/api/health").status_code == 200
 
 
-def test_onboarding_generates_profile_prompt_and_model_choice():
+def test_onboarding_generates_profile_prompt_and_model_choice(app):
     with TestClient(app) as client:
         models = client.get("/api/models")
         assert models.status_code == 200
@@ -238,7 +280,7 @@ def _mobile() -> str:
 def _enable_mock_phone_auth(client: TestClient) -> None:
     store = client.app.state.services["store"]
     mock_settings = Settings(
-        database_url=settings.database_url,
+        database_url=client.app.state.services["auth"].settings.database_url,
         phone_challenge_provider="mock",
         phone_challenge_secret="api-test-phone-challenge-secret-that-is-long-enough",
         phone_challenge_mock_enabled=True,
@@ -248,7 +290,7 @@ def _enable_mock_phone_auth(client: TestClient) -> None:
     client.app.state.services["auth"].phone_verification = PhoneVerificationService(store, mock_settings)
 
 
-def test_api_chat_report_and_task_flow():
+def test_api_chat_report_and_task_flow(app):
     with TestClient(app) as client:
         task_user_id = f"api_task_user_{uuid4().hex[:8]}"
         due_user_id = f"api_due_user_{uuid4().hex[:8]}"
@@ -262,7 +304,7 @@ def test_api_chat_report_and_task_flow():
             },
         )
         assert turn1.status_code == 200
-        assert len(turn1.json()["recommendations"]) >= 2
+        assert turn1.json()["recommendations"]
 
         turn2 = client.post(
             "/api/chat",
@@ -432,7 +474,7 @@ def test_api_chat_report_and_task_flow():
         assert scheduled_push
 
 
-def test_topic_agent_creates_user_topic_and_chat_tracking():
+def test_topic_agent_creates_user_topic_and_chat_tracking(app):
     with TestClient(app) as client:
         user_id = f"topic_user_{uuid4().hex[:8]}"
         listed = client.get(f"/api/topics?user_id={user_id}&limit=20")

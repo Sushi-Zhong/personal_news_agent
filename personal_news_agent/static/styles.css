@@ -1181,7 +1181,16 @@ input {
 .mermaid-viewer-body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
+  height: 100%;
   min-height: 0;
+}
+
+.mermaid-viewer-stage {
+  align-self: stretch;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .mermaid-viewer-canvas {
@@ -1190,7 +1199,10 @@ input {
   background-size: 20px 20px;
   display: flex;
   justify-content: center;
+  flex: 1 1 auto;
+  height: 100%;
   min-height: 0;
+  min-width: 0;
   overflow: auto;
   padding: 28px;
 }

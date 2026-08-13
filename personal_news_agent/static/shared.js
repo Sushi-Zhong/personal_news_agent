@@ -486,6 +486,7 @@ async function sendChatIntoTurn(message, assistantNode, target = "#messages") {
   const chatContext = window.currentChatContext || {};
   const targetNode = document.querySelector(target) || document.querySelector("#messages");
   targetNode.classList.add("chat-stream");
+  scrollChatToBottom(targetNode, "auto", { force: true });
   const payload = {
     conversation_id: conversationId,
     user_id: activeUserId || "default",
@@ -574,7 +575,7 @@ async function restoreChatMemory(target = "#messages") {
     });
     localStorage.removeItem(chatMemoryKey());
     if (typeof window.applyChatConversationContext === "function") {
-      window.applyChatConversationContext(data.context || {});
+      window.applyChatConversationContext(data.context || {}, { forceTopic: true, reloadTopicView: true });
     }
     scrollChatToBottom(targetNode, "auto");
     return true;
@@ -690,7 +691,7 @@ async function streamChat(payload, assistantNode, targetNode) {
         throw new Error(event.message || "流式请求失败");
       }
       assistantNode.innerHTML = chatStreamingHtml(state);
-      scrollChatToBottom(targetNode, "auto");
+      scrollChatToBottom(targetNode, "auto", { force: true });
     }
   }
   return null;
@@ -1604,7 +1605,36 @@ function sanitizeMermaidSource(code) {
 }
 
 let mermaidInitialized = false;
+let mermaidTheme = null;
 let mermaidSequence = 0;
+
+function currentMermaidTheme() {
+  return document.body.classList.contains("console-dark") ? "dark" : "base";
+}
+
+function ensureMermaidTheme() {
+  if (!window.mermaid) return;
+  const theme = currentMermaidTheme();
+  if (mermaidInitialized && mermaidTheme === theme) return;
+  window.mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme,
+    themeVariables: theme === "base" ? {
+      background: "#ffffff",
+      primaryColor: "#eef5ff",
+      primaryTextColor: "#172033",
+      primaryBorderColor: "#bfd2f1",
+      lineColor: "#6b7a90",
+      secondaryColor: "#f8fbff",
+      tertiaryColor: "#ffffff",
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', sans-serif",
+    } : undefined,
+    flowchart: { htmlLabels: false, curve: "basis" },
+  });
+  mermaidInitialized = true;
+  mermaidTheme = theme;
+}
 
 async function mountMermaidDiagrams(root) {
   if (!root) return;
@@ -1618,15 +1648,7 @@ async function mountMermaidDiagrams(root) {
     });
     return;
   }
-  if (!mermaidInitialized) {
-    window.mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: "dark",
-      flowchart: { htmlLabels: false, curve: "basis" },
-    });
-    mermaidInitialized = true;
-  }
+  ensureMermaidTheme();
   for (const node of diagrams) {
     node.dataset.rendered = "running";
     const source = node.dataset.mermaidSource || "";
@@ -1646,6 +1668,17 @@ async function mountMermaidDiagrams(root) {
     }
   }
 }
+
+
+document.addEventListener("pna:themechange", () => {
+  const rendered = document.querySelectorAll(".chat-mermaid[data-rendered]");
+  rendered.forEach((node) => {
+    node.removeAttribute("data-rendered");
+    const canvas = node.querySelector(".chat-mermaid-canvas");
+    if (canvas) canvas.textContent = "";
+  });
+  mountMermaidDiagrams(document);
+});
 
 function bindMermaidPreview(node, source) {
   if (node.dataset.viewerBound === "true") return;
@@ -1669,9 +1702,17 @@ function ensureMermaidViewer() {
   dialog.id = "mermaidViewerDialog";
   dialog.className = "mermaid-viewer-dialog";
   dialog.innerHTML = `<div class="mermaid-viewer-shell">
-    <header><div><span>EVENT GRAPH</span><h2>事件图谱</h2><p>点击节点，将它带回当前对话继续搜索或事实核查。</p></div><button type="button" data-mermaid-close aria-label="关闭大图">×</button></header>
+    <header><div><span>图谱</span><h2>事件图谱</h2><p>选择节点后可继续追问或核查。</p></div><button type="button" data-mermaid-close aria-label="关闭大图">×</button></header>
     <div class="mermaid-viewer-body">
-      <div class="mermaid-viewer-canvas" aria-label="放大的事件图谱"></div>
+      <div class="mermaid-viewer-stage">
+        <div class="mermaid-viewer-controls" aria-label="图谱缩放控制">
+          <button type="button" data-mermaid-zoom="out" aria-label="缩小图谱">−</button>
+          <span data-mermaid-zoom-value>100%</span>
+          <button type="button" data-mermaid-zoom="in" aria-label="放大图谱">+</button>
+          <button type="button" data-mermaid-zoom="reset">复位</button>
+        </div>
+        <div class="mermaid-viewer-canvas" aria-label="放大的事件图谱"></div>
+      </div>
       <aside class="mermaid-node-actions">
         <span>当前节点</span>
         <strong data-mermaid-selected>请在图中选择一个节点</strong>
@@ -1704,6 +1745,135 @@ function ensureMermaidViewer() {
   return dialog;
 }
 
+function clampNumber(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function applyMermaidTransform(canvas, state) {
+  const svg = canvas?.querySelector("svg");
+  const value = canvas?.closest(".mermaid-viewer-shell")?.querySelector("[data-mermaid-zoom-value]");
+  if (!svg) return;
+  const stageWidth = state.baseWidth || svg.viewBox?.baseVal?.width || svg.getBoundingClientRect().width || 1;
+  const stageHeight = state.baseHeight || svg.viewBox?.baseVal?.height || svg.getBoundingClientRect().height || 1;
+  svg.style.width = `${Math.round(stageWidth * state.scale)}px`;
+  svg.style.height = `${Math.round(stageHeight * state.scale)}px`;
+  svg.style.marginLeft = `${Math.round(state.x)}px`;
+  svg.style.marginTop = `${Math.round(state.y)}px`;
+  if (value) value.textContent = `${Math.round(state.scale * 100)}%`;
+}
+
+function selectMermaidNode(dialog, canvas, node) {
+  if (!dialog || !canvas || !node) return;
+  canvas.querySelectorAll(".node.is-selected").forEach((item) => item.classList.remove("is-selected"));
+  node.classList.add("is-selected");
+  const label = mermaidNodeLabel(node);
+  dialog.dataset.selectedNode = label;
+  const selected = dialog.querySelector("[data-mermaid-selected]");
+  if (selected) selected.textContent = label;
+  dialog.querySelectorAll("[data-mermaid-action]").forEach((button) => { button.disabled = !label; });
+}
+
+function fitMermaidToStage(canvas) {
+  const svg = canvas?.querySelector("svg");
+  if (!canvas || !svg) return 1;
+  const stage = canvas.getBoundingClientRect();
+  const viewBox = svg.viewBox?.baseVal;
+  const graph = svg.getBoundingClientRect();
+  const svgWidth = viewBox?.width || svg.width?.baseVal?.value || graph.width || 1;
+  const svgHeight = viewBox?.height || svg.height?.baseVal?.value || graph.height || 1;
+  const availableWidth = Math.max(320, stage.width - 72);
+  const availableHeight = Math.max(260, stage.height - 72);
+  const widthScale = availableWidth / svgWidth;
+  const heightScale = availableHeight / svgHeight;
+  const scale = Math.min(widthScale, heightScale);
+  return clampNumber(scale, 0.72, 1.85);
+}
+
+function bindMermaidPanZoom(dialog, canvas) {
+  if (!dialog || !canvas) return;
+  if (canvas.dataset.panZoomBound === "true") {
+    canvas.mermaidPanZoomReset?.();
+    return;
+  }
+  canvas.dataset.panZoomBound = "true";
+  const svg = canvas.querySelector("svg");
+  const viewBox = svg?.viewBox?.baseVal;
+  const state = {
+    scale: 1,
+    fitScale: 1,
+    baseWidth: viewBox?.width || svg?.getBoundingClientRect().width || 1,
+    baseHeight: viewBox?.height || svg?.getBoundingClientRect().height || 1,
+    x: 0,
+    y: 0,
+    dragging: false,
+    moved: false,
+    lastX: 0,
+    lastY: 0,
+  };
+  const setScale = (nextScale) => {
+    state.scale = clampNumber(nextScale, Math.min(0.45, state.fitScale), 2.8);
+    applyMermaidTransform(canvas, state);
+  };
+  const reset = () => {
+    state.fitScale = fitMermaidToStage(canvas);
+    state.scale = state.fitScale;
+    state.x = 0;
+    state.y = 0;
+    state.baseWidth = svg?.viewBox?.baseVal?.width || state.baseWidth;
+    state.baseHeight = svg?.viewBox?.baseVal?.height || state.baseHeight;
+    applyMermaidTransform(canvas, state);
+  };
+  canvas.mermaidPanZoomReset = reset;
+  dialog.querySelectorAll("[data-mermaid-zoom]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const action = button.dataset.mermaidZoom;
+      if (action === "in") setScale(state.scale + 0.15);
+      else if (action === "out") setScale(state.scale - 0.15);
+      else reset();
+    });
+  });
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    setScale(state.scale + (event.deltaY < 0 ? 0.12 : -0.12));
+  }, { passive: false });
+  canvas.addEventListener("pointerdown", (event) => {
+    if (event.button !== undefined && event.button !== 0) return;
+    if (event.target?.closest?.("[data-mermaid-node]")) return;
+    state.dragging = true;
+    state.moved = false;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    canvas.setPointerCapture?.(event.pointerId);
+    canvas.classList.add("is-panning");
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!state.dragging) return;
+    const dx = event.clientX - state.lastX;
+    const dy = event.clientY - state.lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 1) state.moved = true;
+    state.x += dx;
+    state.y += dy;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    applyMermaidTransform(canvas, state);
+  });
+  const endDrag = (event) => {
+    if (!state.dragging) return;
+    state.dragging = false;
+    canvas.releasePointerCapture?.(event.pointerId);
+    canvas.classList.remove("is-panning");
+    if (state.moved) {
+      canvas.dataset.panMoved = "true";
+      window.setTimeout(() => { delete canvas.dataset.panMoved; }, 80);
+    }
+  };
+  canvas.addEventListener("pointerup", endDrag);
+  canvas.addEventListener("pointercancel", endDrag);
+  canvas.addEventListener("dblclick", reset);
+  window.addEventListener("resize", reset);
+  reset();
+}
+
 async function openMermaidViewer(source) {
   const dialog = ensureMermaidViewer();
   const canvas = dialog.querySelector(".mermaid-viewer-canvas");
@@ -1715,31 +1885,29 @@ async function openMermaidViewer(source) {
   if (typeof dialog.showModal === "function") dialog.showModal();
   else dialog.setAttribute("open", "");
   if (!window.mermaid || !canvas) return;
+  ensureMermaidTheme();
   try {
     mermaidSequence += 1;
     const result = await window.mermaid.render(`pna_mermaid_viewer_${mermaidSequence}`, source);
     canvas.innerHTML = result.svg;
+    bindMermaidPanZoom(dialog, canvas);
     canvas.querySelectorAll(".node").forEach((node) => {
+      node.dataset.mermaidNode = "true";
       node.setAttribute("tabindex", "0");
       node.setAttribute("role", "button");
       node.setAttribute("aria-label", `选择节点 ${mermaidNodeLabel(node)}`);
     });
-    const selectNode = (node) => {
-      if (!node) return;
-      canvas.querySelectorAll(".node.is-selected").forEach((item) => item.classList.remove("is-selected"));
-      node.classList.add("is-selected");
-      const label = mermaidNodeLabel(node);
-      dialog.dataset.selectedNode = label;
-      if (selected) selected.textContent = label;
-      dialog.querySelectorAll("[data-mermaid-action]").forEach((button) => { button.disabled = !label; });
+    canvas.onclick = (event) => {
+      if (canvas.dataset.panMoved === "true") return;
+      const target = event.target?.closest?.("[data-mermaid-node]");
+      if (target) selectMermaidNode(dialog, canvas, target);
     };
-    canvas.onclick = (event) => selectNode(event.target.closest?.(".node"));
     canvas.onkeydown = (event) => {
       if (event.key === "Enter" || event.key === " ") {
-        const node = event.target.closest?.(".node");
+        const node = event.target?.closest?.("[data-mermaid-node]");
         if (node) {
           event.preventDefault();
-          selectNode(node);
+          selectMermaidNode(dialog, canvas, node);
         }
       }
     };
@@ -1912,7 +2080,7 @@ function bindSlashCommandMenu(inputSelector = "#message") {
   form.appendChild(menu);
 
   let visibleCommands = [];
-  let activeIndex = 0;
+  let activeIndex = -1;
 
   const closeMenu = () => {
     menu.hidden = true;
@@ -1921,6 +2089,7 @@ function bindSlashCommandMenu(inputSelector = "#message") {
 
   const selectCommand = (command) => {
     input.value = `/${command.name} `;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
     closeMenu();
     input.focus();
   };
@@ -1939,20 +2108,21 @@ function bindSlashCommandMenu(inputSelector = "#message") {
       closeMenu();
       return;
     }
-    activeIndex = Math.min(activeIndex, visibleCommands.length - 1);
+    if (activeIndex >= visibleCommands.length) activeIndex = visibleCommands.length - 1;
     menu.innerHTML = `
       ${visibleCommands.map((command, index) => `
-        <button type="button" id="slash-command-${command.name}" class="slash-command-item${index === activeIndex ? " active" : ""}" role="option" aria-selected="${index === activeIndex}" data-slash-command="${command.name}">
+        <button type="button" id="slash-command-${command.name}" class="slash-command-item${activeIndex === index ? " active" : ""}" role="option" aria-selected="${activeIndex === index}" data-slash-command="${command.name}">
           <span class="slash-command-copy"><strong>/${command.name}</strong><span>${command.label}</span></span>
         </button>
       `).join("")}
     `;
     menu.hidden = false;
-    input.setAttribute("aria-activedescendant", `slash-command-${visibleCommands[activeIndex].name}`);
+    if (activeIndex >= 0) input.setAttribute("aria-activedescendant", `slash-command-${visibleCommands[activeIndex].name}`);
+    else input.removeAttribute("aria-activedescendant");
   };
 
   input.addEventListener("input", () => {
-    activeIndex = 0;
+    activeIndex = -1;
     renderMenu();
   });
   input.addEventListener("keydown", (event) => {
@@ -1960,9 +2130,11 @@ function bindSlashCommandMenu(inputSelector = "#message") {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const direction = event.key === "ArrowDown" ? 1 : -1;
-      activeIndex = (activeIndex + direction + visibleCommands.length) % visibleCommands.length;
+      if (activeIndex < 0) activeIndex = 0;
+      else activeIndex = (activeIndex + direction + visibleCommands.length) % visibleCommands.length;
       renderMenu();
     } else if (event.key === "Enter" || event.key === "Tab") {
+      if (activeIndex < 0) return;
       event.preventDefault();
       selectCommand(visibleCommands[activeIndex]);
     } else if (event.key === "Escape") {

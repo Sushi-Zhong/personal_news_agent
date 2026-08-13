@@ -14,6 +14,7 @@ from personal_news_agent.services.trending_topics import (
     _balanced_title_rows,
     _normalize_batch_payload,
 )
+from tests.test_event_aggregation import _classification
 
 
 class FakeTrendingLLM:
@@ -97,6 +98,34 @@ def _store(tmp_path) -> NewsStore:
         }
     )
     return store
+
+
+def test_confirmed_event_is_authoritative_for_trending_id_and_metadata(tmp_path):
+    store = _store(tmp_path)
+    store.save_article(_article("sport_1", "sina", "武大靖正式出任主教练", "sports", 0.5))
+    event = store.apply_event_classification(
+        "sport_1", _classification(), set(), confidence_threshold=0.72
+    )
+    llm = FakeTrendingLLM(
+        [{
+            "category": "sports",
+            "title": "AI 本轮改写的近义热点标题",
+            "summary": "武大靖出任国家队主教练。",
+            "keywords": ["武大靖", "主教练"],
+            "article_ids": ["sport_1"],
+            "confidence": 0.95,
+        }]
+    )
+
+    result = asyncio.run(TrendingTopicService(store, llm=llm).recommend("sports_user", limit=1))
+
+    item = result["items"][0]
+    assert item["id"] == event["topic_id"]
+    assert item["event_key"] == event["event_key"]
+    assert item["title"] == "武大靖出任中国短道速滑队主教练"
+    assert item["stages"] == [{"stage": "announced", "label": "正式官宣", "article_count": 1}]
+    assert item["article_types"] == [{"type": "official_statement", "article_count": 1}]
+    assert item["summary_revision"] == 1
 
 
 def test_trending_topics_use_title_window_and_system_heat_metrics(tmp_path):

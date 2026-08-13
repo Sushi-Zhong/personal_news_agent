@@ -476,7 +476,7 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
 
     @app.get("/api/events")
     async def list_events(category: str | None = None, limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
-        clusters = events.discover(category=category, limit=limit)
+        clusters = events.list_events(category=category, limit=limit)
         return {"items": [_event_payload(item) for item in clusters]}
 
     @app.post("/api/chat")

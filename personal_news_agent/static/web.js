@@ -7,10 +7,6 @@ if (activeUserId === "default") {
 const topicStorageKey = () => `pna_current_topic:${activeUserId || "default"}`;
 const TOPIC_CONTEXT_VERSION = 1;
 const savedTopicContext = readSavedTopicContext();
-if (!savedTopicContext.topic) {
-  conversationId = null;
-  localStorage.removeItem("pna_conversation_id");
-}
 
 const consoleState = {
   topic: savedTopicContext.topic,
@@ -33,6 +29,7 @@ const bootstrapTopics = [
   { title: "大型体育赛事运营", category_scope: ["sports"], topic_type: "system" },
 ];
 syncChatContext();
+syncTopicShell();
 syncContextDock();
 
 document.querySelector("#refresh")?.addEventListener("click", () => refreshWeb());
@@ -42,6 +39,11 @@ document.querySelector("#newTopicConversation")?.addEventListener("click", start
 document.querySelector("#openConfig")?.addEventListener("click", async () => {
   document.querySelector("#configDialog").showModal();
   await loadProfileIntoForm("#onboardingForm");
+});
+
+document.querySelector("[data-close-config]")?.addEventListener("click", () => {
+  const dialog = document.querySelector("#configDialog");
+  if (dialog?.open) dialog.close();
 });
 
 document.querySelector("#onboardingForm")?.addEventListener("submit", async (event) => {
@@ -162,11 +164,15 @@ window.handleAssistantInput = handleAssistantInput;
 window.applyChatConversationContext = applyChatConversationContext;
 window.handleChatResponseSideEffects = handleWebChatResponseSideEffects;
 window.refreshTopics = loadTopics;
-restoreChatMemory("#messages");
 window.handleAssistantInput = handleAssistantInput;
 startTaskPushPolling();
 startTopicAutoRefresh();
-refreshWeb();
+initializeNewsroom();
+
+async function initializeNewsroom() {
+  await restoreChatMemory("#messages");
+  await refreshWeb();
+}
 
 async function initializeUserProfileState() {
   try {
@@ -525,7 +531,7 @@ function formatTopicRefreshTime(value) {
 }
 
 function topicRecommendationStorageKey() {
-  return `pna_recommended_topics_v2:${activeUserId || "default"}`;
+  return `pna_recommended_topics_v3:${activeUserId || "default"}`;
 }
 
 function readTopicRecommendationSnapshot() {
@@ -546,17 +552,15 @@ function stabilizeRecommendedTopics(incoming, generatedAt) {
   if (topicRecommendationSnapshot.generatedAt === generatedAt && topicRecommendationSnapshot.items?.length) {
     return topicRecommendationSnapshot.items;
   }
-  const incomingById = new Map(incoming.map((item) => [item.id, item]));
   const retained = (topicRecommendationSnapshot.items || [])
     .filter((item) => now - Number(item.first_recommended_at || topicRecommendationSnapshot.savedAt || 0) < TOPIC_RECOMMENDATION_RETENTION_MS)
     .map((item) => ({
       ...item,
-      ...(incomingById.get(item.id) || {}),
+      ...(incoming.find((candidate) => sameRecommendedEvent(item, candidate)) || {}),
       first_recommended_at: item.first_recommended_at || topicRecommendationSnapshot.savedAt || now,
     }));
-  const retainedIds = new Set(retained.map((item) => item.id));
   const fresh = incoming
-    .filter((item) => !retainedIds.has(item.id))
+    .filter((item) => !retained.some((existing) => sameRecommendedEvent(existing, item)))
     .map((item) => ({ ...item, first_recommended_at: now }));
   const newHot = fresh.filter((item) => item.evidence_level === "hot").slice(0, 1);
   const newHotIds = new Set(newHot.map((item) => item.id));
@@ -576,6 +580,17 @@ function stabilizeRecommendedTopics(incoming, generatedAt) {
   };
   localStorage.setItem(topicRecommendationStorageKey(), JSON.stringify(topicRecommendationSnapshot));
   return selected;
+}
+
+function sameRecommendedEvent(existing, incoming) {
+  if (existing.id && existing.id === incoming.id) return true;
+  if (existing.event_key && existing.event_key === incoming.event_key) return true;
+  return articleIdsOverlap(existing.article_ids, incoming.article_ids);
+}
+
+function articleIdsOverlap(left = [], right = []) {
+  const articleIds = new Set(left || []);
+  return (right || []).some((articleId) => articleIds.has(articleId));
 }
 
 function composeTopicItems(persisted, recommended = []) {
@@ -691,6 +706,7 @@ async function loadTasks() {
 
 async function loadTopicView() {
   syncChatContext();
+  syncTopicShell();
   if (!consoleState.topic) {
     consoleState.topicPayload = null;
     const heading = document.querySelector("[data-topic-heading]");
@@ -712,15 +728,17 @@ async function loadTopicView() {
     syncContextDock();
     return;
   }
+  const requestedTopic = consoleState.topic;
   try {
     const payload = await request("/api/topics/view", {
       method: "POST",
       body: JSON.stringify({
-        topic: consoleState.topic,
+        topic: requestedTopic,
         category_scope: consoleState.categoryScope,
         max_articles: 18,
       }),
     });
+    if (requestedTopic !== consoleState.topic) return;
     consoleState.topicPayload = payload;
     renderTopicHeader(payload);
     renderTopicVisual(payload, consoleState.view);
@@ -1449,10 +1467,11 @@ function syncChatContext() {
   };
 }
 
-function applyChatConversationContext(context = {}) {
+function applyChatConversationContext(context = {}, options = {}) {
+  const previousTopic = consoleState.topic;
   if (Object.prototype.hasOwnProperty.call(context, "topic")) {
     const nextTopic = cleanSkillTopicTitle(context.topic || "");
-    if (nextTopic && topicLocked && nextTopic !== consoleState.topic) return;
+    if (nextTopic && topicLocked && nextTopic !== consoleState.topic && !options.forceTopic) return;
     if (nextTopic) {
       consoleState.topic = nextTopic;
       if (!pendingTopicFromNextMessage) topicLocked = true;
@@ -1467,6 +1486,9 @@ function applyChatConversationContext(context = {}) {
   syncChatContext();
   syncContextDock();
   syncTaskTopic();
+  if (options.reloadTopicView && previousTopic !== consoleState.topic) {
+    loadTopicView().catch(() => {});
+  }
 }
 
 function cleanSkillTopicTitle(value) {
@@ -1485,6 +1507,7 @@ function cleanSkillTopicTitle(value) {
   return topic;
 }
 function syncContextDock() {
+  syncTopicShell();
   const category = document.querySelector("[data-current-category-chip]");
   const view = document.querySelector("[data-current-view-chip]");
   if (category) {
@@ -1493,6 +1516,22 @@ function syncContextDock() {
   }
   if (view) view.textContent = `视图 · ${consoleState.view === "relation-graph" ? "关系网" : "事件线"}`;
   updateAgentBrief(consoleState.topicPayload);
+}
+
+function syncTopicShell() {
+  const label = currentTopicLabel();
+  const topicHeading = document.querySelector("[data-topic-heading]");
+  const dialogContext = document.querySelector("[data-dialog-context]");
+  if (topicHeading) {
+    topicHeading.textContent = label;
+    topicHeading.title = label;
+  }
+  if (dialogContext && !consoleState.topicPayload) {
+    dialogContext.textContent = consoleState.topic ? `${label} · 正在加载专题证据。` : "发送第一句话后确定关注主题。";
+    dialogContext.title = dialogContext.textContent;
+  }
+  updateAgentBrief(consoleState.topicPayload);
+  syncTaskTopic();
 }
 
 function updateAgentBrief(payload) {

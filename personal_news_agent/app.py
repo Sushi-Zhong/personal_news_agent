@@ -13,15 +13,16 @@ from personal_news_agent.services.factory import build_services
 from personal_news_agent.services.source_registry import SourceRegistryError
 from claude_code_backend import create_local_agent_router
 
-def create_app() -> FastAPI:
-    services = build_services(settings)
-    app = FastAPI(title=settings.app_name)
+def create_app(app_settings=None) -> FastAPI:
+    app_settings = app_settings or settings
+    services = build_services(app_settings)
+    app = FastAPI(title=app_settings.app_name)
     app.state.services = services
     app.include_router(create_local_agent_router(services["local_agent"]))
 
     static_dir = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
-    register_routes(app, services, static_dir, settings)
+    register_routes(app, services, static_dir, app_settings)
 
     @app.on_event("startup")
     async def startup() -> None:
@@ -46,15 +47,15 @@ def create_app() -> FastAPI:
             await search_index.ensure_index()
         except Exception as exc:
             store.log("search_index_init", "error", "elasticsearch", {"error": str(exc)})
-        if settings.seed_demo_data:
+        if app_settings.seed_demo_data:
             store.seed_demo_articles()
         services["topic_agent"].seed_system_topics()
         events.discover(limit=20)
         app.state.trending_topic_task = asyncio.create_task(
-            _trending_topic_loop(services, settings.trending_topic_refresh_seconds)
+            _trending_topic_loop(services, app_settings.trending_topic_refresh_seconds)
         )
-        if settings.background_crawl_enabled:
-            app.state.background_crawl_task = asyncio.create_task(_background_crawl_loop(services, settings.background_crawl_interval_seconds))
+        if app_settings.background_crawl_enabled:
+            app.state.background_crawl_task = asyncio.create_task(_background_crawl_loop(services, app_settings.background_crawl_interval_seconds))
 
     @app.on_event("shutdown")
     async def shutdown() -> None:

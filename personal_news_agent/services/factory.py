@@ -71,7 +71,11 @@ def build_services(settings: Settings) -> dict[str, Any]:
     )
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
     content_moderation = TextModerationPlusService()
-    topic_extraction = TopicExtractionService(store)
+    topic_extraction = TopicExtractionService(
+        store,
+        llm=llm_client,
+        confidence_threshold=settings.event_classification_confidence_threshold,
+    )
 
     skill_registry = build_default_registry()
     services: dict[str, Any] = {

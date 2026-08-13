@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,15 @@ from typing import Any, Iterator
 from personal_news_agent.core.categories import CATEGORIES
 from personal_news_agent.core.models import NormalizedArticle, SourceConfig, TopicCluster
 from personal_news_agent.core.text import content_hash, extract_entities, extract_keywords, stable_id, summarize
+from personal_news_agent.services.event_identity import (
+    ARTICLE_TYPES,
+    EVENT_STAGES,
+    FACTUAL_ARTICLE_TYPES,
+    EventFingerprint,
+    confirmed_event_key,
+    pending_article_event_key,
+    pending_legacy_topic_event_key,
+)
 
 
 SCHEMA = """
@@ -71,7 +81,16 @@ CREATE TABLE IF NOT EXISTS news_topics (
   first_seen_at TEXT NOT NULL,
   last_seen_at TEXT NOT NULL,
   article_count INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'active'
+  status TEXT NOT NULL DEFAULT 'active',
+  canonical_name TEXT,
+  primary_category TEXT,
+  category_scope_json TEXT DEFAULT '[]',
+  event_date TEXT,
+  identity_status TEXT NOT NULL DEFAULT 'pending',
+  merged_into_topic_id TEXT,
+  active_fingerprint_id TEXT,
+  summary_revision INTEGER NOT NULL DEFAULT 0,
+  projection_state TEXT NOT NULL DEFAULT 'dirty'
 );
 CREATE INDEX IF NOT EXISTS idx_news_topics_recent ON news_topics(category, last_seen_at);
 CREATE TABLE IF NOT EXISTS news_topic_articles (
@@ -81,6 +100,12 @@ CREATE TABLE IF NOT EXISTS news_topic_articles (
   event_summary TEXT NOT NULL,
   confidence REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
+  event_stage TEXT NOT NULL DEFAULT 'unknown',
+  stage_label TEXT,
+  article_type TEXT NOT NULL DEFAULT 'unknown',
+  classification_reason TEXT,
+  classification_source TEXT NOT NULL DEFAULT 'legacy',
+  classified_at TEXT,
   FOREIGN KEY(topic_id) REFERENCES news_topics(id)
 );
 CREATE INDEX IF NOT EXISTS idx_news_topic_articles_topic ON news_topic_articles(topic_id);
@@ -111,7 +136,9 @@ CREATE TABLE IF NOT EXISTS topic_clusters (
   hot_score REAL,
   first_seen_at TEXT,
   latest_seen_at TEXT,
-  status TEXT DEFAULT 'active'
+  status TEXT DEFAULT 'active',
+  projection_version TEXT,
+  projected_at TEXT
 );
 CREATE TABLE IF NOT EXISTS event_timelines (
   id TEXT PRIMARY KEY,
@@ -121,7 +148,65 @@ CREATE TABLE IF NOT EXISTS event_timelines (
   event_summary TEXT,
   actors_json TEXT,
   source_article_ids_json TEXT,
-  confidence REAL DEFAULT 0.0
+  confidence REAL DEFAULT 0.0,
+  topic_id TEXT,
+  article_id TEXT,
+  event_stage TEXT NOT NULL DEFAULT 'unknown',
+  article_type TEXT NOT NULL DEFAULT 'unknown',
+  projection_version TEXT,
+  projected_at TEXT
+);
+CREATE TABLE IF NOT EXISTS news_event_fingerprints (
+  id TEXT PRIMARY KEY,
+  topic_id TEXT NOT NULL,
+  key_kind TEXT NOT NULL,
+  algorithm_version TEXT NOT NULL,
+  normalized_payload_json TEXT NOT NULL,
+  fingerprint_hash TEXT NOT NULL,
+  event_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  superseded_at TEXT,
+  FOREIGN KEY(topic_id) REFERENCES news_topics(id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_fingerprints_active_confirmed
+ON news_event_fingerprints(algorithm_version, fingerprint_hash)
+WHERE status = 'active' AND key_kind = 'confirmed';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_fingerprints_topic_version
+ON news_event_fingerprints(topic_id, algorithm_version)
+WHERE status = 'active' AND key_kind = 'confirmed';
+CREATE TABLE IF NOT EXISTS news_topic_summary_revisions (
+  id TEXT PRIMARY KEY,
+  topic_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  summary TEXT NOT NULL,
+  source_article_ids_json TEXT NOT NULL,
+  stage_snapshot_json TEXT NOT NULL,
+  generation_source TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(topic_id, revision),
+  FOREIGN KEY(topic_id) REFERENCES news_topics(id)
+);
+CREATE TABLE IF NOT EXISTS news_event_classification_audits (
+  id TEXT PRIMARY KEY,
+  attempt_id TEXT NOT NULL,
+  article_id TEXT NOT NULL,
+  candidate_topic_ids_json TEXT NOT NULL,
+  from_topic_id TEXT,
+  to_topic_id TEXT,
+  decision TEXT NOT NULL,
+  event_key TEXT,
+  algorithm_version TEXT,
+  event_stage TEXT,
+  article_type TEXT,
+  confidence REAL,
+  classification_source TEXT,
+  reason_code TEXT,
+  reason_text TEXT,
+  model_key TEXT,
+  schema_version TEXT,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS user_profiles (
   user_id TEXT PRIMARY KEY,
@@ -332,6 +417,7 @@ class NewsStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._deferred_classification_audits: list[dict[str, Any]] = []
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -354,13 +440,159 @@ class NewsStore:
             self._ensure_pna_profile_columns(conn)
             self._ensure_conversation_turn_columns(conn)
             self._ensure_topic_columns(conn)
+            self._ensure_news_event_columns(conn)
             self._ensure_news_topic_article_columns(conn)
+            self._ensure_event_projection_columns(conn)
             self._ensure_scheduled_task_columns(conn)
+            self._backfill_legacy_event_identity(conn)
 
     def _ensure_news_topic_article_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(news_topic_articles)").fetchall()}
-        if "subject" not in existing:
-            conn.execute("ALTER TABLE news_topic_articles ADD COLUMN subject TEXT")
+        columns = {
+            "subject": "TEXT",
+            "event_stage": "TEXT NOT NULL DEFAULT 'unknown'",
+            "stage_label": "TEXT",
+            "article_type": "TEXT NOT NULL DEFAULT 'unknown'",
+            "classification_reason": "TEXT",
+            "classification_source": "TEXT NOT NULL DEFAULT 'legacy'",
+            "classified_at": "TEXT",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE news_topic_articles ADD COLUMN {name} {definition}")
+
+    def _ensure_news_event_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(news_topics)").fetchall()}
+        columns = {
+            "canonical_name": "TEXT",
+            "primary_category": "TEXT",
+            "category_scope_json": "TEXT DEFAULT '[]'",
+            "event_date": "TEXT",
+            "identity_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "merged_into_topic_id": "TEXT",
+            "active_fingerprint_id": "TEXT",
+            "summary_revision": "INTEGER NOT NULL DEFAULT 0",
+            "projection_state": "TEXT NOT NULL DEFAULT 'dirty'",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                conn.execute(f"ALTER TABLE news_topics ADD COLUMN {name} {definition}")
+        conn.execute("DROP TRIGGER IF EXISTS trg_news_topics_confirmed_requires_fingerprint_insert")
+        conn.execute("DROP TRIGGER IF EXISTS trg_news_topics_confirmed_requires_fingerprint_update")
+        conn.execute(
+            """CREATE TRIGGER trg_news_topics_confirmed_requires_fingerprint_insert
+               BEFORE INSERT ON news_topics WHEN NEW.identity_status = 'confirmed' AND NOT EXISTS (
+                 SELECT 1 FROM news_event_fingerprints f
+                 WHERE f.id = NEW.active_fingerprint_id AND f.topic_id = NEW.id
+                   AND f.key_kind = 'confirmed' AND f.status = 'active'
+               )
+               BEGIN SELECT RAISE(ABORT, 'confirmed topic requires active fingerprint'); END"""
+        )
+        conn.execute(
+            """CREATE TRIGGER trg_news_topics_confirmed_requires_fingerprint_update
+               BEFORE UPDATE OF identity_status, active_fingerprint_id ON news_topics
+               WHEN NEW.identity_status = 'confirmed' AND NOT EXISTS (
+                 SELECT 1 FROM news_event_fingerprints f
+                 WHERE f.id = NEW.active_fingerprint_id AND f.topic_id = NEW.id
+                   AND f.key_kind = 'confirmed' AND f.status = 'active'
+               )
+               BEGIN SELECT RAISE(ABORT, 'confirmed topic requires active fingerprint'); END"""
+        )
+        conn.execute("DROP TRIGGER IF EXISTS trg_event_fingerprint_protect_confirmed_update")
+        conn.execute("DROP TRIGGER IF EXISTS trg_event_fingerprint_protect_confirmed_delete")
+        conn.execute(
+            """CREATE TRIGGER trg_event_fingerprint_protect_confirmed_update
+               BEFORE UPDATE ON news_event_fingerprints
+               WHEN EXISTS (
+                 SELECT 1 FROM news_topics t
+                 WHERE t.active_fingerprint_id = OLD.id AND t.identity_status = 'confirmed'
+               ) AND (
+                 NEW.id != OLD.id OR NEW.topic_id != OLD.topic_id OR NEW.key_kind != OLD.key_kind
+                 OR NEW.algorithm_version != OLD.algorithm_version
+                 OR NEW.normalized_payload_json != OLD.normalized_payload_json
+                 OR NEW.fingerprint_hash != OLD.fingerprint_hash OR NEW.event_key != OLD.event_key
+                 OR NEW.status != OLD.status
+               )
+               BEGIN SELECT RAISE(ABORT, 'active confirmed fingerprint is referenced'); END"""
+        )
+        conn.execute(
+            """CREATE TRIGGER trg_event_fingerprint_protect_confirmed_delete
+               BEFORE DELETE ON news_event_fingerprints
+               WHEN EXISTS (
+                 SELECT 1 FROM news_topics t
+                 WHERE t.active_fingerprint_id = OLD.id AND t.identity_status = 'confirmed'
+               )
+               BEGIN SELECT RAISE(ABORT, 'active confirmed fingerprint is referenced'); END"""
+        )
+
+    def _ensure_event_projection_columns(self, conn: sqlite3.Connection) -> None:
+        cluster_columns = {row["name"] for row in conn.execute("PRAGMA table_info(topic_clusters)").fetchall()}
+        for name, definition in {"projection_version": "TEXT", "projected_at": "TEXT"}.items():
+            if name not in cluster_columns:
+                conn.execute(f"ALTER TABLE topic_clusters ADD COLUMN {name} {definition}")
+        timeline_columns = {row["name"] for row in conn.execute("PRAGMA table_info(event_timelines)").fetchall()}
+        columns = {
+            "topic_id": "TEXT",
+            "article_id": "TEXT",
+            "event_stage": "TEXT NOT NULL DEFAULT 'unknown'",
+            "article_type": "TEXT NOT NULL DEFAULT 'unknown'",
+            "projection_version": "TEXT",
+            "projected_at": "TEXT",
+        }
+        for name, definition in columns.items():
+            if name not in timeline_columns:
+                conn.execute(f"ALTER TABLE event_timelines ADD COLUMN {name} {definition}")
+        conn.execute(
+            """DELETE FROM event_timelines
+               WHERE topic_id IS NOT NULL AND article_id IS NOT NULL AND rowid NOT IN (
+                 SELECT MAX(rowid) FROM event_timelines
+                 WHERE topic_id IS NOT NULL AND article_id IS NOT NULL
+                 GROUP BY topic_id, article_id
+               )"""
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_event_timelines_topic_article ON event_timelines(topic_id, article_id)"
+        )
+
+    def _backfill_legacy_event_identity(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """SELECT * FROM news_topics
+               WHERE active_fingerprint_id IS NULL AND status IN ('active', 'merged')"""
+        ).fetchall()
+        for topic in rows:
+            fingerprint = pending_legacy_topic_event_key(topic["id"])
+            fingerprint_id = self._insert_event_fingerprint(conn, topic["id"], fingerprint)
+            revision = int(topic["summary_revision"] or 0)
+            if topic["summary"] and revision == 0:
+                revision = 1
+                article_ids = [
+                    row["article_id"]
+                    for row in conn.execute(
+                        "SELECT article_id FROM news_topic_articles WHERE topic_id = ? ORDER BY created_at, article_id",
+                        (topic["id"],),
+                    ).fetchall()
+                ]
+                conn.execute(
+                    """INSERT INTO news_topic_summary_revisions(
+                         id, topic_id, revision, summary, source_article_ids_json, stage_snapshot_json,
+                         generation_source, reason_code, created_at
+                       ) VALUES (?, ?, 1, ?, ?, '[]', 'migration', 'created', ?)""",
+                    (
+                        stable_id("summaryrev", f"{topic['id']}:1"),
+                        topic["id"],
+                        topic["summary"],
+                        json.dumps(article_ids, ensure_ascii=False),
+                        _now(),
+                    ),
+                )
+            conn.execute(
+                """UPDATE news_topics SET identity_status = 'pending', active_fingerprint_id = ?,
+                     canonical_name = COALESCE(canonical_name, name),
+                     primary_category = COALESCE(primary_category, category),
+                     summary_revision = ?, projection_state = 'dirty'
+                   WHERE id = ?""",
+                (fingerprint_id, revision, topic["id"]),
+            )
 
     def _ensure_news_source_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(news_sources)").fetchall()}
@@ -713,6 +945,48 @@ class NewsStore:
             item["keywords"] = json.loads(item.get("keywords_json") or "[]")
         return items
 
+    def list_event_candidates(
+        self,
+        article: dict[str, Any],
+        *,
+        days: int = 5,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        cutoff = _dt(datetime.now(timezone.utc) - timedelta(days=days))
+        title = str(article.get("title") or "")
+        with self.connect() as conn:
+            same_category_rows = conn.execute(
+                """SELECT t.* FROM news_topics t
+                   WHERE t.status = 'active' AND t.last_seen_at >= ? AND t.category = ?
+                   ORDER BY t.last_seen_at DESC LIMIT ?""",
+                (cutoff, article["category"], limit),
+            ).fetchall()
+            cross_category_rows = conn.execute(
+                """SELECT DISTINCT t.* FROM news_topics t
+                   JOIN news_topic_articles ta ON ta.topic_id = t.id
+                   WHERE t.status = 'active' AND t.last_seen_at >= ? AND t.category != ?
+                     AND length(trim(COALESCE(ta.subject, ''))) >= 2
+                     AND instr(?, trim(ta.subject)) > 0
+                   ORDER BY t.last_seen_at DESC LIMIT ?""",
+                (cutoff, article["category"], title, limit),
+            ).fetchall()
+        same_category: list[dict[str, Any]] = []
+        for row in same_category_rows:
+            item = _row(row)
+            item["keywords"] = json.loads(item.get("keywords_json") or "[]")
+            same_category.append(item)
+        cross_category: list[dict[str, Any]] = []
+        for row in cross_category_rows:
+            item = _row(row)
+            item["keywords"] = json.loads(item.get("keywords_json") or "[]")
+            cross_category.append(item)
+
+        # Reserve capacity for explicit-subject cross-category matches so a
+        # noisy source section cannot hide the correct event candidate.
+        cross_category = cross_category[:limit]
+        same_capacity = max(0, limit - len(cross_category))
+        return [*same_category[:same_capacity], *cross_category]
+
     def list_trending_news_topics(
         self,
         window_hours: int = 24,
@@ -755,6 +1029,70 @@ class NewsStore:
             item["article_ids"] = [value for value in str(item.pop("article_ids_csv", "") or "").split(",") if value]
         return items
 
+    def list_canonical_events(self, category: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        clauses = ["t.status = 'active'"]
+        params: list[Any] = []
+        if category:
+            clauses.append("COALESCE(t.primary_category, t.category) = ?")
+            params.append(category)
+        params.append(limit)
+        with self.connect() as conn:
+            topics = conn.execute(
+                f"""SELECT t.*, f.event_key, f.algorithm_version AS fingerprint_version
+                    FROM news_topics t
+                    LEFT JOIN news_event_fingerprints f ON f.id = t.active_fingerprint_id
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY t.last_seen_at DESC LIMIT ?""",
+                params,
+            ).fetchall()
+            items: list[dict[str, Any]] = []
+            for topic in topics:
+                rows = conn.execute(
+                    """SELECT a.id, a.source_id, ta.event_stage, ta.stage_label, ta.article_type
+                       FROM news_topic_articles ta JOIN news_articles a ON a.id = ta.article_id
+                       WHERE ta.topic_id = ? AND a.status = 'active'
+                       ORDER BY COALESCE(a.published_at, a.fetched_at)""",
+                    (topic["id"],),
+                ).fetchall()
+                stage_counts: dict[tuple[str, str | None], int] = {}
+                type_counts: dict[str, int] = {}
+                for row in rows:
+                    stage_key = (row["event_stage"], row["stage_label"])
+                    stage_counts[stage_key] = stage_counts.get(stage_key, 0) + 1
+                    type_counts[row["article_type"]] = type_counts.get(row["article_type"], 0) + 1
+                item = _row(topic)
+                item.update(
+                    {
+                        "title": item.get("canonical_name") or item["name"],
+                        "category": item.get("primary_category") or item["category"],
+                        "category_scope": json.loads(item.get("category_scope_json") or "[]"),
+                        "keywords": json.loads(item.get("keywords_json") or "[]"),
+                        "article_ids": [row["id"] for row in rows],
+                        "source_count": len({row["source_id"] for row in rows}),
+                        "article_count": len(rows),
+                        "hot_score": round(min(1.0, 0.1 + 0.25 * len({row['source_id'] for row in rows}) + 0.08 * len(rows)), 4),
+                        "stages": [
+                            {"stage": stage, "label": label, "article_count": count}
+                            for (stage, label), count in stage_counts.items()
+                        ],
+                        "article_types": [
+                            {"type": article_type, "article_count": count}
+                            for article_type, count in type_counts.items()
+                        ],
+                    }
+                )
+                items.append(item)
+        return items
+
+    def prune_event_projections(self) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "DELETE FROM event_timelines WHERE topic_id NOT IN (SELECT id FROM news_topics WHERE status = 'active')"
+            )
+            conn.execute(
+                "DELETE FROM topic_clusters WHERE id NOT IN (SELECT id FROM news_topics WHERE status = 'active')"
+            )
+
     def merge_article_into_news_topic(self, article_id: str, extraction: dict[str, Any], allowed_topic_ids: set[str]) -> dict[str, Any]:
         now = _now()
         category = str(extraction["category"])
@@ -790,6 +1128,716 @@ class NewsStore:
                 (article_id, topic_id, extraction["subject"], extraction["event_summary"], float(extraction.get("confidence") or 0), now),
             )
         return {"topic_id": topic_id, "merged": bool(exists), "already_processed": False}
+
+    def get_active_event_fingerprint(self, topic_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT f.* FROM news_event_fingerprints f
+                   JOIN news_topics t ON t.active_fingerprint_id = f.id
+                   WHERE t.id = ? AND f.status = 'active'""",
+                (topic_id,),
+            ).fetchone()
+        return _fingerprint_row(row) if row else None
+
+    def resolve_event_key(self, event_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT f.*, t.status AS topic_status, t.merged_into_topic_id
+                   FROM news_event_fingerprints f JOIN news_topics t ON t.id = f.topic_id
+                   WHERE f.event_key = ? LIMIT 1""",
+                (event_key,),
+            ).fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            topic_id = data["topic_id"]
+            seen: set[str] = set()
+            while data.get("topic_status") == "merged" and data.get("merged_into_topic_id"):
+                if topic_id in seen:
+                    raise ValueError("event topic merge cycle detected")
+                seen.add(topic_id)
+                topic_id = data["merged_into_topic_id"]
+                topic = conn.execute(
+                    "SELECT status AS topic_status, merged_into_topic_id FROM news_topics WHERE id = ?",
+                    (topic_id,),
+                ).fetchone()
+                if not topic:
+                    raise ValueError("merged event alias points to missing topic")
+                data.update(dict(topic))
+            data["topic_id"] = topic_id
+        return data
+
+    def apply_event_classification(
+        self,
+        article_id: str,
+        extraction: dict[str, Any],
+        candidate_topic_ids: set[str],
+        *,
+        confidence_threshold: float,
+        classification_source: str = "llm",
+    ) -> dict[str, Any]:
+        delays = (0.05, 0.15, 0.35)
+        for attempt in range(len(delays) + 1):
+            try:
+                return self._apply_event_classification_once(
+                    article_id,
+                    extraction,
+                    candidate_topic_ids,
+                    confidence_threshold=confidence_threshold,
+                    classification_source=classification_source,
+                )
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                if attempt < len(delays):
+                    time.sleep(delays[attempt])
+                    continue
+                self._record_failed_classification(
+                    article_id,
+                    extraction,
+                    candidate_topic_ids,
+                    classification_source,
+                    "sqlite_lock_exhausted",
+                    str(exc),
+                )
+                raise
+        raise RuntimeError("unreachable event classification retry state")
+
+    def _apply_event_classification_once(
+        self,
+        article_id: str,
+        extraction: dict[str, Any],
+        candidate_topic_ids: set[str],
+        *,
+        confidence_threshold: float,
+        classification_source: str = "llm",
+    ) -> dict[str, Any]:
+        event_stage = str(extraction.get("event_stage") or "unknown")
+        article_type = str(extraction.get("article_type") or "unknown")
+        if event_stage not in EVENT_STAGES:
+            raise ValueError("invalid event stage")
+        if article_type not in ARTICLE_TYPES:
+            raise ValueError("invalid article type")
+        requested_id = extraction.get("existing_topic_id")
+        if requested_id and requested_id not in candidate_topic_ids:
+            raise ValueError("model returned a topic id outside candidate_events")
+        confidence = float(extraction.get("confidence") or 0)
+        attempt_id = stable_id("attempt", f"{article_id}:{_now()}")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self.flush_deferred_classification_audits(conn)
+            article = conn.execute("SELECT * FROM news_articles WHERE id = ?", (article_id,)).fetchone()
+            if not article:
+                raise ValueError("article not found")
+            existing_link = conn.execute(
+                "SELECT topic_id FROM news_topic_articles WHERE article_id = ?", (article_id,)
+            ).fetchone()
+            if existing_link:
+                topic = conn.execute("SELECT * FROM news_topics WHERE id = ?", (existing_link["topic_id"],)).fetchone()
+                if topic["identity_status"] == "pending" and confidence >= confidence_threshold:
+                    return self._reclassify_pending_article(
+                        conn,
+                        article,
+                        topic,
+                        extraction,
+                        candidate_topic_ids,
+                        attempt_id,
+                        confidence,
+                        classification_source,
+                    )
+                fingerprint = self._active_fingerprint_in_conn(conn, existing_link["topic_id"])
+                self._insert_classification_audit(
+                    conn, attempt_id, article_id, candidate_topic_ids, existing_link["topic_id"], existing_link["topic_id"],
+                    "idempotent", fingerprint, extraction, confidence, classification_source, "already_processed",
+                )
+                return self._event_result(topic, fingerprint, merged=True, already_processed=True)
+
+            fingerprint: EventFingerprint | dict[str, Any]
+            topic = None
+            decision = "created"
+            identity_status = "confirmed" if confidence >= confidence_threshold else "pending"
+            if requested_id and identity_status == "confirmed":
+                topic = conn.execute(
+                    "SELECT * FROM news_topics WHERE id = ? AND status = 'active'", (requested_id,)
+                ).fetchone()
+                if not topic:
+                    raise ValueError("candidate event is not active")
+                fingerprint = self._active_fingerprint_in_conn(conn, requested_id)
+                if topic["identity_status"] != "confirmed" or not fingerprint:
+                    raise ValueError("existing confirmed event has no active fingerprint")
+                identity_status = "confirmed"
+                decision = "merged"
+            elif identity_status == "confirmed":
+                fingerprint = confirmed_event_key(
+                    subject=str(extraction.get("subject") or ""),
+                    action=str(extraction.get("action") or ""),
+                    object_=str(extraction.get("object") or ""),
+                    temporal_scope=extraction.get("temporal_scope"),
+                )
+                if not all(fingerprint.normalized_payload.get(key) for key in ("subject_key", "action_key", "object_key")):
+                    raise ValueError("confirmed event fingerprint fields are required")
+                matched = conn.execute(
+                    """SELECT t.* FROM news_event_fingerprints f JOIN news_topics t ON t.id = f.topic_id
+                       WHERE f.algorithm_version = ? AND f.fingerprint_hash = ?
+                         AND f.status = 'active' AND f.key_kind = 'confirmed'""",
+                    (fingerprint.algorithm_version, fingerprint.fingerprint_hash),
+                ).fetchone()
+                if matched:
+                    topic_id = self._resolve_topic_id_in_conn(conn, matched["id"])
+                    topic = conn.execute(
+                        "SELECT * FROM news_topics WHERE id = ? AND status = 'active'", (topic_id,)
+                    ).fetchone()
+                    fingerprint = self._active_fingerprint_in_conn(conn, topic_id)
+                    decision = "conflict_reused"
+            else:
+                fingerprint = pending_article_event_key(article_id)
+                decision = "pending"
+
+            if topic is None:
+                topic_id = stable_id("ntp", fingerprint.event_key)
+                now = _now()
+                name = " ".join(str(extraction.get("canonical_name") or extraction.get("topic_name") or article["title"]).split())[:120]
+                category = str(article["category"])
+                conn.execute(
+                    """INSERT INTO news_topics(
+                         id, category, name, summary, keywords_json, first_seen_at, last_seen_at,
+                         article_count, status, canonical_name, primary_category, category_scope_json,
+                         event_date, identity_status, summary_revision, projection_state
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?, 'pending', 0, 'dirty')""",
+                    (
+                        topic_id, category, name, None, json.dumps(extraction.get("keywords") or [], ensure_ascii=False),
+                        now, now, name, category, json.dumps([category], ensure_ascii=False),
+                        extraction.get("temporal_scope"),
+                    ),
+                )
+                fingerprint_id = self._insert_event_fingerprint(conn, topic_id, fingerprint)
+                if identity_status == "confirmed":
+                    conn.execute(
+                        "UPDATE news_topics SET active_fingerprint_id = ?, identity_status = 'confirmed' WHERE id = ?",
+                        (fingerprint_id, topic_id),
+                    )
+                else:
+                    conn.execute("UPDATE news_topics SET active_fingerprint_id = ? WHERE id = ?", (fingerprint_id, topic_id))
+                topic = conn.execute("SELECT * FROM news_topics WHERE id = ?", (topic_id,)).fetchone()
+                fingerprint = self._active_fingerprint_in_conn(conn, topic_id)
+
+            topic_id = topic["id"]
+            now = _now()
+            conn.execute(
+                """INSERT INTO news_topic_articles(
+                     article_id, topic_id, subject, event_summary, confidence, created_at,
+                     event_stage, stage_label, article_type, classification_reason,
+                     classification_source, classified_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    article_id, topic_id, extraction.get("subject"), extraction.get("event_summary") or article["title"],
+                    confidence, now, event_stage, extraction.get("stage_label"), article_type,
+                    extraction.get("classification_reason"), classification_source, now,
+                ),
+            )
+            self._recalculate_event_topic(conn, topic_id)
+            if topic["identity_status"] == "confirmed" or identity_status == "confirmed":
+                self._update_event_summary(conn, topic_id, article_id, extraction, article_type, event_stage, classification_source)
+            self._insert_classification_audit(
+                conn, attempt_id, article_id, candidate_topic_ids, None, topic_id, decision,
+                fingerprint, extraction, confidence, classification_source, decision,
+            )
+            topic = conn.execute("SELECT * FROM news_topics WHERE id = ?", (topic_id,)).fetchone()
+            fingerprint = self._active_fingerprint_in_conn(conn, topic_id)
+        return self._event_result(topic, fingerprint, merged=decision != "created", already_processed=False)
+
+    def _reclassify_pending_article(
+        self,
+        conn: sqlite3.Connection,
+        article: sqlite3.Row,
+        pending_topic: sqlite3.Row,
+        extraction: dict[str, Any],
+        candidate_topic_ids: set[str],
+        attempt_id: str,
+        confidence: float,
+        classification_source: str,
+    ) -> dict[str, Any]:
+        requested_id = extraction.get("existing_topic_id")
+        target = None
+        fingerprint: EventFingerprint | dict[str, Any]
+        if requested_id:
+            target = conn.execute(
+                "SELECT * FROM news_topics WHERE id = ? AND status = 'active' AND identity_status = 'confirmed'",
+                (requested_id,),
+            ).fetchone()
+            fingerprint = self._active_fingerprint_in_conn(conn, requested_id)
+            if not target or not fingerprint:
+                raise ValueError("existing confirmed event has no active fingerprint")
+        else:
+            fingerprint = confirmed_event_key(
+                subject=str(extraction.get("subject") or ""),
+                action=str(extraction.get("action") or ""),
+                object_=str(extraction.get("object") or ""),
+                temporal_scope=extraction.get("temporal_scope"),
+            )
+            if not all(fingerprint.normalized_payload.get(key) for key in ("subject_key", "action_key", "object_key")):
+                raise ValueError("confirmed event fingerprint fields are required")
+            target = conn.execute(
+                """SELECT t.* FROM news_event_fingerprints f JOIN news_topics t ON t.id = f.topic_id
+                   WHERE f.algorithm_version = ? AND f.fingerprint_hash = ?
+                     AND f.status = 'active' AND f.key_kind = 'confirmed'""",
+                (fingerprint.algorithm_version, fingerprint.fingerprint_hash),
+            ).fetchone()
+            if target:
+                target_id = self._resolve_topic_id_in_conn(conn, target["id"])
+                target = conn.execute(
+                    "SELECT * FROM news_topics WHERE id = ? AND status = 'active'", (target_id,)
+                ).fetchone()
+                fingerprint = self._active_fingerprint_in_conn(conn, target_id)
+
+        if target is None:
+            target_id = stable_id("ntp", fingerprint.event_key)
+            now = _now()
+            name = " ".join(str(extraction.get("canonical_name") or extraction.get("topic_name") or article["title"]).split())[:120]
+            category = str(article["category"])
+            conn.execute(
+                """INSERT INTO news_topics(
+                     id, category, name, summary, keywords_json, first_seen_at, last_seen_at,
+                     article_count, status, canonical_name, primary_category, category_scope_json,
+                     event_date, identity_status, summary_revision, projection_state
+                   ) VALUES (?, ?, ?, NULL, ?, ?, ?, 0, 'active', ?, ?, ?, ?, 'pending', 0, 'dirty')""",
+                (
+                    target_id,
+                    category,
+                    name,
+                    json.dumps(extraction.get("keywords") or [], ensure_ascii=False),
+                    now,
+                    now,
+                    name,
+                    category,
+                    json.dumps([category], ensure_ascii=False),
+                    extraction.get("temporal_scope"),
+                ),
+            )
+            fingerprint_id = self._insert_event_fingerprint(conn, target_id, fingerprint)
+            conn.execute(
+                "UPDATE news_topics SET active_fingerprint_id = ?, identity_status = 'confirmed' WHERE id = ?",
+                (fingerprint_id, target_id),
+            )
+            target = conn.execute("SELECT * FROM news_topics WHERE id = ?", (target_id,)).fetchone()
+            fingerprint = self._active_fingerprint_in_conn(conn, target_id)
+
+        old_topic_id = pending_topic["id"]
+        target_id = target["id"]
+        now = _now()
+        conn.execute(
+            """UPDATE news_topic_articles SET topic_id = ?, subject = ?, event_summary = ?, confidence = ?,
+                 event_stage = ?, stage_label = ?, article_type = ?, classification_reason = ?,
+                 classification_source = ?, classified_at = ? WHERE article_id = ?""",
+            (
+                target_id,
+                extraction.get("subject"),
+                extraction.get("event_summary") or article["title"],
+                confidence,
+                extraction.get("event_stage") or "unknown",
+                extraction.get("stage_label"),
+                extraction.get("article_type") or "unknown",
+                extraction.get("classification_reason"),
+                classification_source,
+                now,
+                article["id"],
+            ),
+        )
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM news_topic_articles WHERE topic_id = ?", (old_topic_id,)
+        ).fetchone()[0]
+        if remaining == 0:
+            conn.execute(
+                "UPDATE news_topics SET status = 'merged', merged_into_topic_id = ?, projection_state = 'dirty' WHERE id = ?",
+                (target_id, old_topic_id),
+            )
+            conn.execute(
+                "UPDATE news_event_fingerprints SET status = 'superseded', superseded_at = ? WHERE topic_id = ? AND status = 'active'",
+                (now, old_topic_id),
+            )
+        self._recalculate_event_topic(conn, old_topic_id)
+        self._recalculate_event_topic(conn, target_id)
+        self._update_event_summary(
+            conn,
+            target_id,
+            article["id"],
+            extraction,
+            str(extraction.get("article_type") or "unknown"),
+            str(extraction.get("event_stage") or "unknown"),
+            classification_source,
+        )
+        self._insert_classification_audit(
+            conn,
+            attempt_id,
+            article["id"],
+            candidate_topic_ids,
+            old_topic_id,
+            target_id,
+            "reclassified",
+            fingerprint,
+            extraction,
+            confidence,
+            classification_source,
+            "pending_confirmed",
+        )
+        target = conn.execute("SELECT * FROM news_topics WHERE id = ?", (target_id,)).fetchone()
+        return self._event_result(target, fingerprint, merged=target_id != stable_id("ntp", fingerprint["event_key"]), already_processed=False)
+
+    def _record_failed_classification(
+        self,
+        article_id: str,
+        extraction: dict[str, Any],
+        candidate_topic_ids: set[str],
+        classification_source: str,
+        reason_code: str,
+        reason_text: str,
+    ) -> None:
+        attempt_id = stable_id("attempt", f"failed:{article_id}:{_now()}")
+        delays = (0.05, 0.15, 0.35)
+        for attempt in range(len(delays) + 1):
+            try:
+                with self.connect() as conn:
+                    self._insert_classification_audit(
+                        conn,
+                        attempt_id,
+                        article_id,
+                        candidate_topic_ids,
+                        None,
+                        None,
+                        "failed",
+                        None,
+                        extraction,
+                        float(extraction.get("confidence") or 0),
+                        classification_source,
+                        reason_code,
+                        reason_text,
+                    )
+                return
+            except sqlite3.OperationalError as exc:
+                if not any(token in str(exc).lower() for token in ("locked", "busy")):
+                    raise
+                if attempt < len(delays):
+                    time.sleep(delays[attempt])
+                    continue
+                self._deferred_classification_audits.append(
+                    {
+                        "attempt_id": attempt_id,
+                        "article_id": article_id,
+                        "candidate_topic_ids": set(candidate_topic_ids),
+                        "extraction": dict(extraction),
+                        "classification_source": classification_source,
+                        "reason_code": reason_code,
+                        "reason_text": reason_text,
+                    }
+                )
+                return
+
+    def flush_deferred_classification_audits(self, conn: sqlite3.Connection) -> int:
+        pending = self._deferred_classification_audits
+        self._deferred_classification_audits = []
+        flushed = 0
+        for item in pending:
+            try:
+                self._insert_classification_audit(
+                    conn,
+                    item["attempt_id"],
+                    item["article_id"],
+                    item["candidate_topic_ids"],
+                    None,
+                    None,
+                    "failed",
+                    None,
+                    item["extraction"],
+                    float(item["extraction"].get("confidence") or 0),
+                    item["classification_source"],
+                    item["reason_code"],
+                    item["reason_text"],
+                )
+                flushed += 1
+            except sqlite3.OperationalError:
+                self._deferred_classification_audits.append(item)
+        return flushed
+
+    def record_classification_rejection(self, article_id: str, reason_text: str) -> None:
+        attempt_id = stable_id("attempt", f"rejected:{article_id}:{_now()}")
+        with self.connect() as conn:
+            self._insert_classification_audit(
+                conn,
+                attempt_id,
+                article_id,
+                set(),
+                None,
+                None,
+                "rejected",
+                None,
+                {},
+                0.0,
+                "llm",
+                "classification_rejected",
+                reason_text,
+            )
+
+    def merge_news_topics(self, primary_topic_id: str, duplicate_topic_id: str, *, reason: str) -> dict[str, Any]:
+        if primary_topic_id == duplicate_topic_id:
+            return {"topic_id": primary_topic_id, "merged_topic_id": duplicate_topic_id, "moved_articles": 0}
+        attempt_id = stable_id("attempt", f"merge:{primary_topic_id}:{duplicate_topic_id}:{_now()}")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            primary = conn.execute("SELECT * FROM news_topics WHERE id = ? AND status = 'active'", (primary_topic_id,)).fetchone()
+            duplicate = conn.execute("SELECT * FROM news_topics WHERE id = ? AND status = 'active'", (duplicate_topic_id,)).fetchone()
+            if not primary or not duplicate:
+                raise ValueError("both topics must be active")
+            if primary["identity_status"] != "confirmed" or duplicate["identity_status"] != "confirmed":
+                raise ValueError("only confirmed topics can be merged")
+            rows = conn.execute("SELECT article_id FROM news_topic_articles WHERE topic_id = ?", (duplicate_topic_id,)).fetchall()
+            conn.execute("UPDATE news_topic_articles SET topic_id = ? WHERE topic_id = ?", (primary_topic_id, duplicate_topic_id))
+            conn.execute(
+                "UPDATE news_topics SET status = 'merged', merged_into_topic_id = ?, projection_state = 'dirty' WHERE id = ?",
+                (primary_topic_id, duplicate_topic_id),
+            )
+            self._recalculate_event_topic(conn, primary_topic_id)
+            self._append_topics_merged_summary(conn, primary_topic_id, duplicate)
+            for row in rows:
+                self._insert_classification_audit(
+                    conn, attempt_id, row["article_id"], {primary_topic_id, duplicate_topic_id}, duplicate_topic_id,
+                    primary_topic_id, "reclassified", self._active_fingerprint_in_conn(conn, primary_topic_id),
+                    {}, 1.0, "rule", "topics_merged", reason,
+                )
+        return {"topic_id": primary_topic_id, "merged_topic_id": duplicate_topic_id, "moved_articles": len(rows)}
+
+    def _append_topics_merged_summary(
+        self, conn: sqlite3.Connection, topic_id: str, duplicate: sqlite3.Row
+    ) -> None:
+        topic = conn.execute(
+            "SELECT summary, summary_revision FROM news_topics WHERE id = ?", (topic_id,)
+        ).fetchone()
+        article_rows = conn.execute(
+            """SELECT article_id, event_stage FROM news_topic_articles
+               WHERE topic_id = ? ORDER BY created_at, article_id""",
+            (topic_id,),
+        ).fetchall()
+        article_ids = [row["article_id"] for row in article_rows]
+        if not article_ids:
+            return
+        summary = str(
+            topic["summary"] or duplicate["summary"] or duplicate["canonical_name"] or duplicate["name"]
+        ).strip()
+        if not summary:
+            return
+        revision = int(topic["summary_revision"] or 0) + 1
+        stages = list(dict.fromkeys(row["event_stage"] for row in article_rows if row["event_stage"] != "unknown"))
+        conn.execute(
+            """INSERT INTO news_topic_summary_revisions(
+                 id, topic_id, revision, summary, source_article_ids_json, stage_snapshot_json,
+                 generation_source, reason_code, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, 'rule', 'topics_merged', ?)""",
+            (
+                stable_id("summaryrev", f"{topic_id}:{revision}"),
+                topic_id,
+                revision,
+                summary,
+                json.dumps(article_ids, ensure_ascii=False),
+                json.dumps(stages, ensure_ascii=False),
+                _now(),
+            ),
+        )
+        conn.execute(
+            "UPDATE news_topics SET summary = ?, summary_revision = ? WHERE id = ?",
+            (summary, revision, topic_id),
+        )
+
+    def refresh_event_projection(self, topic_id: str) -> None:
+        with self.connect() as conn:
+            topic = conn.execute("SELECT * FROM news_topics WHERE id = ? AND status = 'active'", (topic_id,)).fetchone()
+            if not topic:
+                return
+            rows = conn.execute(
+                """SELECT a.*, ta.event_summary, ta.event_stage, ta.stage_label, ta.article_type, ta.confidence
+                   FROM news_topic_articles ta JOIN news_articles a ON a.id = ta.article_id
+                   WHERE ta.topic_id = ? ORDER BY COALESCE(a.published_at, a.fetched_at)""",
+                (topic_id,),
+            ).fetchall()
+            article_ids = [row["id"] for row in rows]
+            source_count = len({row["source_id"] for row in rows})
+            now = _now()
+            conn.execute(
+                """INSERT OR REPLACE INTO topic_clusters(
+                   id, title, category, keywords_json, entities_json, article_ids_json, source_count,
+                   article_count, hot_score, first_seen_at, latest_seen_at, status, projection_version, projected_at
+                   ) VALUES (?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, 'active', 'event-projection/v1', ?)""",
+                (
+                    topic_id, topic["canonical_name"] or topic["name"], topic["primary_category"] or topic["category"],
+                    topic["keywords_json"] or "[]", json.dumps(article_ids, ensure_ascii=False), source_count, len(rows),
+                    round(min(1.0, 0.1 + 0.25 * source_count + 0.08 * len(rows)), 4), topic["first_seen_at"], topic["last_seen_at"], now,
+                ),
+            )
+            conn.execute("DELETE FROM event_timelines WHERE topic_id = ?", (topic_id,))
+            for row in rows:
+                event_id = stable_id("timeline", f"{topic_id}:{row['id']}")
+                conn.execute(
+                    """INSERT INTO event_timelines(
+                       id, cluster_id, event_date, event_title, event_summary, actors_json,
+                       source_article_ids_json, confidence, topic_id, article_id, event_stage,
+                       article_type, projection_version, projected_at
+                       ) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, 'event-projection/v1', ?)
+                       ON CONFLICT(topic_id, article_id) DO UPDATE SET
+                         event_date=excluded.event_date, event_title=excluded.event_title,
+                         event_summary=excluded.event_summary, confidence=excluded.confidence,
+                         event_stage=excluded.event_stage, article_type=excluded.article_type,
+                         projection_version=excluded.projection_version, projected_at=excluded.projected_at""",
+                    (
+                        event_id, topic_id, (row["published_at"] or row["fetched_at"] or "")[:10], row["title"],
+                        row["event_summary"], json.dumps([row["id"]]), row["confidence"], topic_id, row["id"],
+                        row["event_stage"], row["article_type"], now,
+                    ),
+                )
+            conn.execute("UPDATE news_topics SET projection_state = 'ready' WHERE id = ?", (topic_id,))
+
+    def _insert_event_fingerprint(self, conn: sqlite3.Connection, topic_id: str, fingerprint: EventFingerprint) -> str:
+        fingerprint_id = stable_id("efp", fingerprint.event_key)
+        conn.execute(
+            """INSERT INTO news_event_fingerprints(
+               id, topic_id, key_kind, algorithm_version, normalized_payload_json,
+               fingerprint_hash, event_key, status, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)""",
+            (
+                fingerprint_id, topic_id, fingerprint.key_kind, fingerprint.algorithm_version,
+                json.dumps(fingerprint.normalized_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                fingerprint.fingerprint_hash, fingerprint.event_key, _now(),
+            ),
+        )
+        return fingerprint_id
+
+    def _active_fingerprint_in_conn(self, conn: sqlite3.Connection, topic_id: str) -> dict[str, Any] | None:
+        row = conn.execute(
+            """SELECT f.* FROM news_topics t JOIN news_event_fingerprints f ON f.id = t.active_fingerprint_id
+               WHERE t.id = ? AND f.status = 'active'""",
+            (topic_id,),
+        ).fetchone()
+        return _fingerprint_row(row) if row else None
+
+    def _resolve_topic_id_in_conn(self, conn: sqlite3.Connection, topic_id: str) -> str:
+        seen: set[str] = set()
+        while True:
+            if topic_id in seen:
+                raise ValueError("event topic merge cycle detected")
+            seen.add(topic_id)
+            row = conn.execute(
+                "SELECT status, merged_into_topic_id FROM news_topics WHERE id = ?", (topic_id,)
+            ).fetchone()
+            if not row:
+                raise ValueError("event topic not found")
+            if row["status"] != "merged" or not row["merged_into_topic_id"]:
+                return topic_id
+            topic_id = row["merged_into_topic_id"]
+
+    def _recalculate_event_topic(self, conn: sqlite3.Connection, topic_id: str) -> None:
+        rows = conn.execute(
+            """SELECT a.category, a.published_at, a.fetched_at FROM news_topic_articles ta
+               JOIN news_articles a ON a.id = ta.article_id WHERE ta.topic_id = ?""",
+            (topic_id,),
+        ).fetchall()
+        if not rows:
+            conn.execute("UPDATE news_topics SET article_count = 0, projection_state = 'dirty' WHERE id = ?", (topic_id,))
+            return
+        categories: dict[str, int] = {}
+        for row in rows:
+            categories[row["category"]] = categories.get(row["category"], 0) + 1
+        current = conn.execute("SELECT primary_category FROM news_topics WHERE id = ?", (topic_id,)).fetchone()
+        top_count = max(categories.values())
+        tied = sorted(category for category, count in categories.items() if count == top_count)
+        primary = current["primary_category"] if current and current["primary_category"] in tied else tied[0]
+        times = [row["published_at"] or row["fetched_at"] for row in rows if row["published_at"] or row["fetched_at"]]
+        topic_times = conn.execute(
+            "SELECT first_seen_at, last_seen_at FROM news_topics WHERE id = ?", (topic_id,)
+        ).fetchone()
+        first_seen = min(times) if times else topic_times["first_seen_at"]
+        last_seen = max(times) if times else topic_times["last_seen_at"]
+        conn.execute(
+            """UPDATE news_topics SET article_count = ?, primary_category = ?, category = ?,
+               category_scope_json = ?, first_seen_at = ?, last_seen_at = ?, projection_state = 'dirty'
+               WHERE id = ?""",
+            (len(rows), primary, primary, json.dumps(sorted(categories), ensure_ascii=False), first_seen, last_seen, topic_id),
+        )
+
+    def _update_event_summary(
+        self, conn: sqlite3.Connection, topic_id: str, article_id: str, extraction: dict[str, Any],
+        article_type: str, event_stage: str, generation_source: str,
+    ) -> None:
+        topic = conn.execute("SELECT summary, summary_revision FROM news_topics WHERE id = ?", (topic_id,)).fetchone()
+        if topic["summary_revision"] > 0 and article_type not in FACTUAL_ARTICLE_TYPES:
+            return
+        summary = str(extraction.get("updated_event_summary") or extraction.get("event_summary") or "").strip()
+        if not summary or summary == (topic["summary"] or ""):
+            return
+        revision = int(topic["summary_revision"] or 0) + 1
+        previous_stages = [
+            row["event_stage"]
+            for row in conn.execute(
+                """SELECT event_stage FROM news_topic_articles
+                   WHERE topic_id = ? AND article_id != ? ORDER BY created_at""",
+                (topic_id, article_id),
+            ).fetchall()
+            if row["event_stage"] != "unknown"
+        ]
+        stage_advanced = any(_is_stage_advance(previous, event_stage) for previous in previous_stages)
+        summary_decision = extraction.get("summary_decision")
+        requested_reason = extraction.get("summary_reason_code")
+        if summary_decision == "unchanged":
+            return
+        if topic["summary_revision"] > 0 and not stage_advanced and not (
+            summary_decision == "revise" and requested_reason in {"fact_added", "correction"}
+        ):
+            return
+        reason = "created" if revision == 1 else (
+            "stage_advanced" if stage_advanced else str(requested_reason)
+        )
+        if reason == "correction" and "此前信息已被更正" not in summary:
+            return
+        stage_snapshot = list(dict.fromkeys([*previous_stages, event_stage]))
+        conn.execute(
+            """INSERT INTO news_topic_summary_revisions(
+               id, topic_id, revision, summary, source_article_ids_json, stage_snapshot_json,
+               generation_source, reason_code, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                stable_id("summaryrev", f"{topic_id}:{revision}"), topic_id, revision, summary,
+                json.dumps([article_id]), json.dumps(stage_snapshot), generation_source, reason, _now(),
+            ),
+        )
+        conn.execute("UPDATE news_topics SET summary = ?, summary_revision = ? WHERE id = ?", (summary, revision, topic_id))
+
+    def _insert_classification_audit(
+        self, conn: sqlite3.Connection, attempt_id: str, article_id: str, candidates: set[str],
+        from_topic_id: str | None, to_topic_id: str | None, decision: str,
+        fingerprint: EventFingerprint | dict[str, Any] | None, extraction: dict[str, Any], confidence: float,
+        source: str, reason_code: str, reason_text: str | None = None,
+    ) -> None:
+        event_key = fingerprint.event_key if isinstance(fingerprint, EventFingerprint) else (fingerprint or {}).get("event_key")
+        version = fingerprint.algorithm_version if isinstance(fingerprint, EventFingerprint) else (fingerprint or {}).get("algorithm_version")
+        conn.execute(
+            """INSERT INTO news_event_classification_audits(
+               id, attempt_id, article_id, candidate_topic_ids_json, from_topic_id, to_topic_id,
+               decision, event_key, algorithm_version, event_stage, article_type, confidence,
+               classification_source, reason_code, reason_text, schema_version, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'classification-schema/v1', ?)""",
+            (
+                stable_id("audit", f"{attempt_id}:{article_id}:{decision}"), attempt_id, article_id,
+                json.dumps(sorted(candidates)), from_topic_id, to_topic_id, decision, event_key, version,
+                extraction.get("event_stage"), extraction.get("article_type"), confidence, source,
+                reason_code, reason_text or extraction.get("classification_reason"), _now(),
+            ),
+        )
+
+    @staticmethod
+    def _event_result(topic: sqlite3.Row, fingerprint: dict[str, Any] | None, *, merged: bool, already_processed: bool) -> dict[str, Any]:
+        return {
+            "topic_id": topic["id"],
+            "event_key": (fingerprint or {}).get("event_key"),
+            "identity_status": topic["identity_status"],
+            "merged": merged,
+            "already_processed": already_processed,
+        }
 
     def search_articles(self, query: str, category_scope: list[str] | None = None, limit: int = 20) -> list[dict[str, Any]]:
         fts_rows = self._search_articles_fts(query, category_scope, limit)
@@ -1966,6 +3014,24 @@ def _cluster_row(row: sqlite3.Row) -> dict[str, Any]:
     data["entities"] = json.loads(data.pop("entities_json") or "[]")
     data["article_ids"] = json.loads(data.pop("article_ids_json") or "[]")
     return data
+
+
+def _fingerprint_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["normalized_payload"] = json.loads(data.pop("normalized_payload_json") or "{}")
+    return data
+
+
+def _is_stage_advance(previous: str, current: str) -> bool:
+    transitions = {
+        "proposed": {"announced", "resolved"},
+        "opening": {"midday", "closing", "resolved"},
+        "midday": {"closing", "resolved"},
+        "initial": {"follow_up", "resolved"},
+        "announced": {"follow_up", "resolved"},
+        "follow_up": {"resolved"},
+    }
+    return current in transitions.get(previous, set())
 
 
 def _conversation_row(row: sqlite3.Row) -> dict[str, Any]:

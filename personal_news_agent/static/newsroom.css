@@ -205,6 +205,34 @@
     cursor: pointer;
   }
 
+  .newsroom-topbar .top-actions button {
+    width: 36px;
+    flex: 0 0 36px;
+    padding: 0;
+    line-height: 0;
+  }
+
+  .newsroom-topbar .action-icon {
+    width: 18px;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .newsroom-topbar .action-icon[hidden] { display: none; }
+
+  .newsroom-topbar .action-icon svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
   .newsroom-topbar .top-actions button:hover,
   .newsroom-topbar .top-actions a:hover {
     color: var(--ink);
@@ -212,7 +240,7 @@
   }
 
   .newsroom-topbar .top-actions #refresh {
-    padding-inline: 16px;
+    padding: 0;
     color: white;
     background: var(--accent) !important;
     background-image: none !important;
@@ -270,7 +298,7 @@
 
   .newsroom-center {
     position: relative;
-    padding: 24px var(--newsroom-gap) 34px;
+    padding: 24px var(--newsroom-gap) 0;
     scroll-padding-bottom: 86px;
   }
 
@@ -457,13 +485,18 @@
 
   .newsroom-shell .main-dialog {
     --newsroom-reading-gutter: clamp(20px, 3.2vw, 46px);
+    --composer-bottom-space: 18px;
     width: min(100%, 940px);
+    min-height: 100%;
     margin: 0 auto;
-    padding: clamp(22px, 2.8vw, 38px) var(--newsroom-reading-gutter) 0;
+    padding: clamp(22px, 2.8vw, 38px) var(--newsroom-reading-gutter) var(--composer-bottom-space);
+    box-sizing: border-box;
     height: auto;
     overflow: visible;
     border: 1px solid var(--line);
     border-radius: var(--radius-lg);
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
     background: var(--paper);
     box-shadow: var(--shadow-soft);
   }
@@ -471,9 +504,9 @@
   .story-hero {
     display: flex;
     align-items: flex-end;
-    justify-content: space-between;
-    gap: 24px;
-    padding: 0 74px 0 0;
+    justify-content: flex-start;
+    gap: 0;
+    padding: 0;
     border: 0;
     border-radius: 0;
     background: transparent;
@@ -845,7 +878,7 @@
 
   .newsroom-shell .chat-user {
     width: auto;
-    max-width: min(78%, 680px);
+    max-width: min(68%, 560px);
     margin: 22px 0 0 auto;
     padding: 0;
     align-self: flex-end;
@@ -857,8 +890,8 @@
   .newsroom-shell .chat-user .chat-bubble {
     width: fit-content;
     max-width: 100%;
-    padding: 14px 18px;
-    border-radius: 17px 17px 5px 17px;
+    padding: 9px 14px;
+    border-radius: 15px 15px 5px 15px;
     border: 0;
     color: #ffffff;
     background: var(--accent) !important;
@@ -871,6 +904,20 @@
     color: var(--ink);
     font-size: var(--type-body);
     line-height: 1.78;
+  }
+
+  .newsroom-shell.console-light .assistant-markdown,
+  .newsroom-shell.console-light .assistant-markdown p,
+  .newsroom-shell.console-light .assistant-markdown li,
+  .newsroom-shell.console-light .assistant-markdown blockquote,
+  .newsroom-shell.console-light .assistant-markdown td,
+  .newsroom-shell.console-light .assistant-markdown th {
+    color: var(--ink);
+  }
+
+  .newsroom-shell.console-light .assistant-markdown blockquote {
+    background: #f7faff;
+    border-left-color: var(--accent-soft-strong);
   }
 
   .newsroom-shell .assistant-markdown > .answer-section {
@@ -916,7 +963,7 @@
     margin: 0;
     padding: 8px;
     position: sticky;
-    bottom: 12px;
+    bottom: 0;
     z-index: 20;
     border: 1px solid rgba(255,255,255,.74);
     border-radius: 16px;
@@ -994,19 +1041,34 @@
   }
 
   .composer-dock .dialog-command button {
-    min-width: 58px;
-    min-height: 34px;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    min-height: 32px;
     margin: 0;
+    padding: 0;
+    align-self: center;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: 0;
-    border-radius: 9px;
+    border-radius: 999px;
     color: white;
     background: var(--accent) !important;
     background-image: none !important;
     box-shadow: none;
-    font-size: var(--type-control);
-    font-weight: 650;
+    font-size: 23px;
+    font-weight: 460;
+    line-height: 1;
     cursor: pointer;
   }
+
+  .composer-dock .dialog-command .send-arrow span {
+    display: block;
+    transform: translateY(-1px);
+  }
+
+  .composer-dock .dialog-command button:active { transform: scale(.94); }
 
   .composer-dock .dialog-command button:hover {
     background: var(--accent-hover);
@@ -1015,19 +1077,30 @@
   /* Keep the add control in the same compact, blue control language as its peers. */
   .newsroom-shell .round-add,
   .newsroom-shell.console-light .round-add {
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     min-height: 32px;
-    padding: 0 12px;
+    padding: 0;
     border: 1px solid transparent;
-    border-radius: 9px;
+    border-radius: 50%;
     color: #ffffff;
     background: var(--accent) !important;
     background-image: none !important;
     box-shadow: none;
     font-family: var(--font-newsroom);
-    font-size: var(--type-control);
-    font-weight: 620;
+    font-size: 22px;
+    font-weight: 400;
     line-height: 1;
     letter-spacing: 0;
+  }
+
+  .newsroom-shell .round-add span {
+    display: block;
+    line-height: 1;
+    transform: translateY(-1px);
   }
 
   .newsroom-shell .round-add:hover,
@@ -1041,6 +1114,7 @@
     bottom: calc(100% + 12px);
     padding: 8px;
     overflow: auto;
+    scrollbar-width: none;
     border: 1px solid rgba(61, 115, 214, 0.14);
     border-radius: 16px;
     color: var(--ink);
@@ -1052,17 +1126,18 @@
   }
 
   .newsroom-shell .slash-command-menu[hidden] { display: none; }
+  .newsroom-shell .slash-command-menu::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
   .newsroom-shell .slash-command-heading { display: none; }
 
   .newsroom-shell .slash-command-item {
-    min-height: 58px;
-    padding: 10px 12px;
+    min-height: 38px;
+    padding: 5px 8px;
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: 0;
     border: 0;
-    border-radius: 12px;
+    border-radius: 10px;
     color: var(--ink);
     background: transparent;
     box-shadow: none;
@@ -1085,22 +1160,22 @@
 
   .newsroom-shell .slash-command-copy {
     display: grid;
-    gap: 2px;
+    gap: 1px;
     min-width: 0;
   }
 
   .newsroom-shell .slash-command-copy strong {
     color: var(--ink);
-    font-size: var(--type-body);
+    font-size: var(--type-control);
     font-weight: 620;
-    line-height: 1.45;
+    line-height: 1.2;
   }
 
   .newsroom-shell .slash-command-copy span {
     overflow: hidden;
     color: var(--ink-soft);
-    font-size: var(--type-body);
-    line-height: 1.35;
+    font-size: var(--type-caption);
+    line-height: 1.25;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
@@ -1111,7 +1186,10 @@
     border-color: rgba(61, 115, 214, 0.14);
     color: var(--ink);
     background: #ffffff;
+    scrollbar-width: none;
   }
+
+  .newsroom-shell.console-light .slash-command-menu::-webkit-scrollbar { width: 0; height: 0; display: none; }
 
   .newsroom-shell.console-light .slash-command-item,
   .newsroom-shell.console-light .slash-command-item:not(:first-child) {
@@ -1125,8 +1203,8 @@
   .newsroom-shell.console-light .slash-command-item.active,
   .newsroom-shell.console-light .slash-command-item:focus-visible {
     color: var(--ink) !important;
-    background: #ffffff !important;
-    box-shadow: inset 0 0 0 1px var(--line) !important;
+    background: #f5f7fb !important;
+    box-shadow: none !important;
   }
 
   .newsroom-shell.console-light .slash-command-copy strong { color: var(--ink); }
@@ -1299,8 +1377,8 @@
   .newsroom-right .status { color: var(--ink-faint); font-size: var(--type-caption); }
 
   .newsroom-shell .config-dialog {
-    width: min(680px, calc(100vw - 40px));
-    max-height: min(760px, calc(100dvh - 40px));
+    width: min(640px, calc(100vw - 32px));
+    max-height: min(700px, calc(100dvh - 32px));
     padding: 0;
     display: flex;
     flex-direction: column;
@@ -1311,6 +1389,10 @@
     box-shadow: 0 34px 100px rgba(23,33,27,.28);
     overflow: hidden;
     overscroll-behavior: contain;
+  }
+
+  .newsroom-shell .config-dialog:not([open]) {
+    display: none;
   }
 
   .newsroom-shell .config-dialog::backdrop {
@@ -1324,21 +1406,26 @@
   .newsroom-shell .config-dialog select {
     width: 100%;
     min-width: 0;
+    min-height: 38px;
+    padding: 0 11px;
     border-color: var(--line);
-    border-radius: 11px;
+    border-radius: 10px;
     color: var(--ink);
     background: var(--canvas);
+    font-size: var(--type-control);
+    line-height: 1.35;
   }
 
   .newsroom-shell .config-dialog textarea {
-    min-height: 112px;
-    max-height: 180px;
+    min-height: 96px;
+    max-height: 150px;
+    padding: 10px 11px;
     resize: vertical;
   }
 
   .newsroom-shell .config-dialog .dialog-head {
     margin: 0;
-    padding: 20px 24px 16px;
+    padding: 16px 20px 12px;
     flex: 0 0 auto;
     border: 0;
     border-bottom: 1px solid var(--line);
@@ -1354,18 +1441,44 @@
   }
 
   .newsroom-shell .config-dialog .dialog-head button {
-    min-height: 32px;
-    padding: 0 12px;
+    width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: 1px solid var(--line);
-    border-radius: 9px;
+    border-radius: 12px;
     color: var(--ink-soft);
     background: #ffffff;
     box-shadow: none;
     font-size: var(--type-control);
+    line-height: 0;
+  }
+
+  .newsroom-shell .config-dialog .dialog-head .action-icon {
+    width: 16px;
+    height: 16px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .newsroom-shell .config-dialog .dialog-head .action-icon svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.9;
+    stroke-linecap: round;
+    stroke-linejoin: round;
   }
 
   .newsroom-shell .config-dialog .onboarding-intro {
-    margin: 16px 24px 0;
+    margin: 12px 20px 0;
+    padding: 12px 14px;
     flex: 0 0 auto;
     color: var(--ink);
     background: var(--accent-soft);
@@ -1382,7 +1495,7 @@
     flex: 1 1 auto;
     min-height: 0;
     margin: 0;
-    padding: 18px 24px;
+    padding: 14px 20px;
     overflow-y: auto;
     overflow-x: hidden;
     background: transparent;
@@ -1400,20 +1513,28 @@
 
   .newsroom-shell .config-dialog .choice-grid.wide {
     grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 8px 12px;
+    gap: 7px 10px;
   }
 
   .newsroom-shell .config-dialog .choice-grid label {
-    min-height: 34px;
-    gap: 8px;
+    min-height: 30px;
+    gap: 7px;
     color: var(--ink-soft);
     font-size: var(--type-control);
+  }
+
+  .newsroom-shell .config-dialog .choice-grid input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    min-height: 18px;
+    padding: 0;
+    flex: 0 0 18px;
   }
 
   .newsroom-shell .config-dialog .prompt-preview {
     max-height: 150px;
     margin: 0;
-    padding: 14px 24px 20px;
+    padding: 12px 20px 16px;
     flex: 0 0 auto;
     overflow: auto;
     border: 0;
@@ -1424,7 +1545,7 @@
 
   .newsroom-shell .config-dialog .status {
     margin: 0;
-    padding: 0 24px 14px;
+    padding: 0 20px 12px;
     flex: 0 0 auto;
     color: var(--ink-soft);
     background: transparent;
@@ -1663,6 +1784,227 @@
 
   .newsroom-shell.console-light .assistant-identity strong { color: #172033; }
   .newsroom-shell.console-light .assistant-identity small { color: #526078; }
+
+  .newsroom-shell.console-light .chat-mermaid {
+    color: var(--ink);
+    background: #ffffff;
+    border-color: #dbe7f6;
+    box-shadow: none;
+  }
+
+  .newsroom-shell.console-light .chat-mermaid-toolbar strong {
+    color: var(--ink);
+  }
+
+  .newsroom-shell.console-light .chat-mermaid-toolbar span,
+  .newsroom-shell.console-light .chat-mermaid-status,
+  .newsroom-shell.console-light .chat-mermaid-source {
+    color: var(--ink-soft) !important;
+  }
+
+  .newsroom-shell.console-light .chat-mermaid-toolbar button {
+    color: #ffffff;
+    background: var(--accent);
+    border-color: transparent;
+  }
+
+  .newsroom-shell.console-light .chat-mermaid-toolbar button:hover,
+  .newsroom-shell.console-light .chat-mermaid-toolbar button:focus-visible {
+    background: var(--accent-hover);
+    outline-color: rgba(61, 115, 214, 0.24);
+  }
+
+  .newsroom-shell.console-light .chat-mermaid-canvas {
+    background: #f8fbff;
+  }
+
+  .newsroom-shell.console-light .chat-mermaid-canvas:hover,
+  .newsroom-shell.console-light .chat-mermaid-canvas:focus-visible {
+    background: #eef5ff;
+    outline-color: rgba(61, 115, 214, 0.18);
+  }
+
+  .newsroom-shell.console-light .chat-mermaid-source {
+    border-top-color: #dbe7f6;
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-dialog {
+    color: var(--ink);
+    background: #ffffff;
+    border-color: #dbe7f6;
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-dialog::backdrop {
+    background: rgba(244, 247, 251, 0.72);
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-shell > header {
+    border-bottom-color: #dbe7f6;
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-shell > header span {
+    color: var(--accent);
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-shell > header h2 {
+    color: var(--ink);
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-shell > header p {
+    color: var(--ink-soft);
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-shell > header button {
+    color: var(--ink);
+    background: #f8fbff;
+    border-color: #dbe7f6;
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-canvas {
+    background: #f8fbff;
+  }
+
+  .mermaid-viewer-stage {
+    align-items: center;
+    display: flex;
+    justify-content: center;
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .mermaid-viewer-controls {
+    position: absolute;
+    left: 18px;
+    bottom: 18px;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px;
+    border: 1px solid #dbe7f6;
+    border-radius: 13px;
+    background: rgba(255, 255, 255, 0.86);
+    box-shadow: 0 12px 34px rgba(61, 115, 214, 0.12);
+    backdrop-filter: blur(18px) saturate(140%);
+    -webkit-backdrop-filter: blur(18px) saturate(140%);
+  }
+
+  .mermaid-viewer-controls button,
+  .mermaid-viewer-controls span {
+    min-width: 32px;
+    min-height: 30px;
+    border: 0;
+    border-radius: 9px;
+    color: var(--ink);
+    background: transparent;
+    font-size: var(--type-control);
+    font-weight: 620;
+    line-height: 1;
+  }
+
+  .mermaid-viewer-controls button {
+    cursor: pointer;
+    padding: 0 9px;
+  }
+
+  .mermaid-viewer-controls span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 48px;
+    color: var(--ink-soft);
+    font-size: var(--type-meta);
+  }
+
+  .mermaid-viewer-controls button:hover,
+  .mermaid-viewer-controls button:focus-visible {
+    color: #ffffff;
+    background: var(--accent);
+    outline: none;
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-controls button {
+    color: var(--ink) !important;
+    background: #ffffff !important;
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-controls span {
+    color: var(--ink-soft) !important;
+    background: transparent !important;
+  }
+
+  .newsroom-shell.console-light .mermaid-viewer-controls button:hover,
+  .newsroom-shell.console-light .mermaid-viewer-controls button:focus-visible {
+    color: #ffffff !important;
+    background: var(--accent) !important;
+  }
+
+  .mermaid-viewer-canvas {
+    cursor: grab;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .mermaid-viewer-canvas.is-panning {
+    cursor: grabbing;
+  }
+
+  .mermaid-viewer-canvas svg {
+    flex: 0 0 auto;
+    max-width: none;
+    transition: width 120ms ease, height 120ms ease, margin 120ms ease;
+  }
+
+  .newsroom-shell.console-dark .mermaid-viewer-controls {
+    background: rgba(17, 24, 39, 0.82);
+    border-color: rgba(147, 197, 253, 0.2);
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.24);
+  }
+
+  .newsroom-shell.console-dark .mermaid-viewer-controls button,
+  .newsroom-shell.console-dark .mermaid-viewer-controls span {
+    color: var(--ink);
+  }
+
+  .newsroom-shell.console-dark .mermaid-viewer-controls span {
+    color: var(--ink-soft);
+  }
+
+  .newsroom-shell.console-light .mermaid-node-actions {
+    background: #ffffff;
+    border-left-color: #dbe7f6;
+  }
+
+  .newsroom-shell.console-light .mermaid-node-actions > span {
+    color: var(--accent);
+  }
+
+  .newsroom-shell.console-light .mermaid-node-actions > strong {
+    color: var(--ink);
+  }
+
+  .newsroom-shell.console-light .mermaid-node-actions > p {
+    color: var(--ink-soft);
+  }
+
+  .newsroom-shell.console-light .mermaid-node-actions button {
+    color: #ffffff;
+    background: var(--accent);
+    border-color: transparent;
+  }
+
+  .newsroom-shell.console-light .mermaid-node-actions button:last-child {
+    color: var(--ink);
+    background: #f8fbff;
+    border-color: #dbe7f6;
+  }
 
   .newsroom-shell .assistant-markdown .assistant-identity small,
   .newsroom-shell .assistant-markdown .stream-status,

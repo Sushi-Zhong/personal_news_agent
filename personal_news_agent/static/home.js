@@ -1,5 +1,5 @@
 (function () {
-  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260812-newsroom-8";
+  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260813-mermaid-light-1";
   const mobileQuery = window.matchMedia("(max-width: 1024px)");
   const mode = mobileQuery.matches ? "mobile" : "web";
   const template = document.querySelector(`#${mode}Template`);
@@ -25,10 +25,17 @@
     document.body.classList.toggle("console-dark", !isLight);
     const button = document.querySelector("#themeToggle");
     if (button) {
-      button.textContent = isLight ? "深色" : "浅色";
+      const icon = button.querySelector(".action-icon");
+      const moon = button.querySelector('[data-theme-icon="moon"]');
+      const sun = button.querySelector('[data-theme-icon="sun"]');
+      if (icon) icon.hidden = false;
+      if (moon) moon.hidden = !isLight;
+      if (sun) sun.hidden = isLight;
       button.setAttribute("aria-pressed", String(isLight));
       button.setAttribute("aria-label", isLight ? "切换深色背景" : "切换浅色背景");
+      button.setAttribute("title", isLight ? "切换深色背景" : "切换浅色背景");
     }
+    document.dispatchEvent(new CustomEvent("pna:themechange", { detail: { theme } }));
   }
 
   function savedTheme() {

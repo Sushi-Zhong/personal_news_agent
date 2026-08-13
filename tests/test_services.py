@@ -1011,7 +1011,7 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260811-topic-pulse-6" in home_source
+    assert "20260813-mermaid-light-1" in home_source
     assert "styles.css?v=20260811-topic-pulse-6" in home_html
     assert "shared.js?v=20260810-phone-controls-2" in mobile_html
 
@@ -1642,6 +1642,26 @@ def test_deep_dive_generates_expansion_queries_and_evidence(services):
 
 def test_event_discovery_generates_required_fields(services):
     _, store, _ = services
+    article = store.list_articles(category="auto", limit=1)[0]
+    store.apply_event_classification(
+        article["id"],
+        {
+            "canonical_name": article["title"],
+            "subject": "新能源汽车",
+            "action": "发布",
+            "object": "行业新动态",
+            "temporal_scope": None,
+            "event_stage": "initial",
+            "stage_label": "首次发布",
+            "article_type": "fact_report",
+            "event_summary": article.get("summary") or article["title"],
+            "keywords": ["新能源汽车"],
+            "classification_reason": "测试事件投影",
+            "confidence": 0.9,
+        },
+        set(),
+        confidence_threshold=0.72,
+    )
     clusters = EventDiscoveryService(store).discover(category="auto")
     assert clusters
     cluster = clusters[0]

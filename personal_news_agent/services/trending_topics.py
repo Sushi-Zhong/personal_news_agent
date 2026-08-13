@@ -142,6 +142,7 @@ class TrendingTopicService:
                 )
         if not items:
             items = _fallback_topics(self.store, articles, now, window_hours, refresh_window_hours)
+        items = _map_topics_to_canonical_events(self.store, items)
         items = _supplement_missing_categories(items, articles, now, refresh_window_hours)
         items.sort(key=lambda item: (item["hot_score"], item.get("latest_seen_at") or ""), reverse=True)
         result = {
@@ -399,6 +400,46 @@ def _fallback_topics(
             )
         )
     return items
+
+
+def _map_topics_to_canonical_events(store: NewsStore, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    events = store.list_canonical_events(limit=100)
+    by_article: dict[str, dict[str, Any]] = {}
+    for event in events:
+        for article_id in event.get("article_ids") or []:
+            by_article[article_id] = event
+    mapped: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        matches = {
+            by_article[article_id]["id"]: by_article[article_id]
+            for article_id in item.get("article_ids") or []
+            if article_id in by_article
+        }
+        if len(matches) == 1:
+            event = next(iter(matches.values()))
+            if event.get("identity_status") == "confirmed":
+                item = {
+                    **item,
+                    "id": event["id"],
+                    "event_key": event.get("event_key"),
+                    "fingerprint_version": event.get("fingerprint_version"),
+                    "title": event["title"],
+                    "summary": event.get("summary") or item.get("summary"),
+                    "category": event["category"],
+                    "category_scope": event["category_scope"],
+                    "article_ids": event["article_ids"],
+                    "stages": event["stages"],
+                    "article_types": event["article_types"],
+                    "summary_revision": event["summary_revision"],
+                }
+            else:
+                item = {**item, "id": event["id"], "event_key": event.get("event_key"), "evidence_level": "lead", "evidence_label": "新线索"}
+        if item["id"] in seen_ids:
+            continue
+        seen_ids.add(item["id"])
+        mapped.append(item)
+    return mapped
 
 
 def _supplement_missing_categories(

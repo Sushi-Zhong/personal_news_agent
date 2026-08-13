@@ -133,9 +133,10 @@ document.querySelector("#chatForm").addEventListener("submit", async (event) => 
   const message = input.value.trim();
   if (!message) return;
   lockMobileTopicFromQuery(message);
+  input.value = "";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
   await handleMobileAssistantInput(message);
   await loadMobileTopics();
-  input.value = "";
 });
 
 document.querySelector("#editProfileMobile").addEventListener("click", async () => {
@@ -598,12 +599,24 @@ async function startNewMobileTopicConversation() {
 }
 
 function mergeMobileTopics(items) {
-  const seen = new Set();
-  return items.filter((item) => {
-    if (!item.title || seen.has(item.title)) return false;
-    seen.add(item.title);
-    return true;
-  });
+  return items.reduce((merged, incoming) => {
+    if (!incoming.title) return merged;
+    const index = merged.findIndex((existing) => sameRecommendedEvent(existing, incoming));
+    if (index >= 0) merged[index] = incoming;
+    else merged.push(incoming);
+    return merged;
+  }, []);
+}
+
+function sameRecommendedEvent(existing, incoming) {
+  if (existing.id && existing.id === incoming.id) return true;
+  if (existing.event_key && existing.event_key === incoming.event_key) return true;
+  return articleIdsOverlap(existing.article_ids, incoming.article_ids);
+}
+
+function articleIdsOverlap(left = [], right = []) {
+  const articleIds = new Set(left || []);
+  return (right || []).some((articleId) => articleIds.has(articleId));
 }
 
 function parseMobileScope(value) {

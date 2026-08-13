@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
     <link rel="stylesheet" href="static/styles.css?v=20260811-topic-pulse-6" />
-    <link rel="stylesheet" href="static/newsroom.css?v=20260812-newsroom-8" />
+    <link rel="stylesheet" href="static/newsroom.css?v=20260813-mermaid-light-1" />
   </head>
   <body>
     <template id="webTemplate" data-body-class="web-shell console-shell newsroom-shell">
@@ -16,9 +16,12 @@
               <div><h1>个人资讯助手</h1></div>
             </div>
             <nav class="top-actions" aria-label="全局操作">
-              <button id="themeToggle" class="icon-button" type="button" aria-label="切换浅色背景" aria-pressed="false">浅色</button>
-              <button id="openConfig" class="text-button">个人配置</button>
-              <button id="refresh">刷新资讯</button>
+              <button id="themeToggle" class="icon-button" type="button" aria-label="切换深色背景" title="切换深色背景" aria-pressed="true">
+                <span class="action-icon" data-theme-icon="moon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 15.2A8.5 8.5 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z" /></svg></span>
+                <span class="action-icon" data-theme-icon="sun" aria-hidden="true" hidden><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg></span>
+              </button>
+              <button id="openConfig" class="icon-button" type="button" aria-label="个人配置" title="个人配置"><span class="action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.2" /><path d="M5.5 20c.7-4 3-6 6.5-6s5.8 2 6.5 6" /></svg></span></button>
+              <button id="refresh" class="icon-button" type="button" aria-label="刷新资讯" title="刷新资讯"><span class="action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7" /><path d="M20 5v6h-6" /></svg></span></button>
               <a href="auth">登录 / 注册</a>
             </nav>
           </header>
@@ -28,7 +31,7 @@
               <section class="topic-nav">
                 <div class="section-heading">
                   <div><h2>我的关注</h2></div>
-                  <button id="newTopicConversation" class="round-add" type="button" aria-label="新增关注">新增</button>
+                  <button id="newTopicConversation" class="round-add" type="button" aria-label="新增关注" title="新增关注"><span aria-hidden="true">+</span></button>
                 </div>
                 <div data-topic-list aria-busy="true" aria-label="正在载入关注专题">
                   <div class="topic-card topic-card-skeleton" aria-hidden="true"><span></span><small></small></div>
@@ -46,12 +49,8 @@
               <article class="main-dialog">
                 <header class="story-hero">
                   <div class="story-heading">
-                    <h2 data-agent-topic>新能源汽车产业链</h2>
-                    <p data-dialog-context>18 条证据 · 18 个事件</p>
-                  </div>
-                  <div class="context-dock" aria-label="当前专题范围">
-                    <span data-current-category-chip>领域 · auto</span>
-                    <span data-current-view-chip>视图 · 事件线</span>
+                    <h2 data-agent-topic>新对话</h2>
+                    <p data-dialog-context>发送第一句话后确定关注主题。</p>
                   </div>
                 </header>
 
@@ -70,7 +69,7 @@
                   <div class="topic-workbench">
                     <div class="topic-head">
                       <div>
-                        <h2 data-topic-heading>新能源汽车产业链</h2>
+                        <h2 data-topic-heading>新对话</h2>
                         <p data-topic-summary>正在加载专题证据。</p>
                       </div>
                       <div class="topic-metrics">
@@ -110,7 +109,9 @@
                   </div>
                   <form id="chatForm" class="dialog-command">
                     <input id="message" placeholder="继续追问这条新闻，或要求核验某个观点..." />
-                    <button>发送</button>
+                    <button type="submit" class="send-arrow" aria-label="发送消息" title="发送消息">
+                      <span aria-hidden="true">↑</span>
+                    </button>
                   </form>
                 </footer>
               </article>
@@ -153,7 +154,7 @@
                   <h2>定时跟踪</h2>
                 </div>
                 <form id="taskForm" class="task-mini-form">
-                  <input name="topic" value="新能源汽车产业链" placeholder="专题" />
+                  <input name="topic" value="" placeholder="专题" />
                   <select name="category">
                     <option value="sports">体育</option>
                     <option value="politics">时政</option>
@@ -196,10 +197,16 @@
           </main>
       
           <dialog id="configDialog" class="config-dialog">
-            <form method="dialog" class="dialog-head">
+            <div class="dialog-head">
               <h2>个人配置</h2>
-              <button class="secondary-button">关闭</button>
-            </form>
+              <button class="icon-button config-close-button" type="button" data-close-config aria-label="关闭个人配置" title="关闭个人配置">
+                <span class="action-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M6 6l12 12M18 6L6 18" />
+                  </svg>
+                </span>
+              </button>
+            </div>
             <section class="onboarding-intro" data-onboarding-intro hidden>
               <span>首次使用</span>
               <strong>先告诉 Agent 你真正关心什么</strong>
@@ -396,6 +403,6 @@
     <script src="static/vendor/react.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/react-dom.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/mermaid.min.js?v=11.9.0"></script>
-    <script src="static/home.js?v=20260812-newsroom-8"></script>
+    <script src="static/home.js?v=20260813-mermaid-light-1"></script>
   </body>
 </html>

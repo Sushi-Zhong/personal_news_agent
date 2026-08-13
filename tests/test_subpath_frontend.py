@@ -29,11 +29,24 @@ def test_shared_client_preserves_pna_prefix_for_api_requests():
     auth = (STATIC_DIR / "auth.html").read_text(encoding="utf-8")
     auth_script = (STATIC_DIR / "auth.js").read_text(encoding="utf-8")
     mobile_script = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
-    assert "home.js?v=20260812-newsroom-8" in home
+    assert "home.js?v=20260813-mermaid-light-1" in home
     assert "shared.js?v=20260810-phone-controls-2" in auth
     assert "ensureRegistrationChallenge(form, status)" in auth_script
     assert "ensureRegistrationChallenge(form, status)" in mobile_script
     assert "function ensureRegistrationChallenge" in source
+
+
+def test_recommended_topic_cache_replaces_by_event_key_or_article_overlap():
+    web = (STATIC_DIR / "web.js").read_text(encoding="utf-8")
+    mobile = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
+
+    assert "pna_recommended_topics_v3" in web
+    assert "sameRecommendedEvent" in web
+    assert "existing.event_key === incoming.event_key" in web
+    assert "articleIdsOverlap(existing.article_ids, incoming.article_ids)" in web
+    assert "sameRecommendedEvent" in mobile
+    assert "existing.event_key === incoming.event_key" in mobile
+    assert "articleIdsOverlap(existing.article_ids, incoming.article_ids)" in mobile
 
 
 def test_server_templates_keep_nginx_and_web_port_aligned():
@@ -67,14 +80,18 @@ def test_console_theme_has_dark_drawers_readable_content_and_responsive_rails():
 def test_console_can_switch_theme_without_breaking_fixed_editorial_columns():
     home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
     app = (STATIC_DIR / "home.js").read_text(encoding="utf-8")
-    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+    styles = (
+        (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        + "\n"
+        + (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+    )
 
     assert 'class="newsroom-grid news-console"' in home
     assert 'class="newsroom-left"' in home
     assert 'class="newsroom-center"' in home
     assert 'class="newsroom-right"' in home
     assert 'id="themeToggle"' in home
-    assert 'aria-label="切换浅色背景"' in home
+    assert 'aria-label="切换深色背景"' in home
     assert "themePreferenceKey" in app
     assert 'document.body.classList.toggle("console-light"' in app
     assert ".newsroom-shell.console-dark" in styles
@@ -96,14 +113,16 @@ def test_newsroom_redesign_has_stable_editorial_columns_and_non_disruptive_tools
     app = (STATIC_DIR / "home.js").read_text(encoding="utf-8")
     styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
 
-    assert 'static/newsroom.css?v=20260812-newsroom-8' in home
-    assert '20260812-newsroom-8' in app
+    assert 'static/newsroom.css?v=20260813-mermaid-light-1' in home
+    assert '20260813-mermaid-light-1' in app
     assert 'data-body-class="web-shell console-shell newsroom-shell"' in home
     assert 'data-body-class="mobile-shell newsroom-mobile"' in home
     assert 'class="newsroom-left"' in home
     assert 'class="newsroom-center"' in home
     assert 'class="newsroom-right"' in home
     assert 'class="analysis-board"' in home
+    assert 'data-current-category-chip' not in home
+    assert 'data-current-view-chip' not in home
     assert 'class="workspace-tools-popover"' not in home
     assert "--newsroom-left: 256px" in styles
     assert "--newsroom-right: 320px" in styles
@@ -189,10 +208,26 @@ def test_newsroom_typography_scale_and_floating_composer_are_consistent():
     assert "width: 100%" in composer
     assert "margin: 0" in composer
     assert "border-radius: 16px" in composer
+    assert "bottom: 0" in composer
     assert "backdrop-filter: blur(22px) saturate(150%)" in composer
     assert "calc(var(--newsroom-reading-gutter) * -1)" not in composer
+    dialog = styles.split(".newsroom-shell .main-dialog {", 1)[1].split("}", 1)[0]
+    assert "--composer-bottom-space: 18px" in dialog
+    assert "var(--composer-bottom-space)" in dialog
     assert ".newsroom-shell .assistant-markdown" in styles
     assert "font-size: var(--type-body)" in styles
+    assert ".newsroom-shell.console-light .assistant-markdown blockquote" in styles
+    light_markdown = styles.split(".newsroom-shell.console-light .assistant-markdown,", 1)[1].split("}", 1)[0]
+    assert "color: var(--ink)" in light_markdown
+    dialog = styles.split(".composer-dock .dialog-command {", 1)[1].split("}", 1)[0]
+    assert "padding: 4px" in dialog
+    assert "border-radius: 12px" in dialog
+    assert ".composer-dock .dialog-command input" in styles
+    input_rules = styles.split(".composer-dock .dialog-command input {", 1)[1].split("}", 1)[0]
+    assert "min-height: 34px" in input_rules
+    button_rules = styles.split(".composer-dock .dialog-command button {", 1)[1].split("}", 1)[0]
+    assert "min-height: 32px" in button_rules
+    assert "min-width: 32px" in button_rules
 
 
 def test_newsroom_reading_insets_and_theme_specific_controls_remain_legible():
@@ -340,19 +375,57 @@ def test_newsroom_primary_actions_share_flat_light_blue():
         assert "linear-gradient" not in block
 
 
+def test_newsroom_header_actions_use_restrained_icons_instead_of_text_labels():
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    app = (STATIC_DIR / "home.js").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    assert 'id="newTopicConversation"' in home
+    assert 'aria-label="新增关注"' in home
+    assert '<span aria-hidden="true">+</span>' in home
+    assert '>新增</button>' not in home
+    for control in ("themeToggle", "openConfig", "refresh"):
+        button = home.split(f'id="{control}"', 1)[1].split("</button>", 1)[0]
+        assert "action-icon" in button
+        assert "<svg" in button
+    assert ">个人配置</button>" not in home
+    assert ">刷新资讯</button>" not in home
+    assert 'button.querySelector(".action-icon")' in app
+    assert 'data-theme-icon="moon"' in home
+    assert 'data-theme-icon="sun"' in home
+    icon_button = styles.split(".newsroom-topbar .top-actions button {", 1)[1].split("}", 1)[0]
+    assert "width: 36px" in icon_button
+    assert "padding: 0" in icon_button
+    assert ".newsroom-topbar .action-icon" in styles
+    action_icon = styles.split(".newsroom-topbar .action-icon {", 1)[1].split("}", 1)[0]
+    assert "display: inline-flex" in action_icon
+    assert "align-items: center" in action_icon
+    assert "justify-content: center" in action_icon
+    svg = styles.split(".newsroom-topbar .action-icon svg {", 1)[1].split("}", 1)[0]
+    assert "display: block" in svg
+    assert "stroke: currentColor" in svg
+    round_add = styles.split(".newsroom-shell .round-add,", 1)[1].split("}", 1)[0]
+    assert "display: inline-flex" in round_add
+    assert "align-items: center" in round_add
+    assert "justify-content: center" in round_add
+
+
 
 def test_newsroom_slash_command_menu_typography_matches_body_scale():
     styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
 
     strong = styles.split(".newsroom-shell .slash-command-copy strong", 1)[1].split("}", 1)[0]
-    assert "font-size: var(--type-body)" in strong
+    assert "font-size: var(--type-control)" in strong
     assert "font-weight: 620" in strong
     assert "letter-spacing" not in strong
     copy = styles.split(".newsroom-shell .slash-command-copy", 1)[1].split("}", 1)[0]
-    assert "gap: 2px" in copy
+    assert "gap: 1px" in copy
     assert ".newsroom-shell .slash-command-copy span" in styles
-    assert "font-size: var(--type-control)" in styles
-    assert "font-size: var(--type-meta)" in styles
+    assert "font-size: var(--type-caption)" in styles
+    item = styles.split(".newsroom-shell .slash-command-item", 1)[1].split("}", 1)[0]
+    assert "min-height: 38px" in item
+    assert "padding: 5px 8px" in item
+    assert "border-radius: 10px" in item
 
 
 def test_newsroom_slash_command_menu_uses_light_editorial_popover():
@@ -364,10 +437,46 @@ def test_newsroom_slash_command_menu_uses_light_editorial_popover():
     assert "border-radius: 16px" in menu
     assert "width: min(100%, 720px)" in menu
     assert "max-height: min(330px, 46vh)" in menu
+    assert "scrollbar-width: none" in menu
     active = styles.split(".newsroom-shell .slash-command-item.active", 1)[1].split("}", 1)[0]
     assert "background: var(--accent-soft)" in active
     assert "color: var(--ink)" in active
     assert "background: var(--accent)" not in active
+    assert ".newsroom-shell .slash-command-menu::-webkit-scrollbar" in styles
+
+
+def test_newsroom_slash_command_menu_does_not_preselect_first_item():
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    assert "let activeIndex = -1" in shared
+    assert "activeIndex === index" in shared
+    assert "aria-selected=\"${activeIndex === index}\"" in shared
+    assert "if (activeIndex < 0) activeIndex = 0" in shared
+    assert "if (activeIndex < 0) return" in shared
+    light_active = styles.split(".newsroom-shell.console-light .slash-command-item:hover", 1)[1].split("}", 1)[0]
+    assert "box-shadow: none !important" in light_active
+    assert "background: #f5f7fb !important" in light_active
+
+
+def test_newsroom_skill_command_submit_keeps_auto_scroll_sticky():
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+    mobile = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
+
+    select_command = shared.split("const selectCommand = (command) => {", 1)[1].split("};", 1)[0]
+    assert 'input.dispatchEvent(new Event("input", { bubbles: true }))' in select_command
+    send_into_turn = shared.split("async function sendChatIntoTurn", 1)[1].split("function focusFromChatMessage", 1)[0]
+    assert 'scrollChatToBottom(targetNode, "auto", { force: true });' in send_into_turn
+    assert "const streamed = await streamChat(payload, assistantNode, targetNode);" in send_into_turn
+    keydown_handler = shared.split('input.addEventListener("keydown", (event) => {', 1)[1].split('menu.addEventListener("mousedown"', 1)[0]
+    enter_handler = keydown_handler.split('} else if (event.key === "Enter" || event.key === "Tab") {', 1)[1].split('} else if (event.key === "Escape")', 1)[0]
+    assert 'if (activeIndex < 0) return;\n      event.preventDefault();' in enter_handler
+    assert 'event.preventDefault();\n      if (activeIndex < 0) return;' not in enter_handler
+    mobile_submit = mobile.split('document.querySelector("#chatForm").addEventListener("submit", async (event) => {', 1)[1].split('document.querySelector("#editProfileMobile")', 1)[0]
+    mobile_clear_index = mobile_submit.index('input.value = "";')
+    mobile_send_index = mobile_submit.index("await handleMobileAssistantInput(message);")
+    assert mobile_clear_index < mobile_send_index
+    assert 'input.dispatchEvent(new Event("input", { bubbles: true }))' in mobile_submit
 
 
 def test_newsroom_config_dialog_scroll_and_dark_surface_are_contained():
@@ -377,7 +486,7 @@ def test_newsroom_config_dialog_scroll_and_dark_surface_are_contained():
     assert "overflow: hidden" in dialog
     assert "display: flex" in dialog
     assert "padding: 0" in dialog
-    assert "max-height: min(760px, calc(100dvh - 40px))" in dialog
+    assert "max-height: min(700px, calc(100dvh - 32px))" in dialog
     content = styles.split(".newsroom-shell .config-dialog #onboardingForm", 1)[1].split("}", 1)[0]
     assert "flex: 1 1 auto" in content
     assert "overflow-y: auto" in content
@@ -394,6 +503,47 @@ def test_newsroom_config_dialog_scroll_and_dark_surface_are_contained():
     assert "background: #131c2d" in dark_preview
 
 
+def test_newsroom_config_dialog_close_action_is_explicit_and_reachable():
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    web = (STATIC_DIR / "web.js").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    assert 'id="configDialog"' in home
+    assert 'data-close-config' in home
+    close_button = home.split('data-close-config', 1)[1].split("</button>", 1)[0]
+    assert 'aria-label="关闭个人配置"' in close_button
+    assert "<svg" in close_button
+    assert "关闭</button>" not in close_button
+    assert "showModal()" in web
+    assert 'data-close-config' in web
+    assert "dialog.close()" in web
+    assert ".newsroom-shell .config-dialog:not([open])" in styles
+    hidden_dialog = styles.split(".newsroom-shell .config-dialog:not([open])", 1)[1].split("}", 1)[0]
+    assert "display: none" in hidden_dialog
+
+
+def test_newsroom_config_dialog_controls_are_compact_not_roomy():
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    dialog = styles.split(".newsroom-shell .config-dialog {", 1)[1].split("}", 1)[0]
+    assert "width: min(640px, calc(100vw - 32px))" in dialog
+    assert "max-height: min(700px, calc(100dvh - 32px))" in dialog
+    head = styles.split(".newsroom-shell .config-dialog .dialog-head {", 1)[1].split("}", 1)[0]
+    assert "padding: 16px 20px 12px" in head
+    field = styles.split(".newsroom-shell .config-dialog input,", 1)[1].split("}", 1)[0]
+    assert "min-height: 38px" in field
+    assert "border-radius: 10px" in field
+    textarea = styles.split(".newsroom-shell .config-dialog textarea {", 1)[1].split("}", 1)[0]
+    assert "min-height: 96px" in textarea
+    assert "max-height: 150px" in textarea
+    label = styles.split(".newsroom-shell .config-dialog .choice-grid label {", 1)[1].split("}", 1)[0]
+    assert "min-height: 30px" in label
+    assert "font-size: var(--type-control)" in label
+    checkbox = styles.split('.newsroom-shell .config-dialog .choice-grid input[type="checkbox"]', 1)[1].split("}", 1)[0]
+    assert "width: 18px" in checkbox
+    assert "height: 18px" in checkbox
+
+
 def test_newsroom_light_slash_command_menu_stays_white_not_button_blue():
     styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
 
@@ -406,7 +556,7 @@ def test_newsroom_light_slash_command_menu_stays_white_not_button_blue():
     assert "color: var(--ink) !important" in light_item
     assert "linear-gradient" not in light_item
     light_active = styles.split(".newsroom-shell.console-light .slash-command-item:hover", 1)[1].split("}", 1)[0]
-    assert "background: #ffffff !important" in light_active
+    assert "background: #f5f7fb !important" in light_active
     assert "var(--accent-soft)" not in light_active
 
 
@@ -424,6 +574,67 @@ def test_newsroom_removes_explanatory_microcopy_from_rails():
     assert '<header class="rail-title"><h2>跟踪与关联</h2></header>' in home
     assert ".newsroom-left .refresh-note" not in styles
     assert ".rail-title p" not in styles
+
+
+def test_newsroom_refresh_keeps_topic_shell_synced_with_restored_conversation():
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    web = (STATIC_DIR / "web.js").read_text(encoding="utf-8")
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+
+    center = home.split('<section class="newsroom-center">', 1)[1].split('<aside class="newsroom-right">', 1)[0]
+    assert "新能源汽车产业链" not in center
+    assert "<h2 data-agent-topic>新对话</h2>" in center
+    assert "<h2 data-topic-heading>新对话</h2>" in center
+    assert 'input name="topic" value=""' in home
+    assert "function syncTopicShell" in web
+    assert "syncTopicShell();" in web.split("async function loadTopicView", 1)[1].split("if (!consoleState.topic)", 1)[0]
+    assert "const requestedTopic = consoleState.topic;" in web
+    assert "if (requestedTopic !== consoleState.topic) return;" in web
+    assert "function applyChatConversationContext(context = {}, options = {})" in web
+    assert "&& !options.forceTopic" in web
+    assert "options.reloadTopicView && previousTopic !== consoleState.topic" in web
+    assert "window.applyChatConversationContext(data.context || {}, { forceTopic: true, reloadTopicView: true })" in shared
+    bootstrap = web.split("const consoleState =", 1)[0]
+    assert "conversationId = null" not in bootstrap
+    assert 'localStorage.removeItem("pna_conversation_id")' not in bootstrap
+    assert "async function initializeNewsroom()" in web
+    initializer = web.split("async function initializeNewsroom()", 1)[1].split("async function initializeUserProfileState", 1)[0]
+    assert "await restoreChatMemory(\"#messages\");" in initializer
+    assert "await refreshWeb();" in initializer
+    assert initializer.index('await restoreChatMemory("#messages");') < initializer.index("await refreshWeb();")
+    assert 'restoreChatMemory("#messages");' not in web.split("async function initializeNewsroom()", 1)[0]
+
+
+def test_newsroom_sent_message_and_send_control_use_compact_capsules():
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    user_turn = styles.split(".newsroom-shell .chat-user {", 1)[1].split("}", 1)[0]
+    assert "max-width: min(68%, 560px)" in user_turn
+    user_bubble = styles.split(".newsroom-shell .chat-user .chat-bubble {", 1)[1].split("}", 1)[0]
+    assert "padding: 9px 14px" in user_bubble
+    assert "border-radius: 15px 15px 5px 15px" in user_bubble
+    send_button = styles.split(".composer-dock .dialog-command button {", 1)[1].split("}", 1)[0]
+    assert 'class="send-arrow"' in home
+    assert 'aria-label="发送消息"' in home
+    assert '<span aria-hidden="true">↑</span>' in home
+    assert ">发送</button>" not in home
+    assert "width: 32px" in send_button
+    assert "height: 32px" in send_button
+    assert "padding: 0" in send_button
+    assert "border-radius: 999px" in send_button
+
+
+def test_newsroom_center_keeps_a_continuous_surface_behind_composer_tail():
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    center = styles.split(".newsroom-center {", 1)[1].split("}", 1)[0]
+    assert "padding: 24px var(--newsroom-gap) 0" in center
+    dialog = styles.split(".newsroom-shell .main-dialog {", 1)[1].split("}", 1)[0]
+    assert "min-height: 100%" in dialog
+    assert "box-sizing: border-box" in dialog
+    assert "border-bottom-left-radius: 0" in dialog
+    assert "border-bottom-right-radius: 0" in dialog
 
 
 def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_layout():
@@ -496,6 +707,90 @@ def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_lay
     assert "外部搜索工具" not in home
     assert "ES --" not in home
     assert "MySQL --" not in home
+
+
+def test_newsroom_mermaid_graph_adapts_to_light_theme():
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    assert "function currentMermaidTheme" in shared
+    assert 'document.body.classList.contains("console-dark") ? "dark" : "base"' in shared
+    assert 'theme: "dark"' not in shared
+    assert 'document.addEventListener("pna:themechange"' in shared
+    assert ".newsroom-shell.console-light .chat-mermaid" in styles
+    light_graph = styles.split(".newsroom-shell.console-light .chat-mermaid {", 1)[1].split("}", 1)[0]
+    assert "background: #ffffff" in light_graph
+    assert "border-color: #dbe7f6" in light_graph
+    assert ".newsroom-shell.console-light .mermaid-viewer-dialog" in styles
+    assert "EVENT GRAPH" not in shared
+
+
+def test_newsroom_mermaid_viewer_has_restrained_zoom_and_drag_controls():
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    assert 'class="mermaid-viewer-stage"' in shared
+    assert 'class="mermaid-viewer-controls"' in shared
+    assert 'data-mermaid-zoom="out"' in shared
+    assert 'data-mermaid-zoom="in"' in shared
+    assert 'data-mermaid-zoom="reset"' in shared
+    assert 'data-mermaid-zoom-value' in shared
+    assert "function bindMermaidPanZoom" in shared
+    assert "function fitMermaidToStage" in shared
+    assert "getBoundingClientRect" in shared
+    assert "applyMermaidTransform" in shared
+    assert "state.fitScale" in shared
+    assert "pointerdown" in shared
+    assert "wheel" in shared
+    assert "dblclick" in shared
+    assert ".mermaid-viewer-controls" in styles
+    controls = styles.split(".mermaid-viewer-controls", 1)[1].split("}", 1)[0]
+    assert "position: absolute" in controls
+    assert "background: rgba(255, 255, 255, 0.86)" in controls
+    assert ".newsroom-shell.console-dark .mermaid-viewer-controls" in styles
+    assert ".newsroom-shell.console-light .mermaid-viewer-controls button" in styles
+    light_buttons = styles.split(".newsroom-shell.console-light .mermaid-viewer-controls button", 1)[1].split("}", 1)[0]
+    assert "color: var(--ink) !important" in light_buttons
+    assert "background: #ffffff !important" in light_buttons
+
+
+def test_newsroom_mermaid_viewer_fills_stage_and_uses_node_click_selection():
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+    styles = (
+        (STATIC_DIR / "styles.css").read_text(encoding="utf-8")
+        + "\n"
+        + (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+    )
+
+    assert ".mermaid-viewer-shell" in styles
+    shell = styles.split(".mermaid-viewer-shell {", 1)[1].split("}", 1)[0]
+    assert "grid-template-rows: auto minmax(0, 1fr)" in shell
+    assert ".mermaid-viewer-body" in styles
+    body = styles.split(".mermaid-viewer-body {", 1)[1].split("}", 1)[0]
+    assert "min-height: 0" in body
+    assert ".mermaid-viewer-stage" in styles
+    stage = styles.split(".mermaid-viewer-stage {", 1)[1].split("}", 1)[0]
+    assert "display: flex" in stage
+    assert "align-items: center" in styles
+    assert "justify-content: center" in styles
+    assert ".mermaid-viewer-canvas" in styles
+    assert "width: 100%" in styles
+    assert "height: 100%" in styles
+    assert "min-height: 0" in styles
+    assert "addEventListener(\"pointerdown\"" in shared
+    assert "data-mermaid-node" in shared
+    assert '"[data-mermaid-node]"' in shared
+    assert "selectMermaidNode" in shared
+    assert "selectNode(event.target.closest?.(\".node\"))" not in shared
+
+
+def test_newsroom_mermaid_viewer_zoom_keeps_svg_vector_crisp():
+    shared = (STATIC_DIR / "shared.js").read_text(encoding="utf-8")
+
+    assert "svg.style.width = `${Math.round(stageWidth * state.scale)}px`" in shared
+    assert "svg.style.height = `${Math.round(stageHeight * state.scale)}px`" in shared
+    assert "svg.style.transform = `translate(" not in shared
+    assert "will-change: transform" not in (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
 
 
 def test_chat_web_search_is_enabled_by_default_but_remains_user_controllable():
