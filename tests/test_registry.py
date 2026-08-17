@@ -3,6 +3,201 @@ from pathlib import Path
 import pytest
 
 from personal_news_agent.services.source_registry import SourceRegistryError, SourceRegistryService
+from personal_news_agent.skills.base import SkillContext, SkillResult, SkillSpec
+from personal_news_agent.skills.manifest import SkillDefinition
+from personal_news_agent.skills.registry import SkillRegistry
+
+
+class _RecordingSkill:
+    spec = SkillSpec(
+        command="/report",
+        name="recording",
+        description="recording",
+        usage="/report [topic]",
+    )
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+        self.contexts: list[SkillContext] = []
+
+    async def run(self, args: list[str], context: SkillContext) -> SkillResult:
+        self.calls.append(args)
+        self.contexts.append(context)
+        return SkillResult(command=self.spec.command, title="ok", message="ok", data={"args": args})
+
+
+class _StructuredSkill(_RecordingSkill):
+    spec = SkillSpec(
+        command="/changed",
+        name="changed",
+        description="changed",
+        usage="/changed [topic]",
+    )
+
+    async def run_structured(self, arguments, context: SkillContext) -> SkillResult:
+        self.calls.append(arguments)
+        return SkillResult(
+            command=self.spec.command,
+            title="ok",
+            message="ok",
+            data=arguments.model_dump(mode="json"),
+        )
+
+
+class _EvidenceSkill(_RecordingSkill):
+    async def run(self, args: list[str], context: SkillContext) -> SkillResult:
+        return SkillResult(
+            command=self.spec.command,
+            title="ok",
+            message="ok",
+            data={
+                "evidence": [
+                    {
+                        "title": "实际取得的证据",
+                        "url": "https://example.com/story?utm_source=test",
+                        "source_id": "example",
+                        "origin": "local",
+                    },
+                    {"title": "无效模型来源", "url": "invented-without-host"},
+                ],
+                "sources": [
+                    {
+                        "title": "同一证据",
+                        "url": "https://example.com/story",
+                        "source_id": "example",
+                        "origin": "local",
+                    }
+                ],
+            },
+        )
+
+
+def _definition(**overrides) -> SkillDefinition:
+    values = {
+        "id": "report",
+        "name": "report",
+        "commands": ("/report",),
+        "aliases": ("/r",),
+        "exposure": "public",
+        "description": "report",
+        "intent_examples": (),
+        "handler": None,
+        "arguments_model": None,
+        "agent_skill": None,
+        "required_services": (),
+        "network_policy": "local_only",
+        "side_effect": "read_only",
+        "confirmation_required": False,
+        "output_kind": "default_markdown",
+        "citation_policy": "none",
+        "fallback_policy": "default_markdown",
+        "enabled": True,
+    }
+    values.update(overrides)
+    return SkillDefinition(**values)
+
+
+@pytest.mark.asyncio
+async def test_skill_registry_execute_text_supports_legacy_alias() -> None:
+    skill = _RecordingSkill()
+    registry = SkillRegistry([skill], definitions=[_definition()])
+
+    result = await registry.execute_text('/r "AI Agent"', SkillContext(services={}))
+
+    assert result.command == "/report"
+    assert result.data["args"] == ["AI Agent"]
+    assert skill.calls == [["AI Agent"]]
+
+
+@pytest.mark.asyncio
+async def test_skill_registry_execute_delegates_to_execute_text() -> None:
+    skill = _RecordingSkill()
+    registry = SkillRegistry([skill], definitions=[_definition()])
+
+    result = await registry.execute("/report AI", SkillContext(services={}))
+
+    assert result.data["args"] == ["AI"]
+
+
+@pytest.mark.asyncio
+async def test_skill_registry_execute_structured_validates_and_calls_structured_handler() -> None:
+    skill = _StructuredSkill()
+    definition = _definition(
+        id="changed",
+        commands=("/changed",),
+        aliases=(),
+        arguments_model="personal_news_agent.skills.arguments:ChangedArguments",
+        output_kind="change_digest",
+    )
+    registry = SkillRegistry([skill], definitions=[definition])
+
+    result = await registry.execute_structured(
+        "changed",
+        {"topic": "OpenAI", "baseline_expression": "昨天"},
+        SkillContext(services={}),
+    )
+
+    assert result.data["topic"] == "OpenAI"
+    assert result.data["baseline_expression"] == "昨天"
+    assert skill.calls[0].topic == "OpenAI"
+    assert result.skill_id == "changed"
+    assert result.output_kind == "change_digest"
+
+
+@pytest.mark.asyncio
+async def test_skill_registry_execute_text_applies_manifest_output_kind() -> None:
+    skill = _RecordingSkill()
+    definition = _definition(output_kind="topic_report")
+    registry = SkillRegistry([skill], definitions=[definition])
+
+    result = await registry.execute_text("/report AI", SkillContext(services={}))
+
+    assert result.skill_id == "report"
+    assert result.output_kind == "topic_report"
+
+
+@pytest.mark.asyncio
+async def test_skill_registry_enforces_local_only_network_policy() -> None:
+    skill = _RecordingSkill()
+    registry = SkillRegistry([skill], definitions=[_definition(network_policy="local_only")])
+
+    await registry.execute_text(
+        "/report AI",
+        SkillContext(services={}, allow_web_search=True),
+    )
+
+    assert skill.contexts[0].allow_web_search is False
+
+
+@pytest.mark.asyncio
+async def test_skill_registry_projects_observed_handler_urls_into_unified_evidence() -> None:
+    registry = SkillRegistry([_EvidenceSkill()], definitions=[_definition(citation_policy="evidence_required")])
+
+    result = await registry.execute_text("/report AI", SkillContext(services={}))
+
+    assert len(result.evidence) == 1
+    assert result.evidence[0].index == 1
+    assert result.evidence[0].url == "https://example.com/story"
+    assert result.evidence[0].claim_role == "context"
+
+
+@pytest.mark.asyncio
+async def test_skill_registry_execute_structured_rejects_extra_arguments() -> None:
+    skill = _StructuredSkill()
+    definition = _definition(
+        id="changed",
+        commands=("/changed",),
+        aliases=(),
+        arguments_model="personal_news_agent.skills.arguments:ChangedArguments",
+    )
+    registry = SkillRegistry([skill], definitions=[definition])
+
+    with pytest.raises(ValueError, match="changed.*arguments"):
+        await registry.execute_structured(
+            "changed",
+            {"topic": "OpenAI", "unexpected": True},
+            SkillContext(services={}),
+        )
 
 
 def test_registry_loads_focused_categories_and_sources():

@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 ._*
+.DS_Store
 *.py[codz]
 *$py.class
 
@@ -65,6 +66,8 @@ db.sqlite3
 db.sqlite3-journal
 personal_news.db
 personal_news.db-journal
+*.db-shm
+*.db-wal
 runtime/
 data/cc_runtime/
 .devserver.pid

@@ -414,7 +414,10 @@ async function handleMobileAssistantInput(message) {
       setAssistantTurnText(assistantNode, `已更新信息流${mobileCategory ? `：${mobileCategory}` : "。"}。`);
       return null;
     }
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/map、/report、/brief、/related、/schedule、/sources。");
+    if (await isPublicAssistantSkillCommand(command.name)) {
+      return sendChatIntoTurn(message, assistantNode);
+    }
+    setAssistantTurnText(assistantNode, "无法识别这个指令，请输入 / 查看可用技能。");
     return null;
   } catch (error) {
     setAssistantTurnText(assistantNode, error.message);
@@ -594,6 +597,7 @@ async function startNewMobileTopicConversation() {
     messages.innerHTML = "";
     messages.appendChild(chatTurn("assistant", "请输入要关注的主题。你发出的第一句话会成为这组关注对话的主题。"));
   }
+  renderMobileResponseScopedFeed([]);
   closeMobilePopover();
   await loadMobileTopics();
 }

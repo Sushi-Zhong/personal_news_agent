@@ -1,0 +1,4 @@
+interface:
+  display_name: "新闻变化摘要"
+  short_description: "比较基线与当前证据，只输出可追溯的实质变化"
+  default_prompt: "Use $news-change-digest to identify material changes from the supplied evidence ledger."

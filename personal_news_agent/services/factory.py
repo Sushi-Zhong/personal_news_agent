@@ -8,7 +8,9 @@ from personal_news_agent.config import Settings
 from personal_news_agent.services.auth import AuthService
 from personal_news_agent.services.chat import NewsChatService
 from personal_news_agent.services.cc_runtime import CCRuntimeOrchestrator
+from personal_news_agent.services.change_detection import ChangeDetectionService
 from personal_news_agent.services.content_moderation import TextModerationPlusService
+from personal_news_agent.services.coverage_comparison import CoverageComparisonService
 from personal_news_agent.services.crawl import CrawlScheduler
 from personal_news_agent.services.deep_dive import DeepDiveService
 from personal_news_agent.services.events import EventDiscoveryService
@@ -19,8 +21,10 @@ from personal_news_agent.services.native_ingestion import NativeSearchIngestionS
 from personal_news_agent.services.onboarding import OnboardingService
 from personal_news_agent.services.personalization import PersonalizationService
 from personal_news_agent.services.reports import ReportGenerationService
+from personal_news_agent.services.schedule_confirmation import ScheduleConfirmationService
 from personal_news_agent.services.search import UnifiedSearchService, external_provider_from_settings
 from personal_news_agent.services.search_index import ArticleSearchIndex, ElasticsearchArticleIndex
+from personal_news_agent.services.skill_router import SkillRouter
 from personal_news_agent.services.source_registry import SourceRegistryService
 from personal_news_agent.services.store import NewsStore
 from personal_news_agent.services.tasks import ScheduledTaskService
@@ -29,7 +33,10 @@ from personal_news_agent.services.topic_extraction import TopicExtractionService
 from personal_news_agent.services.topic_summary import TopicSummaryService
 from personal_news_agent.services.topic_views import TopicViewService
 from personal_news_agent.services.trending_topics import TrendingTopicService
+from personal_news_agent.services.time_context import application_timezone
 from personal_news_agent.services.url_store import CrawlUrlStore, MySQLCrawlUrlStore
+from personal_news_agent.skills.catalog import all_definitions, validate_default_catalog
+from personal_news_agent.skills.manifest import validate_service_bindings
 from personal_news_agent.skills.registry import build_default_registry
 
 
@@ -68,6 +75,18 @@ def build_services(settings: Settings) -> dict[str, Any]:
         native_ingestion=native_ingestion,
         llm_client=llm_client,
         cc_runtime=cc_runtime,
+        app_timezone=application_timezone(settings.app_timezone),
+    )
+    change_detection = ChangeDetectionService(
+        store,
+        search_service,
+        cc_runtime=cc_runtime,
+        app_timezone=application_timezone(settings.app_timezone),
+    )
+    coverage_comparison = CoverageComparisonService(
+        store,
+        search_service,
+        cc_runtime=cc_runtime,
     )
     topic_agent = TopicAgentService(store, tasks, topic_views=topic_views, native_ingestion=native_ingestion)
     content_moderation = TextModerationPlusService()
@@ -78,6 +97,8 @@ def build_services(settings: Settings) -> dict[str, Any]:
     )
 
     skill_registry = build_default_registry()
+    skill_router = SkillRouter(llm_client)
+    schedule_confirmation = ScheduleConfirmationService()
     services: dict[str, Any] = {
 
         "registry": registry,
@@ -98,12 +119,16 @@ def build_services(settings: Settings) -> dict[str, Any]:
         "topic_summary": topic_summary,
         "trending_topics": trending_topics,
         "tasks": tasks,
+        "change_detection": change_detection,
+        "coverage_comparison": coverage_comparison,
         "topic_agent": topic_agent,
         "topic_extraction": topic_extraction,
         "content_moderation": content_moderation,
         "local_agent": local_agent,
         "cc_runtime": cc_runtime,
         "skill_registry": skill_registry,
+        "skill_router": skill_router,
+        "schedule_confirmation": schedule_confirmation,
         "crawl": CrawlScheduler(registry, store, url_store, search_index),
     }
     chat = NewsChatService(
@@ -117,8 +142,12 @@ def build_services(settings: Settings) -> dict[str, Any]:
         content_moderation=content_moderation,
         local_agent=local_agent,
         cc_runtime=cc_runtime,
+        llm_client=llm_client,
         skill_registry=skill_registry,
+        skill_router=skill_router,
         services=services,
     )
     services["chat"] = chat
+    validate_default_catalog()
+    validate_service_bindings(all_definitions(), services)
     return services

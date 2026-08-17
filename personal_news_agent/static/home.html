@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>个人资讯助手</title>
     <link rel="stylesheet" href="static/styles.css?v=20260811-topic-pulse-6" />
-    <link rel="stylesheet" href="static/newsroom.css?v=20260813-mermaid-light-1" />
+    <link rel="stylesheet" href="static/newsroom.css?v=20260814-ui-fix-3" />
   </head>
   <body>
     <template id="webTemplate" data-body-class="web-shell console-shell newsroom-shell">
@@ -237,10 +237,12 @@
                 <select name="model_key"></select>
                 <select name="output_style"></select>
               </div>
-              <button>初始化/保存配置</button>
             </form>
-            <p id="onboardingStatus" class="status"></p>
             <pre id="assistantPromptPreview" class="prompt-preview"></pre>
+            <div class="config-dialog-footer">
+              <p id="onboardingStatus" class="status" aria-live="polite"></p>
+              <button class="config-save-button" type="submit" form="onboardingForm">保存</button>
+            </div>
           </dialog>
     </template>
 
@@ -403,6 +405,6 @@
     <script src="static/vendor/react.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/react-dom.production.min.js?v=18.3.1"></script>
     <script src="static/vendor/mermaid.min.js?v=11.9.0"></script>
-    <script src="static/home.js?v=20260813-mermaid-light-1"></script>
+    <script src="static/home.js?v=20260814-ui-fix-3"></script>
   </body>
 </html>

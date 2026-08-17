@@ -29,7 +29,7 @@ def test_shared_client_preserves_pna_prefix_for_api_requests():
     auth = (STATIC_DIR / "auth.html").read_text(encoding="utf-8")
     auth_script = (STATIC_DIR / "auth.js").read_text(encoding="utf-8")
     mobile_script = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
-    assert "home.js?v=20260813-mermaid-light-1" in home
+    assert "home.js?v=20260814-ui-fix-3" in home
     assert "shared.js?v=20260810-phone-controls-2" in auth
     assert "ensureRegistrationChallenge(form, status)" in auth_script
     assert "ensureRegistrationChallenge(form, status)" in mobile_script
@@ -113,8 +113,8 @@ def test_newsroom_redesign_has_stable_editorial_columns_and_non_disruptive_tools
     app = (STATIC_DIR / "home.js").read_text(encoding="utf-8")
     styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
 
-    assert 'static/newsroom.css?v=20260813-mermaid-light-1' in home
-    assert '20260813-mermaid-light-1' in app
+    assert 'static/newsroom.css?v=20260814-ui-fix-3' in home
+    assert '20260814-ui-fix-3' in app
     assert 'data-body-class="web-shell console-shell newsroom-shell"' in home
     assert 'data-body-class="mobile-shell newsroom-mobile"' in home
     assert 'class="newsroom-left"' in home
@@ -134,6 +134,17 @@ def test_newsroom_redesign_has_stable_editorial_columns_and_non_disruptive_tools
     assert "@media (prefers-reduced-transparency: reduce)" in styles
     assert "@media (prefers-contrast: more)" in styles
     assert 'window.matchMedia("(max-width: 1024px)")' in app
+
+
+def test_newsroom_refresh_fix_bumps_dynamic_asset_version():
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    app = (STATIC_DIR / "home.js").read_text(encoding="utf-8")
+
+    expected_version = "20260814-ui-fix-3"
+    assert f"home.js?v={expected_version}" in home
+    assert f"newsroom.css?v={expected_version}" in home
+    assert expected_version in app
+    assert "20260814-skill-flow-1" not in app
 
 
 def test_newsroom_surface_uses_concise_blue_only_copy_and_controls():
@@ -225,7 +236,7 @@ def test_newsroom_typography_scale_and_floating_composer_are_consistent():
     assert ".composer-dock .dialog-command input" in styles
     input_rules = styles.split(".composer-dock .dialog-command input {", 1)[1].split("}", 1)[0]
     assert "min-height: 34px" in input_rules
-    button_rules = styles.split(".composer-dock .dialog-command button {", 1)[1].split("}", 1)[0]
+    button_rules = styles.split(".composer-dock .dialog-command > .send-arrow {", 1)[1].split("}", 1)[0]
     assert "min-height: 32px" in button_rules
     assert "min-width: 32px" in button_rules
 
@@ -365,7 +376,7 @@ def test_newsroom_primary_actions_share_flat_light_blue():
     for selector in (
         ".newsroom-topbar .top-actions #refresh",
         ".newsroom-shell .prompt-suggestions .quick-action.primary",
-        ".composer-dock .dialog-command button",
+        ".composer-dock .dialog-command > .send-arrow",
         ".newsroom-shell .round-add",
         ".newsroom-shell .chat-user .chat-bubble",
     ):
@@ -522,6 +533,50 @@ def test_newsroom_config_dialog_close_action_is_explicit_and_reachable():
     assert "display: none" in hidden_dialog
 
 
+def test_newsroom_config_dialog_has_persistent_save_action():
+    home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    dialog = home.split('id="configDialog"', 1)[1].split("</dialog>", 1)[0]
+    form = dialog.split('id="onboardingForm"', 1)[1].split("</form>", 1)[0]
+    assert "初始化/保存配置" not in form
+    assert 'class="config-dialog-footer"' in dialog
+    assert 'type="submit" form="onboardingForm"' in dialog
+    assert ">保存<" in dialog
+    footer = styles.split(".newsroom-shell .config-dialog .config-dialog-footer {", 1)[1].split("}", 1)[0]
+    assert "flex: 0 0 auto" in footer
+    assert "background:" in footer
+
+
+def test_newsroom_light_event_popover_uses_light_surface():
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    popover = styles.split(".newsroom-shell.console-light .event-action-popover {", 1)[1].split("}", 1)[0]
+    pointer = styles.split(".newsroom-shell.console-light .event-action-popover::before {", 1)[1].split("}", 1)[0]
+    copy = styles.split(".newsroom-shell.console-light .event-action-popover p {", 1)[1].split("}", 1)[0]
+    primary = styles.split(".newsroom-shell.console-light .event-action-popover button:first-child {", 1)[1].split("}", 1)[0]
+    assert "background: #ffffff" in popover
+    assert "color: var(--ink)" in popover
+    assert "background: #ffffff" in pointer
+    assert "color: var(--ink-soft)" in copy
+    assert "background: var(--accent)" in primary
+
+
+def test_newsroom_event_popover_uses_shared_typography_scale():
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    surface = styles.split(".newsroom-shell .event-action-popover {", 1)[1].split("}", 1)[0]
+    title = styles.split(".newsroom-shell .event-action-popover strong {", 1)[1].split("}", 1)[0]
+    copy = styles.split(".newsroom-shell .event-action-popover p {", 1)[1].split("}", 1)[0]
+    button = styles.split(".newsroom-shell .event-action-popover button {", 1)[1].split("}", 1)[0]
+    assert "font-family: var(--font-newsroom)" in surface
+    assert "font-size: var(--type-body)" in title
+    assert "font-size: var(--type-meta)" in copy
+    assert "font-size: var(--type-control)" in button
+    assert "font-weight: 560" in button
+    assert "min-height: 34px" in button
+
+
 def test_newsroom_config_dialog_controls_are_compact_not_roomy():
     styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
 
@@ -605,6 +660,50 @@ def test_newsroom_refresh_keeps_topic_shell_synced_with_restored_conversation():
     assert 'restoreChatMemory("#messages");' not in web.split("async function initializeNewsroom()", 1)[0]
 
 
+def test_new_conversation_clears_topic_presentation_on_desktop_and_mobile():
+    web = (STATIC_DIR / "web.js").read_text(encoding="utf-8")
+    mobile = (STATIC_DIR / "mobile.js").read_text(encoding="utf-8")
+
+    desktop_reset = web.split("function startNewTopicConversation()", 1)[1].split("async function loadTasks", 1)[0]
+    mobile_reset = mobile.split("async function startNewMobileTopicConversation()", 1)[1].split("function mergeMobileTopics", 1)[0]
+    assert "loadTopicView();" in desktop_reset
+    assert "renderMobileResponseScopedFeed([]);" in mobile_reset
+
+
+def test_newsroom_refresh_loads_topic_view_even_when_sidebar_requests_fail():
+    web = (STATIC_DIR / "web.js").read_text(encoding="utf-8")
+
+    refresh = web.split("async function refreshWeb()", 1)[1].split("async function handleAssistantInput", 1)[0]
+    assert "Promise.allSettled" in refresh
+    assert "const refreshResults =" in refresh
+    assert "await loadTopicView();" in refresh
+    assert refresh.index("Promise.allSettled") < refresh.index("await loadTopicView();")
+    assert "refreshResults.some((result) => result.status === \"rejected\")" in refresh
+    assert "部分数据稍后重试" in refresh
+    assert "Promise.all([" not in refresh
+
+
+def test_newsroom_topic_view_failure_clears_loading_placeholders():
+    web = (STATIC_DIR / "web.js").read_text(encoding="utf-8")
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    load_topic = web.split("async function loadTopicView()", 1)[1].split("async function runNativeIngest", 1)[0]
+    catch_block = load_topic.split("} catch (error) {", 1)[1].split("\n  }", 1)[0]
+    assert "renderTopicLoadError(error, requestedTopic);" in catch_block
+    assert "function renderTopicLoadError" in web
+    error_renderer = web.split("function renderTopicLoadError", 1)[1].split("function renderTopicHeader", 1)[0]
+    assert "[data-topic-summary]" in error_renderer
+    assert "专题内容暂时无法显示" in error_renderer
+    assert "[data-topic-article-count]" in error_renderer
+    assert "[data-topic-event-count]" in error_renderer
+    assert "[data-topic-node-count]" in error_renderer
+    assert ".topic-load-error" in styles
+    error_style = styles.split(".analysis-board .topic-load-error", 1)[1].split("}", 1)[0]
+    assert "color: var(--ink-soft)" in error_style
+    empty_style = styles.split(".analysis-board .topic-visual .empty-state", 1)[1].split("}", 1)[0]
+    assert "color: var(--ink-soft)" in empty_style
+
+
 def test_newsroom_sent_message_and_send_control_use_compact_capsules():
     home = (STATIC_DIR / "home.html").read_text(encoding="utf-8")
     styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
@@ -614,7 +713,8 @@ def test_newsroom_sent_message_and_send_control_use_compact_capsules():
     user_bubble = styles.split(".newsroom-shell .chat-user .chat-bubble {", 1)[1].split("}", 1)[0]
     assert "padding: 9px 14px" in user_bubble
     assert "border-radius: 15px 15px 5px 15px" in user_bubble
-    send_button = styles.split(".composer-dock .dialog-command button {", 1)[1].split("}", 1)[0]
+    assert ".composer-dock .dialog-command button {" not in styles
+    send_button = styles.split(".composer-dock .dialog-command > .send-arrow {", 1)[1].split("}", 1)[0]
     assert 'class="send-arrow"' in home
     assert 'aria-label="发送消息"' in home
     assert '<span aria-hidden="true">↑</span>' in home
@@ -623,6 +723,30 @@ def test_newsroom_sent_message_and_send_control_use_compact_capsules():
     assert "height: 32px" in send_button
     assert "padding: 0" in send_button
     assert "border-radius: 999px" in send_button
+
+
+def test_newsroom_send_button_rules_do_not_collapse_slash_command_items():
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    assert ".composer-dock .dialog-command > .send-arrow" in styles
+    assert ".composer-dock .dialog-command button" not in styles
+    item = styles.split(".newsroom-shell .slash-command-item {", 1)[1].split("}", 1)[0]
+    assert "display: grid" in item
+    assert "width: 100%" in item
+
+
+def test_newsroom_structured_skill_results_share_editorial_theme_styles():
+    styles = (STATIC_DIR / "newsroom.css").read_text(encoding="utf-8")
+
+    for selector in (
+        ".change-digest-card",
+        ".coverage-compare-card",
+        ".schedule-confirmation-card",
+        ".skill-evidence-list",
+    ):
+        assert selector in styles
+    assert ".newsroom-shell.console-dark .change-digest-card" in styles
+    assert ".newsroom-mobile .change-digest-card" in styles
 
 
 def test_newsroom_center_keeps_a_continuous_surface_behind_composer_tail():
@@ -693,8 +817,9 @@ def test_chat_console_uses_harness_trace_compact_controls_and_latest_message_lay
     assert "data-mermaid-action=\"factcheck\"" in shared
     assert ".mermaid-viewer-dialog" in styles
     assert ".factcheck-workbench" in styles
-    assert 'name: "map"' in shared
-    assert "生成事件图谱" in shared
+    assert 'request("/api/skills")' in shared
+    assert 'outputKind: item.output_kind || "default_markdown"' in shared
+    assert "label: item.name || item.description || item.id" in shared
     assert 'language.toLowerCase() === "mermaid"' in shared
     assert "function sanitizeMermaidSource" in shared
     assert "normalizeRelatedResearchSteps" in shared

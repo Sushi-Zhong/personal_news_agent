@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -153,6 +153,16 @@ class FocusObject(BaseModel):
     text: str | None = None
 
 
+class EvidenceRef(BaseModel):
+    index: int = Field(ge=1)
+    title: str
+    url: str
+    source_id: str | None = None
+    published_at: datetime | None = None
+    origin: Literal["local", "elasticsearch", "native", "external", "builtin_web", "conversation", "topic"]
+    claim_role: Literal["supporting", "contradicting", "context", "baseline", "current", "repeated"] = "context"
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     turn_id: str | None = None
@@ -171,6 +181,9 @@ class ChatResponse(BaseModel):
     mind_map: dict[str, Any] | None = None
     attention_suggestion: dict[str, Any] | None = None
     skill_result: dict[str, Any] | None = None
+    status: Literal["success", "degraded", "blocked", "failed"] = "success"
+    output_kind: str = "default_markdown"
+    fallback_reason: str | None = None
 
 
 class ReportResponse(BaseModel):

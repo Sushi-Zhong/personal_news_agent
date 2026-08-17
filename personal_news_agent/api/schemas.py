@@ -130,6 +130,13 @@ class ScheduleCommandRequest(BaseModel):
     message: str
 
 
+class ScheduleConfirmationActionRequest(BaseModel):
+    user_id: str = "default"
+    conversation_id: str = Field(min_length=1, max_length=128)
+    confirmation_id: str = Field(min_length=8, max_length=96)
+    confirmation_token: str = Field(min_length=32, max_length=256)
+
+
 class DueTasksRequest(BaseModel):
     user_id: str = "default"
     limit: int = Field(default=10, ge=1, le=50)

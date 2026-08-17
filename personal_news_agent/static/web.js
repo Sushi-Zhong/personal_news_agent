@@ -209,7 +209,7 @@ function clearInvalidLocalSession() {
 async function refreshWeb() {
   setStatus("正在刷新数据。");
 
-  await Promise.all([
+  const refreshResults = await Promise.allSettled([
     loadSystemStatus(),
     loadSourceSummary(),
     loadFeedAndEvents(),
@@ -220,7 +220,11 @@ async function refreshWeb() {
   ]);
 
   await loadTopicView();
-  setStatus("已更新。");
+  if (refreshResults.some((result) => result.status === "rejected")) {
+    setStatus("专题已更新，部分数据稍后重试。");
+  } else {
+    setStatus("已更新。");
+  }
 }
 
 async function handleAssistantInput(message) {
@@ -316,7 +320,11 @@ async function handleAssistantInput(message) {
       return null;
     }
 
-    setAssistantTurnText(assistantNode, "可执行：/factcheck、/map、/report、/brief、/related、/schedule、/sources。");
+    if (await isPublicAssistantSkillCommand(command.name)) {
+      return sendChatIntoTurn(message, assistantNode);
+    }
+
+    setAssistantTurnText(assistantNode, "无法识别这个指令，请输入 / 查看可用技能。");
 
     return null;
   } catch (error) {
@@ -690,6 +698,7 @@ function startNewTopicConversation() {
   syncChatContext();
   syncContextDock();
   syncTaskTopic();
+  loadTopicView();
   document.querySelector("#message")?.focus();
 }
 
@@ -745,7 +754,7 @@ async function loadTopicView() {
     renderEvidence(payload.source_articles || []);
     renderInsightRail(payload);
   } catch (error) {
-    document.querySelector("[data-topic-visual]").textContent = error.message;
+    renderTopicLoadError(error, requestedTopic);
   }
 }
 
@@ -1149,6 +1158,35 @@ function renderReportCard(data) {
     <span>${escapeHtml(reportId)}</span>
     ${base ? `<div class="report-downloads"><a href="${base}&format=pdf" download>下载 PDF</a><a href="${base}&format=docx" download>下载 Word</a></div>` : ""}
   </div>`;
+}
+
+function renderTopicLoadError(error, topic) {
+  consoleState.topicPayload = null;
+  const label = topic || consoleState.topic || "当前专题";
+  const message = error?.message || "请求失败，请稍后重试。";
+  const heading = document.querySelector("[data-topic-heading]");
+  const summary = document.querySelector("[data-topic-summary]");
+  const visual = document.querySelector("[data-topic-visual]");
+  const dialogContext = document.querySelector("[data-dialog-context]");
+  if (heading) {
+    heading.textContent = label;
+    heading.title = label;
+  }
+  if (summary) summary.textContent = "专题内容暂时无法显示，请稍后刷新。";
+  if (dialogContext) {
+    dialogContext.textContent = `${label} · 专题内容暂时无法显示。`;
+    dialogContext.title = dialogContext.textContent;
+  }
+  if (visual) {
+    visual.dataset.view = consoleState.view || "event-line";
+    visual.innerHTML = `<div class="empty-state topic-load-error"><strong>专题内容暂时无法显示</strong><span>${escapeHtml(message)}</span></div>`;
+  }
+  document.querySelector("[data-topic-article-count]").textContent = "0";
+  document.querySelector("[data-topic-event-count]").textContent = "0";
+  document.querySelector("[data-topic-node-count]").textContent = "0";
+  renderEvidence([]);
+  renderInsightRail(null);
+  updateAgentBrief(null);
 }
 
 function renderTopicHeader(payload) {

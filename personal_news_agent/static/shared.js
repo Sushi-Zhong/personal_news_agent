@@ -104,7 +104,11 @@ async function request(path, options = {}) {
       ...fetchOptions,
       ...(controller ? { signal: controller.signal } : {}),
     });
-    if (!response.ok) throw new Error(await formatApiError(response));
+    if (!response.ok) {
+      const error = new Error(await formatApiError(response));
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   } catch (error) {
     if (controller?.signal.aborted) throw new Error(timeoutMessage);
@@ -940,7 +944,31 @@ async function copyTurnText(text) {
   textarea.remove();
 }
 
+const outputRenderers = {
+  default_markdown: renderDefaultMarkdownOutput,
+  fact_check: renderDefaultMarkdownOutput,
+  topic_report: renderDefaultMarkdownOutput,
+  news_brief: renderDefaultMarkdownOutput,
+  event_map: renderDefaultMarkdownOutput,
+  related_research: renderDefaultMarkdownOutput,
+  source_audit: renderDefaultMarkdownOutput,
+  schedule_result: renderDefaultMarkdownOutput,
+  schedule_confirmation: renderScheduleConfirmationOutput,
+  change_digest: renderChangeDigestOutput,
+  coverage_compare: renderCoverageCompareOutput,
+};
+let skillEvidenceRenderSequence = 0;
+
 function chatResponseHtml(data) {
+  const renderer = outputRenderers[data.output_kind] || outputRenderers.default_markdown;
+  try {
+    return renderer(data);
+  } catch (error) {
+    return outputRenderers.default_markdown({ ...data, output_kind: "default_markdown" });
+  }
+}
+
+function renderDefaultMarkdownOutput(data) {
   const trace = renderResearchTrace(data.research_trace || []);
   const mindMap = renderChatMindMapPlaceholder(data.mind_map);
   const isRelated = data.context_relation === "related_search"
@@ -962,6 +990,201 @@ function chatResponseHtml(data) {
     : "";
   return `${responseMeta}${assistantIdentityHtml("已完成本轮研究")}${mindMap}<div class="assistant-markdown">${answer}</div>${reportDownloads}${evidenceIndex}${factcheckEvidence}${timeline}${trace}`;
 }
+
+function renderScheduleConfirmationOutput(data) {
+  const payload = data.skill_result?.data || {};
+  const preview = payload.preview || {};
+  const confirmation = payload.confirmation || {};
+  const topics = (preview.topics || []).join("、") || "不限";
+  const categories = (preview.category_scope || []).join("、") || "不限";
+  const sections = (preview.report_sections || []).join("、") || "默认结构";
+  const status = confirmation.status === "history" ? "此确认已离开原始响应，请重新发起。" : "等待确认";
+  const card = `<section class="schedule-confirmation-card"
+      data-confirmation-id="${escapeAttr(confirmation.confirmation_id || "")}"
+      data-confirmation-token="${escapeAttr(confirmation.token || "")}"
+      data-conversation-id="${escapeAttr(data.conversation_id || "")}">
+    <header><strong>定时任务预览</strong><span data-schedule-confirmation-status>${escapeHtml(status)}</span></header>
+    <dl>
+      <div><dt>执行周期</dt><dd><code>${escapeHtml(preview.schedule || "-")}</code></dd></div>
+      <div><dt>应用时区</dt><dd>${escapeHtml(preview.timezone || "Asia/Shanghai")}</dd></div>
+      <div><dt>下次执行</dt><dd>${escapeHtml(preview.next_run_at || "-")}</dd></div>
+      <div><dt>主题</dt><dd>${escapeHtml(topics)}</dd></div>
+      <div><dt>板块</dt><dd>${escapeHtml(categories)}</dd></div>
+      <div><dt>报告结构</dt><dd>${escapeHtml(sections)}</dd></div>
+    </dl>
+    ${confirmation.token ? `<div class="schedule-confirmation-actions">
+      <button type="button" data-schedule-action="confirm" data-endpoint="${escapeAttr(confirmation.confirm_endpoint || "/api/tasks/schedule/confirm")}">确认创建</button>
+      <button type="button" data-schedule-action="cancel" data-endpoint="${escapeAttr(confirmation.cancel_endpoint || "/api/tasks/schedule/cancel")}">取消</button>
+    </div>` : ""}
+  </section>`;
+  return `${assistantIdentityHtml("等待操作确认")}<div class="assistant-markdown">${renderMarkdown(data.markdown || data.answer || "")}</div>${card}`;
+}
+
+function renderChangeDigestOutput(data) {
+  const payload = data.skill_result?.data || {};
+  const evidenceAnchorPrefix = skillEvidenceAnchorPrefix(data, "change");
+  const statusLabels = {
+    changed: "有实质变化",
+    no_material_change: "无实质变化",
+    insufficient: "证据不足",
+  };
+  const sections = [
+    renderChangeItems("新增事实", payload.new_facts, evidenceAnchorPrefix),
+    renderChangeItems("状态变化", payload.status_changes, evidenceAnchorPrefix),
+    renderChangeItems("数字变化", payload.number_changes, evidenceAnchorPrefix),
+    renderChangeItems("纠正与反转", payload.corrections, evidenceAnchorPrefix),
+  ].filter(Boolean).join("");
+  const repeated = (payload.repeated_reports || []).length
+    ? `<details class="change-repeated-reports"><summary>重复报道 ${(payload.repeated_reports || []).length} 条</summary>${renderChangeItems("重复或同稿", payload.repeated_reports, evidenceAnchorPrefix)}</details>`
+    : "";
+  const watchNext = (payload.watch_next || []).length
+    ? `<section><h4>接下来观察</h4><ul>${payload.watch_next.map((item) => `<li>${escapeHtml(typeof item === "string" ? item : item.text || "")}</li>`).join("")}</ul></section>`
+    : "";
+  const empty = payload.change_status === "no_material_change" && !sections
+    ? `<p class="change-empty-state">基线之后没有可确认的实质变化。</p>`
+    : "";
+  const degraded = data.status === "degraded"
+    ? `<p class="change-degraded-note">${escapeHtml(skillFallbackMessage(data.fallback_reason))}</p>`
+    : "";
+  return `${assistantIdentityHtml("变化核对完成")}<article class="change-digest-card">
+    <header><div><strong>${escapeHtml(payload.topic || "变化摘要")}</strong><p>${escapeHtml(payload.baseline_label || "")}</p></div><span>${escapeHtml(statusLabels[payload.change_status] || "待判断")}</span></header>
+    ${degraded}${empty}${sections}${repeated}${watchNext}${renderSkillEvidenceList(payload.evidence || data.evidence || [], evidenceAnchorPrefix)}
+  </article>`;
+}
+
+function renderChangeItems(label, items, evidenceAnchorPrefix) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return `<section class="change-digest-section"><h4>${escapeHtml(label)}</h4><ul>${items.map((item) => {
+    const text = typeof item === "string" ? item : item.text || item.title || item.reason || "";
+    const indices = Array.isArray(item?.evidence_indices) && item.evidence_indices.length
+      ? ` <span class="evidence-indices">证据 ${renderSkillEvidenceLinks(item.evidence_indices, evidenceAnchorPrefix)}</span>`
+      : "";
+    return `<li>${escapeHtml(text)}${indices}</li>`;
+  }).join("")}</ul></section>`;
+}
+
+function renderCoverageCompareOutput(data) {
+  const payload = data.skill_result?.data || {};
+  const evidenceAnchorPrefix = skillEvidenceAnchorPrefix(data, "compare");
+  const statusLabel = payload.comparison_status === "sufficient" ? "来源可比较" : "来源不足";
+  const sections = [
+    renderComparisonItems("共同确认", payload.common_facts, evidenceAnchorPrefix),
+    renderComparisonItems("独有说法", payload.unique_claims, evidenceAnchorPrefix),
+    renderComparisonItems("事实冲突", payload.conflicts, evidenceAnchorPrefix),
+    renderComparisonItems("叙事侧重", payload.framing_differences, evidenceAnchorPrefix),
+  ].filter(Boolean).join("");
+  const sourceGroups = Array.isArray(payload.source_groups) && payload.source_groups.length
+    ? `<details class="coverage-source-groups"><summary>来源分组 ${payload.source_groups.length} 组</summary><ul>${payload.source_groups.map((group) => `<li><strong>${escapeHtml(group.label || group.group_id || "来源组")}</strong> · ${escapeHtml(sourceGroupReasonLabel(group.reason))} · 证据 ${renderSkillEvidenceLinks(group.evidence_indices || [], evidenceAnchorPrefix)}</li>`).join("")}</ul></details>`
+    : "";
+  const missing = (payload.missing_questions || []).length
+    ? `<section><h4>仍待回答</h4><ul>${payload.missing_questions.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></section>`
+    : "";
+  const degraded = data.status === "degraded"
+    ? `<p class="coverage-degraded-note">${escapeHtml(skillFallbackMessage(data.fallback_reason))}</p>`
+    : "";
+  return `${assistantIdentityHtml("报道对比完成")}<article class="coverage-compare-card">
+    <header><strong>${escapeHtml(payload.topic || "报道对比")}</strong><span>${escapeHtml(statusLabel)}</span></header>
+    ${degraded}${sections || `<p class="coverage-empty-state">当前没有足够的可比较结论。</p>`}${sourceGroups}${missing}${renderSkillEvidenceList(payload.evidence || data.evidence || [], evidenceAnchorPrefix)}
+  </article>`;
+}
+
+function renderComparisonItems(label, items, evidenceAnchorPrefix) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return `<section class="coverage-compare-section"><h4>${escapeHtml(label)}</h4><ul>${items.map((item) => {
+    const text = typeof item === "string" ? item : item.text || item.claim || "";
+    const indices = Array.isArray(item?.evidence_indices) && item.evidence_indices.length
+      ? ` <span class="evidence-indices">证据 ${renderSkillEvidenceLinks(item.evidence_indices, evidenceAnchorPrefix)}</span>`
+      : "";
+    return `<li>${escapeHtml(text)}${indices}</li>`;
+  }).join("")}</ul></section>`;
+}
+
+function skillFallbackMessage(reason) {
+  const messages = {
+    agent_unavailable: "智能分析暂不可用，当前仅展示可验证信息。",
+    agent_output_invalid: "分析结果未通过校验，当前仅展示可验证信息。",
+    insufficient_evidence: "当前证据不足，暂时无法形成可靠判断。",
+    web_search_disabled: "当前仅使用本地证据，暂时无法形成可靠判断。",
+  };
+  return messages[reason] || "当前仅展示可验证信息。";
+}
+
+function sourceGroupReasonLabel(reason) {
+  const labels = {
+    same_publisher: "同一媒体",
+    syndicated_same_copy: "同稿转载",
+    independent_report: "独立报道",
+  };
+  return labels[reason] || "独立报道";
+}
+
+function skillEvidenceAnchorPrefix(data, kind) {
+  skillEvidenceRenderSequence += 1;
+  const identity = data.turn_id || `${data.conversation_id || "conversation"}-${skillEvidenceRenderSequence}`;
+  return `${kind}-${identity}`.replace(/[^A-Za-z0-9_-]/g, "-");
+}
+
+function renderSkillEvidenceLinks(indices, evidenceAnchorPrefix) {
+  return indices.map((index) => `<a href="#${escapeAttr(evidenceAnchorPrefix)}-evidence-${escapeAttr(index)}">[${escapeHtml(index)}]</a>`).join(" ");
+}
+
+function renderSkillEvidenceList(items, evidenceAnchorPrefix) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return `<details class="skill-evidence-list"><summary>本轮证据 ${items.length} 条</summary><ol>${items.map((item) => {
+    const index = item.index || 1;
+    const title = item.title || item.url || `证据 ${index}`;
+    const content = item.url
+      ? `<a href="${escapeAttr(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(title)}</a>`
+      : escapeHtml(title);
+    return `<li id="${escapeAttr(evidenceAnchorPrefix)}-evidence-${escapeAttr(index)}"><span>[${escapeHtml(index)}]</span> ${content}</li>`;
+  }).join("")}</ol></details>`;
+}
+
+async function handleScheduleConfirmationAction(button) {
+  const card = button.closest(".schedule-confirmation-card");
+  if (!card) return;
+  const confirmation = {
+    confirmation_id: card.dataset.confirmationId || "",
+    token: card.dataset.confirmationToken || "",
+  };
+  if (!confirmation.token) return;
+  const buttons = Array.from(card.querySelectorAll("[data-schedule-action]"));
+  buttons.forEach((item) => { item.disabled = true; });
+  const status = card.querySelector("[data-schedule-confirmation-status]");
+  if (status) status.textContent = button.dataset.scheduleAction === "confirm" ? "正在创建…" : "正在取消…";
+  try {
+    const result = await request(button.dataset.endpoint, {
+      method: "POST",
+      body: JSON.stringify({
+        user_id: activeUserId || "default",
+        conversation_id: card.dataset.conversationId,
+        confirmation_id: confirmation.confirmation_id,
+        confirmation_token: confirmation.token,
+      }),
+    });
+    if (status) {
+      status.textContent = result.confirmation_status === "confirmed"
+        ? `任务已创建${result.task?.id ? `：${result.task.id}` : ""}`
+        : "已取消，不会创建任务";
+    }
+    card.dataset.confirmationToken = "";
+  } catch (error) {
+    if (status) status.textContent = error.message || "确认操作失败，请重新发起。";
+    const terminalStatuses = new Set([403, 404, 409, 410]);
+    if (terminalStatuses.has(Number(error.status))) {
+      card.dataset.confirmationToken = "";
+    } else {
+      buttons.forEach((item) => { item.disabled = false; });
+    }
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-schedule-action]");
+  if (!button) return;
+  event.preventDefault();
+  handleScheduleConfirmationAction(button);
+});
 
 function renderReportDownloads(data) {
   const result = data?.skill_result || {};
@@ -2036,36 +2259,41 @@ function bindAskButtons() {
   });
 }
 
-const assistantSlashCommands = [
-  {
-    name: "factcheck",
-    label: "事实核查",
-  },
-  {
-    name: "report",
-    label: "生成专题报告",
-  },
-  {
-    name: "brief",
-    label: "生成新闻简报",
-  },
-  {
-    name: "related",
-    label: "查找相关新闻",
-  },
-  {
-    name: "map",
-    label: "生成事件图谱",
-  },
-  {
-    name: "schedule",
-    label: "创建定时报告",
-  },
-  {
-    name: "sources",
-    label: "审计新闻来源",
-  },
-];
+let assistantSlashCommands = [];
+let assistantSkillsReady = null;
+
+async function loadAssistantSkills() {
+  try {
+    const data = await request("/api/skills");
+    assistantSlashCommands = (data.items || [])
+      .filter((item) => item.exposure === "public" && Array.isArray(item.commands) && item.commands.length)
+      .map((item) => ({
+        name: String(item.commands[0]).replace(/^\//, ""),
+        label: item.name || item.description || item.id,
+        description: item.description || "",
+        aliases: item.aliases || [],
+        sideEffect: item.side_effect || "read_only",
+        confirmationRequired: Boolean(item.confirmation_required),
+        outputKind: item.output_kind || "default_markdown",
+      }));
+  } catch (error) {
+    assistantSlashCommands = [];
+    document.querySelectorAll(".slash-command-menu").forEach((menu) => {
+      menu.hidden = true;
+    });
+  }
+}
+
+assistantSkillsReady = loadAssistantSkills();
+
+async function isPublicAssistantSkillCommand(name) {
+  await assistantSkillsReady;
+  const token = `/${String(name || "").replace(/^\//, "").toLowerCase()}`;
+  return assistantSlashCommands.some((command) =>
+    `/${command.name.toLowerCase()}` === token
+      || command.aliases.some((alias) => String(alias).toLowerCase() === token),
+  );
+}
 
 function bindSlashCommandMenu(inputSelector = "#message") {
   const input = document.querySelector(inputSelector);
@@ -2102,7 +2330,9 @@ function bindSlashCommandMenu(inputSelector = "#message") {
     }
     const query = value.slice(1).toLowerCase();
     visibleCommands = assistantSlashCommands.filter((command) =>
-      `${command.name} ${command.label}`.toLowerCase().includes(query),
+      `${command.name} ${command.label} ${command.description} ${command.aliases.join(" ")}`
+        .toLowerCase()
+        .includes(query),
     );
     if (!visibleCommands.length) {
       closeMenu();
@@ -2121,8 +2351,9 @@ function bindSlashCommandMenu(inputSelector = "#message") {
     else input.removeAttribute("aria-activedescendant");
   };
 
-  input.addEventListener("input", () => {
+  input.addEventListener("input", async () => {
     activeIndex = -1;
+    await assistantSkillsReady;
     renderMenu();
   });
   input.addEventListener("keydown", (event) => {

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Literal, Protocol
+
+from personal_news_agent.core.models import EvidenceRef
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,15 @@ class SkillResult:
     title: str
     message: str
     data: dict[str, Any] = field(default_factory=dict)
+    skill_id: str = ""
+    status: Literal["success", "degraded", "blocked", "failed"] = "success"
+    output_kind: str = "default_markdown"
+    evidence: tuple[EvidenceRef, ...] = ()
+    fallback_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.skill_id:
+            object.__setattr__(self, "skill_id", self.command.removeprefix("/").replace("-", "_"))
 
 
 class Skill(Protocol):

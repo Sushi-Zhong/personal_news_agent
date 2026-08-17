@@ -1011,7 +1011,7 @@ def test_check_skill_is_not_registered_or_shown_in_command_menu():
     assert 'name: "check"' not in shared_source
     assert "可执行：/check" not in web_source
     assert "可执行：/check" not in mobile_source
-    assert "20260813-mermaid-light-1" in home_source
+    assert "20260814-ui-fix-3" in home_source
     assert "styles.css?v=20260811-topic-pulse-6" in home_html
     assert "shared.js?v=20260810-phone-controls-2" in mobile_html
 
@@ -2544,7 +2544,7 @@ def test_chat_executes_factcheck_skill_with_local_agent(services):
     assert "下一步核查" in response.answer
 
 
-def test_factcheck_skill_always_uses_direct_web_search(services):
+def test_factcheck_skill_offline_with_insufficient_local_evidence_is_degraded(services):
     _, store, _ = services
     search = RecordingSearchService()
     factcheck = FactCheckService(store, search, local_agent=FakeFailingLocalAgent())
@@ -2566,8 +2566,40 @@ def test_factcheck_skill_always_uses_direct_web_search(services):
 
     assert response.context_relation == "skill:/factcheck"
     assert search.calls[0]["include_remote"] is False
-    assert search.external_calls
-    assert any("外部搜索工具返回 1 条" in note for note in response.skill_result["data"]["source_notes"])
+    assert search.external_calls == []
+    assert response.status == "degraded"
+    assert response.fallback_reason == "web_search_disabled"
+    assert response.skill_result["data"]["research_mode"] == "local_only"
+    assert any("未请求外部搜索工具" in note for note in response.skill_result["data"]["source_notes"])
+
+
+def test_factcheck_skill_offline_with_sufficient_local_evidence_is_success(services):
+    registry, store, _ = services
+    search = RecordingSearchService()
+    runtime = FakeProjectSkillCCRuntime()
+    factcheck = FactCheckService(store, search, cc_runtime=runtime)
+    chat = NewsChatService(
+        store,
+        search,
+        skill_registry=build_default_registry(),
+        services={"factcheck": factcheck, "registry": registry},
+    )
+
+    response = asyncio.run(
+        chat.chat(
+            "factcheck_local_only_conv",
+            "/factcheck AI Agent 产品更新带动开发工具竞争 --category tech",
+            user_id="default",
+            allow_web_search=False,
+        )
+    )
+
+    assert runtime.last_kwargs["allow_web_search"] is False
+    assert search.external_calls == []
+    assert response.status == "success"
+    assert response.fallback_reason is None
+    assert response.skill_result["data"]["research_mode"] == "local_only"
+    assert response.skill_result["data"]["verdict"] == "supported"
 
 
 def test_factcheck_prefers_cc_project_skill_and_maps_url_evidence(services):
@@ -3440,8 +3472,10 @@ class FakeProjectSkillCCRuntime:
 
     def __init__(self):
         self.skill_names = None
+        self.last_kwargs = None
 
     async def run(self, **kwargs):
+        self.last_kwargs = kwargs
         self.skill_names = kwargs.get("skill_names")
         trace = {
             "stage": "本地新闻引擎",

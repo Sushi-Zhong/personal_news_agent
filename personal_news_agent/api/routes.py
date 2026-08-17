@@ -26,6 +26,7 @@ from personal_news_agent.api.schemas import (
     RegisterRequest,
     ReportRequest,
     ScheduleCommandRequest,
+    ScheduleConfirmationActionRequest,
     TaskEnabledRequest,
     SearchRequest,
     TaskRequest,
@@ -40,7 +41,10 @@ from personal_news_agent.config import Settings
 from personal_news_agent.core.categories import CATEGORIES
 from personal_news_agent.services.auth import AuthError
 from personal_news_agent.services.report_export import export_report
+from personal_news_agent.services.schedule_confirmation import ConfirmationError
 from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL
+from personal_news_agent.skills.catalog import all_definitions
+from personal_news_agent.skills.manifest import public_projection
 
 
 FRONTEND_REVISION = "20260811-topic-pulse-6"
@@ -113,6 +117,16 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             "items": services["model_options"](),
             "default_model": DEFAULT_LOGICAL_MODEL,
             "endpoint_configured": bool(settings.llm_endpoint),
+        }
+
+    @app.get("/api/skills")
+    async def list_public_skills() -> dict[str, Any]:
+        return {
+            "items": [
+                public_projection(definition)
+                for definition in all_definitions()
+                if definition.enabled and definition.exposure == "public" and definition.commands
+            ]
         }
 
     @app.get("/api/sources")
@@ -568,6 +582,43 @@ def register_routes(app: FastAPI, services: dict[str, Any], static_dir: Path, se
             return await services["tasks"].create_from_schedule_message(payload.user_id, payload.message)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/tasks/schedule/confirm")
+    async def confirm_schedule_task(payload: ScheduleConfirmationActionRequest) -> dict[str, Any]:
+        try:
+            return await services["schedule_confirmation"].confirm(
+                user_id=payload.user_id,
+                conversation_id=payload.conversation_id,
+                confirmation_id=payload.confirmation_id,
+                token=payload.confirmation_token,
+                create=lambda task_payload: services["tasks"].create_from_schedule_preview(
+                    task_payload,
+                    user_id=payload.user_id,
+                    original_message=str(task_payload.get("raw_task_description") or "自然语言定时任务确认"),
+                ),
+            )
+        except ConfirmationError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/tasks/schedule/cancel")
+    async def cancel_schedule_task(payload: ScheduleConfirmationActionRequest) -> dict[str, Any]:
+        try:
+            return await services["schedule_confirmation"].cancel(
+                user_id=payload.user_id,
+                conversation_id=payload.conversation_id,
+                confirmation_id=payload.confirmation_id,
+                token=payload.confirmation_token,
+            )
+        except ConfirmationError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
 
     @app.get("/api/tasks")
     async def list_tasks(user_id: str = "default", limit: int = Query(default=50, ge=1, le=100)) -> dict[str, Any]:

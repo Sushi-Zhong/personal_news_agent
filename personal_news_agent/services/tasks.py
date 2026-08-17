@@ -16,9 +16,9 @@ from personal_news_agent.services.cc_runtime import SCHEDULED_NEWS_TASK_SKILL_NA
 from personal_news_agent.services.llm import LLMClient
 from personal_news_agent.services.reports import ReportGenerationService
 from personal_news_agent.services.store import NewsStore
+from personal_news_agent.services.time_context import DEFAULT_APP_TIMEZONE, application_timezone
 
 
-LOCAL_TZ = datetime.now().astimezone().tzinfo
 CRON_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
 SCHEDULED_PUSH_CONVERSATION_KIND = "scheduled_push"
 SCHEDULED_PUSH_CONVERSATION_TITLE = "Scheduled Push"
@@ -73,6 +73,7 @@ class ScheduledTaskService:
         cc_runtime: Any | None = None,
         prompt_path: Path | None = None,
         task_prompt_path: Path | None = None,
+        app_timezone: Any | None = None,
     ):
         self.store = store
         self.reports = reports
@@ -82,16 +83,65 @@ class ScheduledTaskService:
         self.cc_runtime = cc_runtime
         self.prompt_path = prompt_path or Path(__file__).resolve().parents[1] / "prompts" / "scheduled_push_summary.md"
         self.task_prompt_path = task_prompt_path or Path(__file__).resolve().parents[1] / "prompts" / "scheduled_task_parsing.md"
+        self.app_timezone = app_timezone or application_timezone(DEFAULT_APP_TIMEZONE)
 
     def create_task(self, payload: dict) -> dict:
+        if "timezone" in payload:
+            raise ValueError("task-level timezone is not supported in V1")
         if "task_type" not in payload or "schedule" not in payload:
             raise ValueError("task_type and schedule are required")
         if payload["task_type"] not in {"daily_digest", "weekly_digest", "topic_tracking", "scheduled_push"}:
             raise ValueError("task_type must be daily_digest, weekly_digest, topic_tracking or scheduled_push")
         normalized = {**payload, "schedule": normalize_schedule(payload["schedule"])}
         normalized["delivery_channel"] = normalized.get("delivery_channel") or "in_app"
-        normalized["next_run_at"] = next_run_at(normalized["schedule"])
+        normalized["next_run_at"] = next_run_at(normalized["schedule"], app_timezone=self.app_timezone)
         return self.store.create_task(normalized)
+
+    async def prepare_schedule_preview(
+        self,
+        user_id: str,
+        message: str,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        *,
+        base: datetime | None = None,
+    ) -> dict[str, Any]:
+        preview, _ = await self.prepare_schedule_preview_bundle(
+            user_id,
+            message,
+            on_trace=on_trace,
+            base=base,
+        )
+        return preview
+
+    async def prepare_schedule_preview_bundle(
+        self,
+        user_id: str,
+        message: str,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        *,
+        base: datetime | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        api_params = await self.extract_schedule_task_api_params(user_id, message, on_trace=on_trace)
+        payload = api_params.model_dump(mode="json")
+        schedule = normalize_schedule(payload["schedule"])
+        payload["schedule"] = schedule
+        workflow = payload.get("parsed_workflow") or {}
+        report_style = workflow.get("report_style") or {}
+        preview = {
+            "task_type": payload["task_type"],
+            "schedule": schedule,
+            "timezone": getattr(self.app_timezone, "key", DEFAULT_APP_TIMEZONE),
+            "next_run_at": next_run_at(schedule, base=base, app_timezone=self.app_timezone),
+            "topics": payload.get("topics") or [],
+            "category_scope": payload.get("category_scope") or [],
+            "source_scope": payload.get("source_scope") or [],
+            "output_style": payload.get("output_style") or "通用专题早报",
+            "delivery_channel": payload.get("delivery_channel") or "in_app",
+            "intent_summary": workflow.get("intent_summary") or "",
+            "report_sections": report_style.get("sections") or [],
+            "raw_task_description": payload.get("raw_task_description") or message,
+        }
+        return preview, payload
 
     async def create_from_schedule_message(
         self,
@@ -106,12 +156,58 @@ class ScheduledTaskService:
             if on_trace:
                 await on_trace(item)
 
-        api_params = await self.extract_schedule_task_api_params(user_id, message, on_trace=emit)
+        _, payload = await self.prepare_schedule_preview_bundle(user_id, message, on_trace=emit)
+        return await self._create_from_schedule_preview(
+            payload,
+            user_id=user_id,
+            original_message=message,
+            emit=emit,
+            trace=trace,
+        )
+
+    async def create_from_schedule_preview(
+        self,
+        task_payload: dict[str, Any],
+        user_id: str,
+        original_message: str,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        trace: list[dict[str, Any]] = []
+
+        async def emit(item: dict[str, Any]) -> None:
+            trace.append(item)
+            if on_trace:
+                await on_trace(item)
+
+        return await self._create_from_schedule_preview(
+            task_payload,
+            user_id=user_id,
+            original_message=original_message,
+            emit=emit,
+            trace=trace,
+        )
+
+    async def _create_from_schedule_preview(
+        self,
+        task_payload: dict[str, Any],
+        *,
+        user_id: str,
+        original_message: str,
+        emit: Callable[[dict[str, Any]], Awaitable[None]],
+        trace: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        api_params = ScheduledTaskApiParams.model_validate(task_payload)
+        if api_params.user_id != user_id:
+            raise ValueError("schedule preview user does not match confirmation user")
         payload = api_params.model_dump(mode="json")
-        task = self.create_task(payload)
-        await emit({"stage": "任务落库", "status": "completed", "message": f"任务 {task['id']} 已保存。"})
         conversation = self.store.get_or_create_conversation(user_id, SCHEDULED_PUSH_CONVERSATION_KIND, SCHEDULED_PUSH_CONVERSATION_TITLE)
         await emit({"stage": "推送对话", "status": "completed", "message": f"将推送到 {conversation['title']}。"})
+        task = self.create_task(payload)
+        try:
+            await emit({"stage": "任务落库", "status": "completed", "message": f"任务 {task['id']} 已保存。"})
+        except Exception:
+            # Task persistence is the commit point; trace transport must not make a confirmed action retryable.
+            pass
         topic = _task_topic(task)
         answer = (
             f"已创建定时推送任务：每天/周期按 `{task['schedule']}` 执行。\n\n"
@@ -121,15 +217,33 @@ class ScheduledTaskService:
             f"- 推送对话：{conversation['title']}\n\n"
             "到点后系统会先抓取/召回相关新闻，再生成专题摘要并追加到这个对话。"
         )
-        turn_id = self.store.save_turn(
-            conversation["id"],
-            message,
-            answer,
-            [],
-            {"type": "scheduled_task", "target_id": task["id"], "text": topic},
-            user_id=user_id,
-            payload={"type": "scheduled_task_created", "task": task, "api_params": payload},
-        )
+        completion_warnings: list[str] = []
+        try:
+            turn_id = self.store.save_turn(
+                conversation["id"],
+                original_message,
+                answer,
+                [],
+                {"type": "scheduled_task", "target_id": task["id"], "text": topic},
+                user_id=user_id,
+                payload={"type": "scheduled_task_created", "task": task, "api_params": payload},
+            )
+        except Exception as exc:
+            turn_id = None
+            completion_warnings.append("history_write_failed")
+            try:
+                self.store.log(
+                    "scheduled_task_history",
+                    "degraded",
+                    task["id"],
+                    {"error_type": type(exc).__name__},
+                )
+            except Exception:
+                pass
+            try:
+                await emit({"stage": "推送对话", "status": "warning", "message": "任务已创建，但创建记录暂未写入对话历史。"})
+            except Exception:
+                pass
         return {
             "status": "ok",
             "task": task,
@@ -138,6 +252,7 @@ class ScheduledTaskService:
             "answer": answer,
             "api_params": payload,
             "research_trace": trace,
+            "completion_warnings": completion_warnings,
         }
 
     async def extract_schedule_task_api_params(
@@ -159,7 +274,7 @@ class ScheduledTaskService:
                 categories = ", ".join(f"{key}={label}" for key, label in CATEGORIES.items())
                 result = await self.cc_runtime.run(
                     message=(
-                        f"用户ID：{user_id}\n当前日期：{datetime.now(LOCAL_TZ).date().isoformat()}\n"
+                        f"用户ID：{user_id}\n当前日期：{datetime.now(self.app_timezone).date().isoformat()}\n"
                         f"可用板块：{categories}\n原始任务描述：{message}\n"
                         "请输出可直接传给定时任务 API 的 JSON 参数。"
                     ),
@@ -201,7 +316,7 @@ class ScheduledTaskService:
             return fallback
         try:
             raw = await self.llm_client.structured(
-                _schedule_task_parse_messages(self.task_prompt_path, user_id, message),
+                _schedule_task_parse_messages(self.task_prompt_path, user_id, message, self.app_timezone),
                 "scheduled_task_api_params",
                 ScheduledTaskApiParams.model_json_schema(),
             )
@@ -233,7 +348,7 @@ class ScheduledTaskService:
             category_scope=task.get("category_scope") or [],
             report_type=task["task_type"],
         )
-        next_at = next_run_at(task["schedule_cron"])
+        next_at = next_run_at(task["schedule_cron"], app_timezone=self.app_timezone)
         self.store.mark_task_run(task_id, next_run_at=next_at)
         notification = self.store.create_notification(
             user_id=task["user_id"],
@@ -326,7 +441,7 @@ class ScheduledTaskService:
                 "ingest": ingest_payload or {},
             },
         )
-        next_at = next_run_at(task["schedule_cron"])
+        next_at = next_run_at(task["schedule_cron"], app_timezone=self.app_timezone)
         self.store.mark_task_run(task_id, next_run_at=next_at)
         notification = self.store.create_notification(
             user_id=task["user_id"],
@@ -453,10 +568,11 @@ def normalize_schedule(value: str) -> str:
     return schedule
 
 
-def next_run_at(schedule: str, base: datetime | None = None) -> str:
+def next_run_at(schedule: str, base: datetime | None = None, app_timezone: Any | None = None) -> str:
     fields = _parse_cron(schedule)
+    app_timezone = app_timezone or application_timezone(DEFAULT_APP_TIMEZONE)
     base_utc = base.astimezone(timezone.utc) if base else datetime.now(timezone.utc)
-    candidate = base_utc.astimezone(LOCAL_TZ).replace(second=0, microsecond=0) + timedelta(minutes=1)
+    candidate = base_utc.astimezone(app_timezone).replace(second=0, microsecond=0) + timedelta(minutes=1)
     for _ in range(366 * 24 * 60):
         if _matches_cron(candidate, fields):
             return candidate.astimezone(timezone.utc).isoformat()
@@ -575,11 +691,11 @@ def _schedule_api_params_from_fallback(user_id: str, message: str) -> ScheduledT
     )
 
 
-def _schedule_task_parse_messages(prompt_path: Path, user_id: str, message: str) -> list[dict[str, str]]:
+def _schedule_task_parse_messages(prompt_path: Path, user_id: str, message: str, app_timezone: Any) -> list[dict[str, str]]:
     categories = "\n".join(f"- {key}: {label}" for key, label in CATEGORIES.items())
     user = (
         f"用户ID：{user_id}\n"
-        f"当前日期：{datetime.now(LOCAL_TZ).date().isoformat()}\n"
+        f"当前日期：{datetime.now(app_timezone).date().isoformat()}\n"
         f"可用板块：\n{categories}\n\n"
         f"原始任务描述：{message}\n\n"
         "请输出可直接传给 POST /api/tasks 的标准参数。"
@@ -814,7 +930,12 @@ def _topic_from_schedule_text(text: str) -> str:
         if match:
             return _clean_topic(match.group(1))
     cleaned = re.sub(r"^(帮我|请|定时|每天|每日|每周|早晨|早上|上午|下午|晚上|\d{1,2}点|\d{1,2}:\d{1,2})+", "", text)
-    cleaned = cleaned.replace("收集", "").replace("总结成一个专题发给我", "").replace("并总结成一个专题发给我", "")
+    cleaned = (
+        cleaned.replace("收集", "")
+        .replace("推送", "")
+        .replace("总结成一个专题发给我", "")
+        .replace("并总结成一个专题发给我", "")
+    )
     return _clean_topic(cleaned)
 
 

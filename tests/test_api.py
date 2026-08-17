@@ -45,6 +45,123 @@ def test_chat_request_defaults_to_cc_with_web_search():
     assert related.allow_web_search is True
 
 
+def test_api_skills_returns_only_enabled_public_projection(app):
+    with TestClient(app) as client:
+        response = client.get("/api/skills")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    ids = {item["id"] for item in items}
+    assert {"brief", "factcheck", "map", "report", "schedule", "changed", "compare"} <= ids
+    assert not {"related", "sources", "news-conversation-research"} & ids
+    assert all(item["exposure"] == "public" for item in items)
+    assert all(item["commands"] for item in items)
+    assert all("handler" not in item for item in items)
+    assert all("agent_skill" not in item for item in items)
+    assert all("required_services" not in item for item in items)
+    assert all("fallback_policy" not in item for item in items)
+
+
+def test_natural_language_schedule_requires_confirmation_and_is_idempotent(app):
+    with TestClient(app) as client:
+        before = client.get("/api/tasks?user_id=schedule-confirm-user").json()["items"]
+        response = client.post(
+            "/api/chat",
+            json={
+                "conversation_id": "schedule-confirm-conv",
+                "user_id": "schedule-confirm-user",
+                "message": "每天早上9点给我推送 AI Agent 新闻",
+                "use_llm": False,
+                "allow_web_search": False,
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "blocked"
+        assert body["output_kind"] == "schedule_confirmation"
+        data = body["skill_result"]["data"]
+        assert data["preview"]["schedule"] == "0 9 * * *"
+        assert data["preview"]["timezone"] == "Asia/Shanghai"
+        confirmation = data["confirmation"]
+        assert confirmation["status"] == "pending"
+        assert confirmation["token"]
+        assert client.get("/api/tasks?user_id=schedule-confirm-user").json()["items"] == before
+
+        action = {
+            "user_id": "schedule-confirm-user",
+            "conversation_id": "schedule-confirm-conv",
+            "confirmation_id": confirmation["confirmation_id"],
+            "confirmation_token": confirmation["token"],
+        }
+        confirmed = client.post("/api/tasks/schedule/confirm", json=action)
+        replay = client.post("/api/tasks/schedule/confirm", json=action)
+
+        assert confirmed.status_code == 200
+        assert confirmed.json()["confirmation_status"] == "confirmed"
+        assert confirmed.json()["replayed"] is False
+        assert replay.status_code == 200
+        assert replay.json()["replayed"] is True
+        assert replay.json()["task"]["id"] == confirmed.json()["task"]["id"]
+        after = client.get("/api/tasks?user_id=schedule-confirm-user").json()["items"]
+        assert len(after) == len(before) + 1
+
+
+def test_natural_language_schedule_can_be_cancelled_without_creating_task(app):
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "conversation_id": "schedule-cancel-conv",
+                "user_id": "schedule-cancel-user",
+                "message": "每周一上午8点汇总芯片新闻",
+                "use_llm": False,
+                "allow_web_search": False,
+            },
+        ).json()
+        confirmation = response["skill_result"]["data"]["confirmation"]
+        action = {
+            "user_id": "schedule-cancel-user",
+            "conversation_id": "schedule-cancel-conv",
+            "confirmation_id": confirmation["confirmation_id"],
+            "confirmation_token": confirmation["token"],
+        }
+
+        cancelled = client.post("/api/tasks/schedule/cancel", json=action)
+        replay = client.post("/api/tasks/schedule/cancel", json=action)
+
+        assert cancelled.status_code == 200
+        assert cancelled.json() == {"confirmation_status": "cancelled", "replayed": False}
+        assert replay.json() == {"confirmation_status": "cancelled", "replayed": True}
+        assert client.get("/api/tasks?user_id=schedule-cancel-user").json()["items"] == []
+
+
+def test_schedule_confirmation_token_is_not_persisted_in_turn_history(app):
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "conversation_id": "schedule-history-conv",
+                "user_id": "schedule-history-user",
+                "message": "每天早上9点给我推送 AI Agent 新闻",
+                "use_llm": False,
+                "allow_web_search": False,
+            },
+        ).json()
+        token = response["skill_result"]["data"]["confirmation"]["token"]
+
+        turns = client.app.state.services["store"].list_turns(
+            "schedule-history-conv",
+            "schedule-history-user",
+            limit=10,
+        )
+        serialized = str(turns)
+
+        assert token not in serialized
+        assert turns[0]["response"]["skill_result"]["data"]["confirmation"]["status"] == "history"
+        assert "token" not in turns[0]["response"]["skill_result"]["data"]["confirmation"]
+
+
 def test_api_health_and_main_routes(app):
     with TestClient(app) as client:
         store = client.app.state.services["store"]

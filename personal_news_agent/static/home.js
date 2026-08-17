@@ -1,5 +1,5 @@
 (function () {
-  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260813-mermaid-light-1";
+  const assetVersion = new URLSearchParams(window.location.search).get("v") || "20260814-ui-fix-3";
   const mobileQuery = window.matchMedia("(max-width: 1024px)");
   const mode = mobileQuery.matches ? "mobile" : "web";
   const template = document.querySelector(`#${mode}Template`);

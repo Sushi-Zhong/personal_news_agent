@@ -27,18 +27,6 @@ NEWS_TOPIC_REPORT_SKILL_NAME = "news-topic-report"
 NEWS_DAILY_BRIEF_SKILL_NAME = "news-daily-brief"
 NEWS_SOURCE_AUDIT_SKILL_NAME = "news-source-audit"
 SCHEDULED_NEWS_TASK_SKILL_NAME = "scheduled-news-task"
-ALLOWED_PROJECT_SKILLS = frozenset(
-    {
-        FACTCHECK_SKILL_NAME,
-        HOT_EVENT_MAP_SKILL_NAME,
-        NEWS_CONVERSATION_RESEARCH_SKILL_NAME,
-        NEWS_RELATED_EXPLORATION_SKILL_NAME,
-        NEWS_TOPIC_REPORT_SKILL_NAME,
-        NEWS_DAILY_BRIEF_SKILL_NAME,
-        NEWS_SOURCE_AUDIT_SKILL_NAME,
-        SCHEDULED_NEWS_TASK_SKILL_NAME,
-    }
-)
 DISALLOWED_BUILTIN_TOOLS = [
     "AskUserQuestion",
     "Bash",
@@ -52,6 +40,14 @@ DISALLOWED_BUILTIN_TOOLS = [
     "WebSearch",
     "Write",
 ]
+
+
+def allowed_project_skills() -> frozenset[str]:
+    # Import lazily because catalog handlers refer back to the public skill-name constants above.
+    from personal_news_agent.skills.catalog import all_definitions
+    from personal_news_agent.skills.manifest import enabled_agent_skills
+
+    return enabled_agent_skills(all_definitions())
 
 
 class CCRuntimeError(RuntimeError):
@@ -626,7 +622,7 @@ def _validated_skill_names(skill_names: list[str] | None) -> list[str]:
         name = str(raw_name or "").strip()
         if not name or name in selected:
             continue
-        if name not in ALLOWED_PROJECT_SKILLS:
+        if name not in allowed_project_skills():
             raise ValueError(f"Unsupported project skill: {name}")
         selected.append(name)
     return selected

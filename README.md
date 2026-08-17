@@ -268,7 +268,7 @@ source .env.ext
 python3 scripts/run_task_loop.py --limit 10 --idle-seconds 30
 ```
 
-聊天里输入 `/schedule 帮我定时每天早晨9点收集关于AI Agent的新闻，并总结成一个专题发给我` 会创建 `scheduled_push` 任务。主线流程是：LLM 先把自然语言抽取成标准任务参数（`schedule`、`topics`、`category_scope`、`output_style`、`parsed_workflow` 等），服务端规范化后调用 `create_task` 入库。`scheduled_tasks` 会保存 owner/user、cron、创建时间、原始任务描述和解析后的任务流程。到期后 runner 会抓取/召回相关新闻，生成专题摘要，并追加到该用户固定的 `Scheduled Push` 对话。
+聊天里显式输入 `/schedule 帮我定时每天早晨9点收集关于AI Agent的新闻，并总结成一个专题发给我` 会兼容旧行为并立即创建 `scheduled_push` 任务。普通自然语言“每天早上 9 点推送 AI 新闻”会先返回预览与确认卡片，确认前不落库；确认 token 仅保存在当前 API 进程内、15 分钟有效，并绑定用户和会话。主线流程会把自然语言抽取成标准任务参数（`schedule`、`topics`、`category_scope`、`output_style`、`parsed_workflow` 等），统一按 `PNA_APP_TIMEZONE`（默认 `Asia/Shanghai`）计算 cron 和下次执行时间。到期后 runner 会抓取/召回相关新闻，生成专题摘要，并追加到该用户固定的 `Scheduled Push` 对话。
 
 发现的 URL 会先去除 fragment 和常见追踪参数，再按 canonical URL 去重。正文入库时还会按内容 hash 做第二层去重。抓取结果会返回 `saved_articles`、`duplicate_articles`、`skipped_articles` 和各 worker 的执行记录。
 
@@ -443,7 +443,7 @@ export TAVILY_TRUST_ENV=0
 ```
 
 聊天研究链路默认启用联网：每个普通对话由 CC 加载通用新闻研究 Skill，先检索本地新闻，再至少调用一次 CC 自带 `WebSearch` 核对最新外部信息。若用户手动关闭“联网回答”，本轮严格只使用本地证据；后台自动热点聚合也保持离线，不消耗联网额度。
-`/factcheck 待核查说法` 由 CC 加载项目级事实核查 Skill，先查本地新闻引擎，再用 CC 自带 `WebSearch` 做多源核验，并将结果去重后交给 DeepSeek V4 Flash 统一汇总和判定。搜索失败时会明确回退，不会伪装成已完成联网核查。
+`/factcheck 待核查说法` 由 CC 加载项目级事实核查 Skill，并严格遵守本轮“联网回答”开关。联网开启时可结合本地新闻和 `WebSearch` 多源核验；联网关闭时外部 provider、CC 应用 web tool 和内建 `WebSearch` 都不会调用，只基于本地证据给出 `local_only` 结果。搜索失败或本地证据不足时会明确降级，不会伪装成完整联网核查。
 `TAVILY_TRUST_ENV=0` 默认忽略系统代理；只有确认本机 HTTP/SOCKS 代理可供 `httpx` 使用时才改为 `1`。
 
 检查后端：
@@ -464,9 +464,13 @@ curl http://127.0.0.1:8000/api/news/search/backend
 
 - `news-conversation-research`：承接每个普通提问和追问，以自然对话开场，并按事件需要组织现状、人物、时间线、争议、影响和后续观察章节；
 - `news-fact-check`：拆分原子命题、区分直接/间接证据并输出保守判定；
-- `hot-event-map`：检索主体、时间线、因果与影响关系，输出受限且可渲染的 Mermaid 图谱。
+- `hot-event-map`：检索主体、时间线、因果与影响关系，输出受限且可渲染的 Mermaid 图谱；
+- `news-daily-brief`、`news-topic-report`、`news-related-exploration`、`news-source-audit`：分别支持简报、专题报告、相关新闻和来源审计；
+- `scheduled-news-task`：把定时资讯请求解析为受校验的任务参数；
+- `news-change-digest`：只基于基线/当前 evidence ledger 判断实质变化；
+- `news-coverage-compare`：合并同稿分发后区分共同事实、独有说法、事实冲突与叙事侧重。
 
-前端命令分别为 `/factcheck <说法>` 和 `/map <热点事件>`。用户可见执行过程只展示“本地新闻引擎”和“外部搜索工具”等产品级步骤，不显示具体存储或检索实现。
+网页公开命令由 `GET /api/skills` 动态生成，包括 `/brief`、`/factcheck`、`/map`、`/report`、`/changed`、`/compare` 和高级 `/schedule`。`/related` 保留为文章/事件上下文操作，`/sources` 保留为管理入口；所有旧命令与别名继续可手动输入。用户可见执行过程只展示“本地新闻引擎”和“外部搜索工具”等产品级步骤，不显示具体存储或检索实现。
 
 自动热点聚合也优先由 CC 执行：后台每 15 分钟读取最近 24 小时标题窗口，将同一具体事件按文章 ID 合并，再由系统根据跨来源数量、最近 6 小时刷新次数与时效性计算热度。CC 聚合超时或输出不满足约束时立即退回已有的确定性推荐，不阻塞抓取进程。
 

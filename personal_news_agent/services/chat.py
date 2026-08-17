@@ -28,6 +28,7 @@ from personal_news_agent.services.cc_runtime import (
     NEWS_RELATED_EXPLORATION_SKILL_NAME,
 )
 from personal_news_agent.services.model_config import DEFAULT_LOGICAL_MODEL, SHARED_RUNTIME_MODEL, get_model_option
+from personal_news_agent.services.skill_router import SkillRoute, SkillRoutingContext
 from personal_news_agent.services.search import (
     UnifiedSearchService,
     search_result_matches_subject,
@@ -131,6 +132,7 @@ class NewsChatService:
         local_agent: LocalAgentService | None = None,
         cc_runtime: Any | None = None,
         skill_registry: Any | None = None,
+        skill_router: Any | None = None,
         services: dict[str, Any] | None = None,
     ):
         self.store = store
@@ -145,6 +147,7 @@ class NewsChatService:
         self.local_agent = local_agent or LocalAgentService()
         self.cc_runtime = cc_runtime
         self.skill_registry = skill_registry
+        self.skill_router = skill_router
         self.services = services or {}
         self.topic_drift_notice = TOPIC_DRIFT_NOTICE
 
@@ -166,14 +169,19 @@ class NewsChatService:
         if moderation_response:
             self._save_response_turn(moderation_response, message, user_id, save_topic, category_scope)
             return moderation_response
-        skill_response = await self._skill_response(conv_id, message, user_id, topic, category_scope, allow_web_search)
+        skill_response = await self._route_and_execute_skill(
+            conv_id,
+            message,
+            user_id,
+            topic,
+            category_scope,
+            allow_web_search=allow_web_search,
+            model_key=model_key,
+            use_llm=use_llm,
+        )
         if skill_response:
             self._save_response_turn(skill_response, message, user_id, save_topic, category_scope)
             return skill_response
-        schedule_response = await self._schedule_command_response(conv_id, user_id, message)
-        if schedule_response:
-            self._save_response_turn(schedule_response, message, user_id, save_topic, category_scope)
-            return schedule_response
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         ordinal = extract_ordinal(message) if not topic_response else None
         if topic_response:
@@ -496,47 +504,47 @@ class NewsChatService:
             self._save_response_turn(moderation_response, message, user_id, save_topic, category_scope)
             yield {"type": "final", "response": moderation_response.model_dump(mode="json")}
             return
-        if message.strip().startswith("/") and self.skill_registry:
-            skill_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        skill_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
-            async def emit_skill_trace(item: dict[str, Any]) -> None:
-                await skill_queue.put({"type": "trace", "item": item})
+        async def emit_skill_trace(item: dict[str, Any]) -> None:
+            await skill_queue.put({"type": "trace", "item": item})
 
-            async def run_skill() -> None:
-                try:
-                    response = await self._skill_response(
-                        conv_id,
-                        message,
-                        user_id,
-                        topic,
-                        category_scope,
-                        allow_web_search,
-                        emit_skill_trace,
-                    )
-                    if response:
-                        self._save_response_turn(response, message, user_id, save_topic, category_scope)
-                        await skill_queue.put({"type": "final", "response": response.model_dump(mode="json")})
-                    else:
-                        await skill_queue.put({"type": "error", "message": "Skill 未返回结果。"})
-                except Exception as exc:
-                    await skill_queue.put({"type": "error", "message": str(exc)})
-
-            skill_task = asyncio.create_task(run_skill())
+        async def run_skill() -> None:
             try:
-                while True:
-                    event = await skill_queue.get()
+                response = await self._route_and_execute_skill(
+                    conv_id,
+                    message,
+                    user_id,
+                    topic,
+                    category_scope,
+                    allow_web_search=allow_web_search,
+                    model_key=model_key,
+                    use_llm=use_llm,
+                    on_trace=emit_skill_trace,
+                )
+                await skill_queue.put({"type": "skill_result", "response": response})
+            except Exception as exc:
+                await skill_queue.put({"type": "error", "message": str(exc)})
+
+        skill_task = asyncio.create_task(run_skill())
+        skill_response: ChatResponse | None = None
+        try:
+            while True:
+                event = await skill_queue.get()
+                if event["type"] == "trace":
                     yield event
-                    if event["type"] in {"final", "error"}:
-                        break
-            finally:
-                if not skill_task.done():
-                    skill_task.cancel()
-            return
-        schedule_response = await self._schedule_command_response(conv_id, user_id, message)
-        if schedule_response:
-            self._save_response_turn(schedule_response, message, user_id, save_topic, category_scope)
-            yield {"type": "trace", "item": {"stage": "定时任务", "status": "completed", "message": schedule_response.context_relation}}
-            yield {"type": "final", "response": schedule_response.model_dump(mode="json")}
+                    continue
+                if event["type"] == "error":
+                    yield event
+                    return
+                skill_response = event["response"]
+                break
+        finally:
+            if not skill_task.done():
+                skill_task.cancel()
+        if skill_response:
+            self._save_response_turn(skill_response, message, user_id, save_topic, category_scope)
+            yield {"type": "final", "response": skill_response.model_dump(mode="json")}
             return
         topic_response = await self._topic_agent_response(conv_id, user_id, message)
         if topic_response:
@@ -615,6 +623,92 @@ class NewsChatService:
             if not task.done():
                 task.cancel()
 
+    async def _route_and_execute_skill(
+        self,
+        conversation_id: str,
+        message: str,
+        user_id: str,
+        topic: str | None,
+        category_scope: list[str] | None,
+        *,
+        allow_web_search: bool,
+        model_key: str,
+        use_llm: bool,
+        on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> ChatResponse | None:
+        if not self.skill_registry:
+            return None
+        if self.skill_router:
+            route = await self.skill_router.route(
+                message,
+                context=SkillRoutingContext(
+                    topic=topic,
+                    category_scope=category_scope or [],
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                ),
+                model_key=model_key,
+                use_llm=use_llm,
+            )
+        elif message.strip().startswith("/"):
+            route = SkillRoute(skill_id=None, confidence=1.0, source="slash_command")
+        else:
+            return None
+        if route.source == "fallback" and not route.skill_id:
+            return None
+        if route.confirmation_required and route.source != "slash_command":
+            if route.skill_id != "schedule":
+                return None
+            preview, task_payload = await self.scheduled_tasks.prepare_schedule_preview_bundle(
+                user_id,
+                str(route.arguments.get("raw_request") or message),
+                on_trace=on_trace,
+            )
+            ticket = await self.services["schedule_confirmation"].issue(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                preview=preview,
+                task_payload=task_payload,
+            )
+            answer = "已解析为会创建任务的操作，请确认预览后再执行。"
+            return ChatResponse(
+                conversation_id=conversation_id,
+                answer=answer,
+                markdown=answer,
+                context_relation="skill_confirmation_required",
+                status="blocked",
+                output_kind="schedule_confirmation",
+                focus_object=FocusObject(type="skill", text=route.skill_id or "schedule"),
+                required_context_items=["schedule_preview", "explicit_confirmation"],
+                skill_result={
+                    "skill_id": route.skill_id,
+                    "command": "/schedule",
+                    "status": "blocked",
+                    "output_kind": "schedule_confirmation",
+                    "data": {
+                        "preview": preview,
+                        "confirmation": {
+                            "confirmation_id": ticket.confirmation_id,
+                            "token": ticket.token,
+                            "status": ticket.status,
+                            "expires_at": ticket.expires_at.isoformat(),
+                            "confirm_endpoint": "/api/tasks/schedule/confirm",
+                            "cancel_endpoint": "/api/tasks/schedule/cancel",
+                        },
+                    },
+                },
+            )
+        return await self._skill_response(
+            conversation_id,
+            message,
+            user_id,
+            topic,
+            category_scope,
+            allow_web_search,
+            on_trace,
+            route=route,
+        )
+
     async def _skill_response(
         self,
         conversation_id: str,
@@ -624,9 +718,10 @@ class NewsChatService:
         category_scope: list[str] | None = None,
         allow_web_search: bool = False,
         on_trace: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        route: SkillRoute | None = None,
     ) -> ChatResponse | None:
         text = message.strip()
-        if not text.startswith("/") or not self.skill_registry:
+        if (not text.startswith("/") and route is None) or not self.skill_registry:
             return None
         topic, category_scope = self._skill_context_from_turns(conversation_id, text, user_id, topic, category_scope)
         command = text.split(maxsplit=1)[0].lower()
@@ -639,18 +734,20 @@ class NewsChatService:
                 }
             )
         try:
-            result = await self.skill_registry.execute(
-                text,
-                SkillContext(
-                    services=self.services,
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    topic=topic,
-                    category_scope=category_scope,
-                    allow_web_search=allow_web_search,
-                    on_trace=on_trace,
-                ),
+            skill_context = SkillContext(
+                services=self.services,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                topic=topic,
+                category_scope=category_scope,
+                allow_web_search=allow_web_search,
+                on_trace=on_trace,
             )
+            if route and route.source != "slash_command" and route.skill_id:
+                result = await self.skill_registry.execute_structured(route.skill_id, route.arguments, skill_context)
+            else:
+                execute_text = getattr(self.skill_registry, "execute_text", None)
+                result = await (execute_text or self.skill_registry.execute)(text, skill_context)
         except ValueError as exc:
             answer = str(exc)
             return ChatResponse(
@@ -683,6 +780,7 @@ class NewsChatService:
             for item in (payload.get("recommendations") or [])
             if isinstance(item, dict)
         ]
+        result_evidence = [item.model_dump(mode="json") for item in result.evidence]
         return ChatResponse(
             conversation_id=conversation_id,
             answer=answer,
@@ -694,16 +792,24 @@ class NewsChatService:
             required_context_items=payload.get("required_context_items") or ["skill_registry"],
             recommendations=recommendations,
             research_trace=payload.get("research_trace") or [],
-            evidence=payload.get("evidence") or [],
+            evidence=payload.get("evidence") or result_evidence,
             expanded_queries=payload.get("expanded_queries") or [],
             event_line=payload.get("event_line"),
             mind_map=payload.get("mind_map"),
             skill_result={
+                "skill_id": result.skill_id,
                 "command": result.command,
                 "title": result.title,
                 "message": result.message,
+                "status": result.status,
+                "output_kind": result.output_kind,
+                "fallback_reason": result.fallback_reason,
+                "evidence": result_evidence,
                 "data": payload,
             },
+            status=result.status,
+            output_kind=result.output_kind,
+            fallback_reason=result.fallback_reason,
         )
 
     async def _general_chat(
@@ -904,39 +1010,6 @@ class NewsChatService:
             event_line=view.get("event_line"),
         )
 
-    async def _schedule_command_response(self, conversation_id: str, user_id: str, message: str) -> ChatResponse | None:
-        if not self.scheduled_tasks or not str(message or "").strip().startswith("/schedule"):
-            return None
-        try:
-            result = await self.scheduled_tasks.create_from_schedule_message(user_id=user_id, message=message)
-        except ValueError as exc:
-            answer = f"定时任务没有创建成功：{exc}"
-            return ChatResponse(
-                conversation_id=conversation_id,
-                answer=answer,
-                markdown=answer,
-                context_relation="scheduled_push_invalid",
-                focus_object=FocusObject(type="scheduled_task", text="/schedule"),
-                required_context_items=["schedule_command"],
-                research_trace=[{"stage": "定时任务解析", "status": "error", "message": str(exc)}],
-            )
-        task = result["task"]
-        scheduled_conversation = result["conversation"]
-        answer = result["answer"]
-        return ChatResponse(
-            conversation_id=conversation_id,
-            answer=answer,
-            markdown=answer,
-            context_relation="scheduled_push_created",
-            focus_object=FocusObject(type="scheduled_task", target_id=task["id"], text=(task.get("topics") or [""])[0]),
-            required_context_items=["scheduled_task", "scheduled_push_conversation"],
-            research_trace=[
-                {"stage": "定时任务解析", "status": "completed", "message": f"已解析为 cron：{task['schedule']}"},
-                {"stage": "任务落库", "status": "completed", "message": f"任务 {task['id']} 已保存。"},
-                {"stage": "推送对话", "status": "completed", "message": f"将推送到 {scheduled_conversation['title']}。"},
-            ],
-        )
-
     def _topic_create_is_pending(self, conversation_id: str, user_id: str) -> bool:
         last = self.store.last_turn(conversation_id, user_id=user_id)
         response = (last or {}).get("response") or {}
@@ -1102,6 +1175,16 @@ class NewsChatService:
                 response.focus_object.text if response.focus_object and response.focus_object.type == "topic" else None
             )
         resolved_categories = response.category_scope or request_categories or []
+        persisted_response = response.model_dump(mode="json")
+        if response.output_kind == "schedule_confirmation" and response.skill_result:
+            confirmation = (
+                persisted_response.get("skill_result", {})
+                .get("data", {})
+                .get("confirmation")
+            )
+            if isinstance(confirmation, dict):
+                confirmation.pop("token", None)
+                confirmation["status"] = "history"
         turn_id = self.store.save_turn(
             response.conversation_id,
             message,
@@ -1109,12 +1192,13 @@ class NewsChatService:
             [item.model_dump(mode="json") for item in response.recommendations],
             response.focus_object.model_dump(mode="json") if response.focus_object else None,
             user_id=user_id,
-            response=response.model_dump(mode="json"),
+            response=persisted_response,
             topic=resolved_topic,
             category_scope=resolved_categories,
         )
         response.turn_id = turn_id
-        self.store.update_turn_response(turn_id, user_id, response.model_dump(mode="json"))
+        persisted_response["turn_id"] = turn_id
+        self.store.update_turn_response(turn_id, user_id, persisted_response)
         return turn_id
 
     async def _news_search(

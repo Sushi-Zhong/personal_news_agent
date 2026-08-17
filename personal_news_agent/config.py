@@ -29,6 +29,7 @@ EXT_ROOT = Path(os.getenv("PERSONAL_NEWS_EXT_ROOT", "/Volumes/ext"))
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "Personal News Agent"
+    app_timezone: str = os.getenv("PNA_APP_TIMEZONE", "Asia/Shanghai")
     database_url: str = os.getenv("PERSONAL_NEWS_DB", f"sqlite:///{BASE_DIR / 'personal_news.db'}")
     sources_path: Path = Path(os.getenv("PERSONAL_NEWS_SOURCES", BASE_DIR / "sources.yaml"))
     seed_demo_data: bool = os.getenv("PERSONAL_NEWS_SEED_DEMO", "1") == "1"
@@ -202,6 +203,11 @@ class Settings:
     wechat_redirect_uri: str | None = os.getenv("WECHAT_REDIRECT_URI")
     wechat_login_mode: str = os.getenv("WECHAT_LOGIN_MODE", "website")
     ext_root: Path = EXT_ROOT
+
+    def __post_init__(self) -> None:
+        from personal_news_agent.services.time_context import application_timezone
+
+        application_timezone(self.app_timezone)
 
     @property
     def sqlite_path(self) -> Path:

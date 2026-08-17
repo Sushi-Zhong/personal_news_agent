@@ -1,0 +1,4 @@
+interface:
+  display_name: "新闻报道对比"
+  short_description: "合并同稿分发，区分共同事实、独有说法、冲突与叙事差异"
+  default_prompt: "Use $news-coverage-compare to compare the supplied independent source groups."
